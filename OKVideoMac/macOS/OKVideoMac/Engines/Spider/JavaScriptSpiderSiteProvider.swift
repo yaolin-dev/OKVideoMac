@@ -3675,6 +3675,9 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
     }
 
     private static func userFacingBridgeError(_ message: String) -> String {
+        if message.contains("ProviderDetailUnavailableAfterRecovery") {
+            return "源站仍未返回影片详情，已尝试恢复源入口。请稍后重试或检查该源的网络连接；观看记录和进度已保留。"
+        }
         if message.localizedCaseInsensitiveContains("end of input") {
             return "站点返回空响应，上游接口可能暂时不可用"
         }
@@ -6184,8 +6187,8 @@ actor AndroidRuntimeStartupSingleFlight {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.50"
-    static let bridgeVersionCode = 62
+    static let bridgeVersion = "0.3.54"
+    static let bridgeVersionCode = 66
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"

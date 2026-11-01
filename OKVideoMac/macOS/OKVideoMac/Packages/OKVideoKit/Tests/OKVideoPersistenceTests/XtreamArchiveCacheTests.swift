@@ -25,7 +25,19 @@ final class XtreamArchiveCacheTests: XCTestCase {
             configurationRevision: "fixture", at: anchor, demandRevision: UUID(), fetch: {
                 XCTFail("Short EPG must retain its own cached entry"); return full
             })
-        XCTAssertEqual(unchanged.items.first?.current?.title, "Short")
+        // A newer full guide with current coverage is intentionally preferred
+        // by Now/Next, without overwriting the separate short-guide entry.
+        XCTAssertEqual(unchanged.items.first?.current?.title, "Archive 0")
+        let refreshed = try await repository.loadXtream(key: key, accountIdentity: "account", serverIdentity: "server",
+            configurationRevision: "fixture", at: anchor, demandRevision: UUID(), force: true, fetch: { short })
+        XCTAssertEqual(refreshed.items.first?.current?.title, "Short")
+        let stillFull = try await repository.loadXtreamWindow(key: key, accountIdentity: "account", serverIdentity: "server",
+            configurationRevision: "fixture", from: anchor, to: anchor.addingTimeInterval(12 * 3600),
+            demandRevision: UUID(), archive: true, fetch: {
+                XCTFail("Short refresh must not replace the full archive cache"); return short
+            })
+        XCTAssertEqual(stillFull.page.records.count, 12)
+        XCTAssertEqual(stillFull.page.records.first?.title, "Archive 0")
         _ = await repository.close()
     }
 }

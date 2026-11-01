@@ -63,6 +63,13 @@ final class XMLTVDelegate: NSObject, XMLParserDelegate {
 
     private let defaultTimeZone: TimeZone?
     private let dateFormatters: [DateFormatter]
+    // A guide repeats the same broadcast times across many channels. Keep this
+    // cache local to one parse (and its time zone), with bounded keys and count.
+    private var dateCache: [String: Date] = [:]
+    private var dateCacheKeys: [String] = []
+    private var dateCacheCursor = 0
+    static let maximumCachedDates = 4_096
+    var cachedDateCount: Int { dateCache.count }
     private var currentChannelID: String?
     private var currentProgramme: ProgrammeBuilder?
     private var currentElement = ""
@@ -201,8 +208,19 @@ final class XMLTVDelegate: NSObject, XMLParserDelegate {
     private func parseDateValue(_ value: String) -> Date? {
         let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return nil }
+        if let cached = dateCache[normalized] { return cached }
         for formatter in dateFormatters {
             if let date = formatter.date(from: normalized) {
+                if normalized.utf8.count <= 128 {
+                    if dateCacheKeys.count < Self.maximumCachedDates {
+                        dateCacheKeys.append(normalized)
+                    } else {
+                        dateCache.removeValue(forKey: dateCacheKeys[dateCacheCursor])
+                        dateCacheKeys[dateCacheCursor] = normalized
+                        dateCacheCursor = (dateCacheCursor + 1) % Self.maximumCachedDates
+                    }
+                    dateCache[normalized] = date
+                }
                 return date
             }
         }

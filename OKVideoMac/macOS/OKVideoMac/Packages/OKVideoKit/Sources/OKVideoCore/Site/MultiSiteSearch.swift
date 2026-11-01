@@ -102,19 +102,24 @@ public struct MultiSiteSearchSnapshot: Equatable, Sendable {
     public var maximumRetainedCandidates: Int
     public var maximumResultsPerSite: Int
     public var didDiscardCandidates: Bool
+    /// Earliest page to replay after an explicit budget expansion. Existing
+    /// candidates without page provenance conservatively replay from page one.
+    public var deferredPages: [String: Int]
 
     public init(
         items: [VideoSummary],
         receivedCandidateCount: Int,
         maximumRetainedCandidates: Int,
         maximumResultsPerSite: Int,
-        didDiscardCandidates: Bool
+        didDiscardCandidates: Bool,
+        deferredPages: [String: Int] = [:]
     ) {
         self.items = items
         self.receivedCandidateCount = receivedCandidateCount
         self.maximumRetainedCandidates = maximumRetainedCandidates
         self.maximumResultsPerSite = maximumResultsPerSite
         self.didDiscardCandidates = didDiscardCandidates
+        self.deferredPages = deferredPages
     }
 }
 
@@ -274,6 +279,7 @@ private enum SearchMatchTier: Int, Comparable, Sendable {
 }
 
 private struct RetainedSearchCandidate: Sendable {
+    let page: Int
     var item: VideoSummary
     var tier: SearchMatchTier
     var arrivalOrder: Int
@@ -286,10 +292,10 @@ private struct SearchCandidatePool: Sendable {
 
     private var candidates: [String: RetainedSearchCandidate] = [:]
     private var siteCounts: [String: Int] = [:]
-    private var seenCandidateIDs: Set<String> = []
     private var nextArrivalOrder = 0
     private(set) var receivedCandidateCount = 0
     private(set) var didDiscardCandidates = false
+    private var deferredPages: [String: Int] = [:]
 
     init(
         keyword: String,
@@ -307,20 +313,23 @@ private struct SearchCandidatePool: Sendable {
             receivedCandidateCount: receivedCandidateCount,
             maximumRetainedCandidates: maximumRetainedCandidates,
             maximumResultsPerSite: maximumResultsPerSite,
-            didDiscardCandidates: didDiscardCandidates
+            didDiscardCandidates: didDiscardCandidates,
+            deferredPages: deferredPages
         )
     }
 
-    mutating func ingest(_ items: [VideoSummary]) -> Bool {
+    mutating func ingest(_ items: [VideoSummary], page: Int = 1) -> Bool {
         let previousIDs = Set(candidates.keys)
         let wasDiscarding = didDiscardCandidates
+        let previousDeferred = deferredPages
 
         receivedCandidateCount += items.count
         for item in items {
             let candidateID = item.id
-            guard seenCandidateIDs.insert(candidateID).inserted else { continue }
+            guard candidates[candidateID] == nil else { continue }
 
             let candidate = RetainedSearchCandidate(
+                page: page,
                 item: item,
                 tier: Self.matchTier(title: item.title, keyword: keyword),
                 arrivalOrder: nextArrivalOrder
@@ -331,6 +340,13 @@ private struct SearchCandidatePool: Sendable {
 
         return previousIDs != Set(candidates.keys)
             || wasDiscarding != didDiscardCandidates
+            || previousDeferred != deferredPages
+    }
+
+    private mutating func deferCandidate(_ candidate: RetainedSearchCandidate) {
+        let key = candidate.item.siteKey
+        deferredPages[key] = min(deferredPages[key] ?? candidate.page, candidate.page)
+        didDiscardCandidates = true
     }
 
     func retainedCount(for siteKey: String) -> Int {
@@ -348,9 +364,10 @@ private struct SearchCandidatePool: Sendable {
             guard let worstSameSite = worstCandidateID(siteKey: siteKey),
                   let retained = candidates[worstSameSite],
                   incoming.tier > retained.tier else {
-                didDiscardCandidates = true
+                deferCandidate(incoming)
                 return
             }
+            deferCandidate(retained)
             removeCandidate(id: worstSameSite)
             insertCandidate(incoming, id: id)
             didDiscardCandidates = true
@@ -364,7 +381,7 @@ private struct SearchCandidatePool: Sendable {
 
         guard let worstID = worstCandidateID(),
               let worst = candidates[worstID] else {
-            didDiscardCandidates = true
+            deferCandidate(incoming)
             return
         }
         let worstSiteCount = siteCounts[worst.item.siteKey, default: 0]
@@ -372,10 +389,11 @@ private struct SearchCandidatePool: Sendable {
         let improvesDiversity = incoming.tier == worst.tier
             && incomingSiteCount + 1 < worstSiteCount
         guard improvesRelevance || improvesDiversity else {
-            didDiscardCandidates = true
+            deferCandidate(incoming)
             return
         }
 
+        deferCandidate(worst)
         removeCandidate(id: worstID)
         insertCandidate(incoming, id: id)
         didDiscardCandidates = true
@@ -514,7 +532,8 @@ public struct MultiSiteSearch {
         keyword: String,
         quick: Bool = false,
         providerPolicies: [String: MultiSiteSearchProviderPolicy] = [:],
-        onPage: (@Sendable (SearchPageProgress) async -> Void)? = nil
+        onPage: (@Sendable (SearchPageProgress) async -> Void)? = nil,
+        onAttempt: (@Sendable (SearchAttemptObservation) -> Void)? = nil
     ) -> AsyncStream<MultiSiteSearchEvent> {
         AsyncStream { continuation in
             let task = Task {
@@ -523,6 +542,7 @@ public struct MultiSiteSearch {
                 // unsupported protocol capability. The caller decides whether
                 // that site was explicitly re-enabled for this search.
                 let enabled = providers
+                let enqueuedAt = ProcessInfo.processInfo.systemUptime
                 var pool = SearchCandidatePool(
                     keyword: keyword,
                     maximumRetainedCandidates: maximumRetainedCandidates,
@@ -584,10 +604,10 @@ public struct MultiSiteSearch {
                             group.addTask {
                                 InitialPageResult(
                                     providerIndex: index,
-                                    outcome: await initialPageOutcome(
+                                    outcome: await observedInitialPage(
                                         provider: enabled[index],
                                         keyword: keyword,
-                                        quick: quick
+                                        quick: quick, enqueuedAt: enqueuedAt, onAttempt: onAttempt
                                     )
                                 )
                             }
@@ -764,10 +784,10 @@ public struct MultiSiteSearch {
                                 group.addTask {
                                     InitialPageResult(
                                         providerIndex: index,
-                                        outcome: await initialPageOutcome(
+                                        outcome: await observedInitialPage(
                                             provider: enabled[index],
                                             keyword: keyword,
-                                            quick: quick
+                                            quick: quick, enqueuedAt: enqueuedAt, onAttempt: onAttempt
                                         )
                                     )
                                 }
@@ -1010,6 +1030,28 @@ public struct MultiSiteSearch {
         }
     }
 
+    private func observedInitialPage(provider: SiteProvider, keyword: String, quick: Bool,
+                                     enqueuedAt: TimeInterval,
+                                     onAttempt: (@Sendable (SearchAttemptObservation) -> Void)?) async -> PageSearchOutcome {
+        let started = ProcessInfo.processInfo.systemUptime
+        let outcome = await initialPageOutcome(provider: provider, keyword: keyword, quick: quick)
+        let status: SearchAttemptStatus
+        let relevant: Bool
+        switch outcome {
+        case .page(let page, _):
+            status = .success
+            relevant = onAttempt != nil && SearchCandidatePool.hasMeaningfulMatch(in: page.items, keyword: keyword)
+        case .failure(let failure): status = failure.category == .timeout ? .timeout : .failure; relevant = false
+        case .deadlineReached: status = .timeout; relevant = false
+        case .cancelled: status = .cancelled; relevant = false
+        }
+        // Record the scheduler's timeout outcome even when the underlying
+        // provider finishes as cancellation.
+        onAttempt?(.init(siteKey: provider.site.key, elapsed: ProcessInfo.processInfo.systemUptime - started,
+                         queued: started - enqueuedAt, status: status, hasRelevantResults: relevant))
+        return outcome
+    }
+
     private func initialPageOutcome(
         provider: SiteProvider,
         keyword: String,
@@ -1186,11 +1228,12 @@ public struct MultiSiteSearch {
     }
 
     public static func merging(existing: [VideoSummary], incoming: [VideoSummary], keyword: String,
-                               maximumRetainedCandidates: Int, maximumResultsPerSite: Int) -> MultiSiteSearchSnapshot {
+                               maximumRetainedCandidates: Int, maximumResultsPerSite: Int,
+                               incomingPage: Int = 1) -> MultiSiteSearchSnapshot {
         var pool = SearchCandidatePool(keyword: keyword,
             maximumRetainedCandidates: maximumRetainedCandidates, maximumResultsPerSite: maximumResultsPerSite)
         _ = pool.ingest(existing)
-        _ = pool.ingest(incoming)
+        _ = pool.ingest(incoming, page: incomingPage)
         return pool.snapshot
     }
 

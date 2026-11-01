@@ -924,9 +924,11 @@ final class EPGCacheStore: @unchecked Sendable {
                         """, [.text(id), .text(id), .integer(Int64(remaining))])
                     channels = db.changes
                 }
-                let empty = try db.integer("SELECT COUNT(*) FROM programmes WHERE generation_id=?", [.text(id)]) == 0
-                    && db.integer("SELECT COUNT(*) FROM channel_aliases WHERE generation_id=?", [.text(id)]) == 0
-                    && db.integer("SELECT COUNT(*) FROM channels WHERE generation_id=?", [.text(id)]) == 0
+                // Existence is enough; counting the whole remaining generation
+                // after every 512-row deletion makes large backlogs quadratic.
+                let empty = try db.integer("SELECT EXISTS(SELECT 1 FROM programmes WHERE generation_id=?)", [.text(id)]) == 0
+                    && db.integer("SELECT EXISTS(SELECT 1 FROM channel_aliases WHERE generation_id=?)", [.text(id)]) == 0
+                    && db.integer("SELECT EXISTS(SELECT 1 FROM channels WHERE generation_id=?)", [.text(id)]) == 0
                 if empty {
                     let resource = try db.string("SELECT resource_id FROM generations WHERE id=?", [.text(id)])
                     try db.execute("DELETE FROM generations WHERE id=?", [.text(id)])

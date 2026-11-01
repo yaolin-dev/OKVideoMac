@@ -258,19 +258,21 @@ private struct InFlightImageLoad {
 
 actor ImageDataRepository {
     private let cacheDirectory: URL
+    private var diskCache: PosterDiskCache
     private let httpClient: HTTPClient
     private var inFlight: [URL: InFlightImageDataLoad] = [:]
     private var consumers: [URL: Set<UUID>] = [:]
 
     init(cacheDirectory: URL, httpClient: HTTPClient) throws {
         self.cacheDirectory = cacheDirectory
+        self.diskCache = PosterDiskCache(directory: cacheDirectory)
         self.httpClient = httpClient
-        try FileManager.default.createDirectory(
+        try? FileManager.default.createDirectory(
             at: cacheDirectory,
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try FileManager.default.setAttributes(
+        try? FileManager.default.setAttributes(
             [.posixPermissions: 0o700],
             ofItemAtPath: cacheDirectory.path
         )
@@ -280,6 +282,7 @@ actor ImageDataRepository {
         let identity = ImageCacheIdentity(url: url)
         let diskURL = cacheDirectory.appendingPathComponent(cacheKey(for: identity))
         if let data = try? Data(contentsOf: diskURL) {
+            diskCache.touch(diskURL)
             return LoadedImageData(data: data, origin: .disk)
         }
         if identity.rawValue != url.absoluteString {
@@ -287,7 +290,7 @@ actor ImageDataRepository {
                 legacyCacheKey(for: url)
             )
             if let data = try? Data(contentsOf: legacyDiskURL) {
-                try? persistMigratedData(data, at: diskURL)
+                diskCache.store(data, at: diskURL)
                 return LoadedImageData(data: data, origin: .disk)
             }
         }
@@ -409,17 +412,14 @@ actor ImageDataRepository {
         consumers.removeAll()
     }
 
-    func persistValidatedData(_ data: Data, for url: URL) throws {
+    func persistValidatedData(_ data: Data, for url: URL) {
         let identity = ImageCacheIdentity(url: url)
         let diskURL = cacheDirectory.appendingPathComponent(cacheKey(for: identity))
-        try data.write(to: diskURL, options: [.atomic])
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: diskURL.path
-        )
+        diskCache.store(data, at: diskURL)
     }
 
     func clear() throws {
+        defer { diskCache.reset() }
         let files = try FileManager.default.contentsOfDirectory(
             at: cacheDirectory,
             includingPropertiesForKeys: nil
@@ -439,13 +439,7 @@ actor ImageDataRepository {
         return digest.map { String(format: "%02x", $0) }.joined() + ".image"
     }
 
-    private func persistMigratedData(_ data: Data, at diskURL: URL) throws {
-        try data.write(to: diskURL, options: [.atomic])
-        try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: diskURL.path
-        )
-    }
+
 }
 
 struct PosterImageRequest: Hashable, Sendable {
@@ -462,26 +456,49 @@ struct PosterImageRequest: Hashable, Sendable {
 }
 
 enum PosterImagePriority: Int, Sendable {
-    case hero = -2, selected = -1, visible = 0, forward, reverse
+    case hero = -2, selected = -1, visible = 0, forward, reverse, passive
     var isImmediate: Bool { rawValue <= 0 }
 }
 
 struct PosterImageDemand: Equatable, Sendable, Comparable {
     let priority: PosterImagePriority
     let distance: Int
+    var readingOrder: Int = 0
 
     static func < (lhs: Self, rhs: Self) -> Bool {
+        if (lhs.priority == .passive) != (rhs.priority == .passive) { return rhs.priority == .passive }
         if lhs.priority.isImmediate || rhs.priority.isImmediate {
             if lhs.priority != rhs.priority { return lhs.priority.rawValue < rhs.priority.rawValue }
         }
         if lhs.distance != rhs.distance { return lhs.distance < rhs.distance }
-        return lhs.priority.rawValue < rhs.priority.rawValue
+        if lhs.priority != rhs.priority { return lhs.priority.rawValue < rhs.priority.rawValue }
+        return lhs.readingOrder < rhs.readingOrder
     }
 }
 
 private struct DecodedPoster: @unchecked Sendable {
     let image: CGImage
     let usedMainThread: Bool
+}
+
+struct PosterImageReservation: Sendable {
+    let request: PosterImageRequest
+    let consumer: UUID
+    var demand: PosterImageDemand
+}
+
+enum PosterImageRetryPolicy {
+    static func isTransient(_ error: Error) -> Bool {
+        if let error = error as? HTTPClientError {
+            switch error {
+            case .timeout: return true
+            case .statusCode(let code): return [500, 502, 503, 504].contains(code)
+            default: return false
+            }
+        }
+        if let error = error as? URLError { return [.timedOut, .networkConnectionLost].contains(error.code) }
+        return false
+    }
 }
 
 /// Two serial workers keep decode concurrency bounded without blocking a
@@ -510,6 +527,7 @@ actor PosterImagePipeline {
         let maximumQueued: Int
         let decoded: Int
         let decodedOnMain: Int
+        let decodeWorkers: Int
     }
     private struct Entry {
         var id: UUID
@@ -539,6 +557,7 @@ actor PosterImagePipeline {
     private var retiredConsumers: Set<UUID> = []
     private var retiredOrder: [UUID] = []
     private var sequence: UInt64 = 0
+    private var reservations: [UUID: PosterImageReservation] = [:]
     private var maximumActive = 0
     private var maximumQueued = 0
     private var decoded = 0
@@ -547,10 +566,17 @@ actor PosterImagePipeline {
 
     init(dataRepository: ImageDataRepository) { self.dataRepository = dataRepository }
 
+    func reserve(_ values: [PosterImageReservation]) {
+        for value in values where !retiredConsumers.contains(value.consumer) {
+            reservations[value.consumer] = value
+        }
+    }
+
     fileprivate func image(for request: PosterImageRequest, demand: PosterImageDemand, consumer: UUID) async throws -> DecodedPoster {
         return try await withTaskCancellationHandler(operation: {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { continuation in
+                reservations[consumer] = nil
                 if Task.isCancelled {
                     continuation.resume(throwing: CancellationError())
                     return
@@ -605,6 +631,7 @@ actor PosterImagePipeline {
 
     func update(consumer: UUID, request: PosterImageRequest, demand: PosterImageDemand, revision: UInt64) {
         guard !retiredConsumers.contains(consumer) else { return }
+        if reservations[consumer] != nil { reservations[consumer]?.demand = demand }
         guard var entry = entries[request], var value = entry.consumers[consumer] else {
             // An update may overtake the initial actor hop from the preheater.
             if revision > (pendingDemands[consumer]?.revision ?? 0) {
@@ -622,12 +649,14 @@ actor PosterImagePipeline {
     }
 
     func forget(consumer: UUID) {
+        reservations[consumer] = nil
         pendingDemands[consumer] = nil
         if retiredConsumers.insert(consumer).inserted { retiredOrder.append(consumer) }
         if retiredOrder.count > 256 {
             for old in retiredOrder.prefix(128) { retiredConsumers.remove(old) }
             retiredOrder.removeFirst(128)
         }
+        drain()
     }
 
     private func refreshRunning(for entry: Entry) {
@@ -641,12 +670,13 @@ actor PosterImagePipeline {
             if running[entry.id] != nil { running[entry.id]?.stopping = true }
         }
         entries.removeAll()
+        reservations.removeAll()
         pendingDemands.removeAll()
     }
 
     func stats() -> Stats {
         Stats(active: running.count, queued: entries.values.filter { $0.task == nil }.count,
-              maximumActive: maximumActive, maximumQueued: maximumQueued, decoded: decoded, decodedOnMain: decodedOnMain)
+              maximumActive: maximumActive, maximumQueued: maximumQueued, decoded: decoded, decodedOnMain: decodedOnMain, decodeWorkers: workers.count)
     }
 
     private func drain() {
@@ -667,10 +697,15 @@ actor PosterImagePipeline {
         }
         while running.count < 6 {
             let speculativeActive = running.values.filter { !$0.demand.priority.isImmediate }.count
-            guard let pair = entries.filter({ $0.value.task == nil && ($0.value.demand.priority.isImmediate || speculativeActive < 2) })
+            guard let pair = entries.filter({ $0.value.task == nil && $0.value.demand.priority != .passive && ($0.value.demand.priority.isImmediate || speculativeActive < 2) })
                 .min(by: { lhs, rhs in
                     lhs.value.demand == rhs.value.demand ? lhs.value.order < rhs.value.order : lhs.value.demand < rhs.value.demand
                 }) else { return }
+            // Reserve the entire viewport plan before consumers hop onto this
+            // actor. A late-arriving top-left consumer keeps its admission rank.
+            if reservations.values.contains(where: {
+                entries[$0.request]?.task == nil && $0.demand < pair.value.demand
+            }) { return }
             let request = pair.key
             var entry = pair.value
             let id = UUID()
@@ -680,21 +715,20 @@ actor PosterImagePipeline {
             workerIndex += 1
             running[id] = Running(request: request, demand: demand)
             maximumActive = max(maximumActive, running.count)
-            entry.task = Task { [dataRepository] in
+            entry.task = Task {
                 let result: Result<DecodedPoster, Error>
                 do {
-                    var loaded = try await dataRepository.data(for: request.url)
-                    try Task.checkCancellation()
-                    let image: DecodedPoster
-                    do { image = try await worker.decode(loaded.data, pixels: request.pixels) }
+                    do { result = .success(try await load(request, worker: worker)) }
                     catch {
-                        guard loaded.origin == .disk, !Task.isCancelled else { throw error }
-                        loaded = LoadedImageData(data: try await dataRepository.downloadedData(for: request.url), origin: .network)
-                        image = try await worker.decode(loaded.data, pixels: request.pixels)
+                        guard !Task.isCancelled, entries[request]?.id == id,
+                              entries[request]?.demand.priority.isImmediate == true,
+                              PosterImageRetryPolicy.isTransient(error) else { throw error }
+                        try await Task.sleep(nanoseconds: 600_000_000)
+                        try Task.checkCancellation()
+                        guard entries[request]?.id == id,
+                              entries[request]?.demand.priority.isImmediate == true else { throw CancellationError() }
+                        result = .success(try await load(request, worker: worker))
                     }
-                    try Task.checkCancellation()
-                    if loaded.origin == .network { try await dataRepository.persistValidatedData(loaded.data, for: request.url) }
-                    result = .success(image)
                 } catch { result = .failure(error) }
                 finish(request: request, id: id, result: result)
             }
@@ -709,6 +743,21 @@ actor PosterImagePipeline {
         entry.preempted = true
         entry.task?.cancel()
         entries[run.request] = entry
+    }
+
+    private func load(_ request: PosterImageRequest, worker: PosterDecodeWorker) async throws -> DecodedPoster {
+        var loaded = try await dataRepository.data(for: request.url)
+        try Task.checkCancellation()
+        let image: DecodedPoster
+        do { image = try await worker.decode(loaded.data, pixels: request.pixels) }
+        catch {
+            guard loaded.origin == .disk, !Task.isCancelled else { throw error }
+            loaded = LoadedImageData(data: try await dataRepository.downloadedData(for: request.url), origin: .network)
+            image = try await worker.decode(loaded.data, pixels: request.pixels)
+        }
+        try Task.checkCancellation()
+        if loaded.origin == .network { await dataRepository.persistValidatedData(loaded.data, for: request.url) }
+        return image
     }
 
     private func finish(request: PosterImageRequest, id: UUID, result: Result<DecodedPoster, Error>) {
@@ -747,12 +796,12 @@ final class ImageRepository: Sendable {
 
     @MainActor
     func posterImage(for request: PosterImageRequest, priority: PosterImagePriority = .visible,
-                     distance: Int = 0, consumer: UUID? = nil) async throws -> NSImage {
+                     distance: Int = 0, readingOrder: Int = 0, consumer: UUID? = nil) async throws -> NSImage {
         let token = consumer ?? UUID()
         defer { if let consumer { Task { await posterPipeline.forget(consumer: consumer) } } }
         if let cached = cachedPoster(for: request) { return cached }
         let decoded = try await posterPipeline.image(for: request,
-            demand: PosterImageDemand(priority: priority, distance: distance), consumer: token)
+            demand: PosterImageDemand(priority: priority, distance: distance, readingOrder: readingOrder), consumer: token)
         try Task.checkCancellation()
         if let cached = cachedPoster(for: request) { return cached }
         let image = NSImage(cgImage: decoded.image, size: NSSize(width: decoded.image.width, height: decoded.image.height))
@@ -763,11 +812,13 @@ final class ImageRepository: Sendable {
 
     func posterPipelineStats() async -> PosterImagePipeline.Stats { await posterPipeline.stats() }
 
+    func reservePosterDemands(_ values: [PosterImageReservation]) async { await posterPipeline.reserve(values) }
+
     @MainActor
     func updatePosterPriority(for request: PosterImageRequest, consumer: UUID,
-                              priority: PosterImagePriority, distance: Int, revision: UInt64) {
+                              priority: PosterImagePriority, distance: Int, readingOrder: Int = 0, revision: UInt64) {
         Task { await posterPipeline.update(consumer: consumer, request: request,
-            demand: PosterImageDemand(priority: priority, distance: distance), revision: revision) }
+            demand: PosterImageDemand(priority: priority, distance: distance, readingOrder: readingOrder), revision: revision) }
     }
 
     @MainActor
@@ -849,7 +900,7 @@ final class ImageRepository: Sendable {
             )
         }
         if loaded.origin == .network {
-            try await dataRepository.persistValidatedData(loaded.data, for: url)
+            await dataRepository.persistValidatedData(loaded.data, for: url)
         }
         memoryCache.insert(image, for: ImageCacheIdentity(url: url))
     }
@@ -959,6 +1010,7 @@ extension EnvironmentValues {
 struct PosterNativeRemoteImage: NSViewRepresentable {
     @Environment(\.imageRepository) private var repository
     @Environment(\.posterCardPriority) private var priority
+    @Environment(\.browserSurfaceVisible) private var surfaceVisible
     let request: PosterImageRequest
 
     func makeCoordinator() -> Coordinator { Coordinator() }
@@ -973,7 +1025,7 @@ struct PosterNativeRemoteImage: NSViewRepresentable {
 
     func updateNSView(_ view: NSImageView, context: Context) {
         context.coordinator.update(view: view, request: request,
-            repository: repository, priority: priority)
+            repository: repository, priority: priority, isActive: surfaceVisible)
     }
 
     static func dismantleNSView(_ view: NSImageView, coordinator: Coordinator) {
@@ -982,6 +1034,9 @@ struct PosterNativeRemoteImage: NSViewRepresentable {
 
     @MainActor
     final class Coordinator {
+        enum Phase { case idle, loading, loaded, failed }
+        private(set) var phase: Phase = .idle
+        private var retryRevision: UInt64 = 0
         private weak var view: NSView?
         private weak var repository: ImageRepository?
         private var request: PosterImageRequest?
@@ -989,9 +1044,15 @@ struct PosterNativeRemoteImage: NSViewRepresentable {
         private var generation: UInt64 = 0
 
         func update(view: NSView, request: PosterImageRequest,
-                    repository: ImageRepository?, priority: PosterImagePriority) {
-            guard self.view !== view || self.request != request ||
-                  self.repository !== repository else { return }
+                    repository: ImageRepository?, priority: PosterImagePriority, retryRevision: UInt64 = 0, isActive: Bool = true) {
+            guard isActive else { suspend(); return }
+            let unchanged = self.view === view && self.request == request && self.repository === repository
+            if unchanged, let cached = repository?.cachedPoster(for: request) {
+                show(cached); phase = .loaded
+                return
+            }
+            guard !unchanged || phase == .idle || (phase == .failed && self.retryRevision != retryRevision) else { return }
+            self.retryRevision = retryRevision
             task?.cancel()
             task = nil
             generation &+= 1
@@ -1001,7 +1062,9 @@ struct PosterNativeRemoteImage: NSViewRepresentable {
             self.repository = repository
             let cached = repository?.cachedPoster(for: request)
             show(cached)
+            phase = cached == nil ? .idle : .loaded
             guard cached == nil, let repository else { return }
+            phase = .loading
             task = Task { [weak self] in
                 do {
                     let image = try await repository.posterImage(for: request,
@@ -1011,12 +1074,17 @@ struct PosterNativeRemoteImage: NSViewRepresentable {
                           self.generation == currentGeneration,
                           self.request == request else { return }
                     self.show(image)
+                    self.phase = .loaded
                     self.task = nil
                 } catch {
-                    guard !Task.isCancelled, let self,
+                    guard let self,
                           self.generation == currentGeneration,
-                          self.request == request,
-                          !AsyncCancellationPolicy.isCancellation(error) else { return }
+                          self.request == request else { return }
+                    self.task = nil
+                    if Task.isCancelled || AsyncCancellationPolicy.isCancellation(error) {
+                        self.phase = .idle; return
+                    }
+                    self.phase = .failed
                     if let layerView = self.view as? PosterLayerImageView {
                         layerView.showFailure()
                     } else {
@@ -1036,7 +1104,17 @@ struct PosterNativeRemoteImage: NSViewRepresentable {
             }
         }
 
+        func suspend() {
+            guard task != nil else { return }
+            generation &+= 1
+            task?.cancel(); task = nil
+            phase = .idle
+            // Retain the displayed image and request; resume never flashes an
+            // empty placeholder merely because the window was covered.
+        }
+
         func cancel() {
+            phase = .idle
             generation &+= 1
             task?.cancel()
             task = nil
@@ -1054,6 +1132,7 @@ struct PosterNativeRemoteImage: NSViewRepresentable {
 struct PosterLayerRemoteImage: NSViewRepresentable {
     @Environment(\.imageRepository) private var repository
     @Environment(\.posterCardPriority) private var priority
+    @Environment(\.browserSurfaceVisible) private var surfaceVisible
     let request: PosterImageRequest
 
     func makeCoordinator() -> PosterNativeRemoteImage.Coordinator {
@@ -1070,7 +1149,7 @@ struct PosterLayerRemoteImage: NSViewRepresentable {
 
     func updateNSView(_ view: PosterLayerImageView, context: Context) {
         context.coordinator.update(view: view, request: request,
-            repository: repository, priority: priority)
+            repository: repository, priority: priority, isActive: surfaceVisible)
     }
 
     static func dismantleNSView(_ view: PosterLayerImageView,
@@ -1126,16 +1205,23 @@ final class PosterPreheater {
         var demand: PosterImageDemand
         var revision: UInt64 = 0
         var finished = false
+        var failed = false
     }
     private var jobs: [PosterImageRequest: Job] = [:]
     private var lastPlan: [PosterPrefetchRequest] = []
     func update(_ plan: [PosterPrefetchRequest], repository: ImageRepository?) {
         let plan = Self.coalesced(plan)
-        guard plan != lastPlan else { return }
+        let evicted = plan.filter { jobs[$0.request]?.finished == true && jobs[$0.request]?.failed == false && repository?.cachedPoster(for: $0.request) == nil }
+        guard plan != lastPlan || !evicted.isEmpty else { return }
+        for item in evicted { jobs[item.request] = nil }
         lastPlan = plan
         let demands = Dictionary(uniqueKeysWithValues: plan.map { ($0.request, $0.demand) })
         for key in Array(jobs.keys) where demands[key] == nil { jobs.removeValue(forKey: key)?.task.cancel() }
         guard let repository else { return }
+        let reservations = plan.filter { jobs[$0.request] == nil && repository.cachedPoster(for: $0.request) == nil }
+            .map { PosterImageReservation(request: $0.request, consumer: UUID(), demand: $0.demand) }
+        let tokens = Dictionary(uniqueKeysWithValues: reservations.map { ($0.request, $0.consumer) })
+        let admission = Task { await repository.reservePosterDemands(reservations) }
         for item in plan {
             let request = item.request
             if var job = jobs[request] {
@@ -1145,15 +1231,18 @@ final class PosterPreheater {
                     jobs[request] = job
                     if !job.finished {
                         repository.updatePosterPriority(for: request, consumer: job.consumer,
-                            priority: item.demand.priority, distance: item.demand.distance, revision: job.revision)
+                            priority: item.demand.priority, distance: item.demand.distance, readingOrder: item.demand.readingOrder, revision: job.revision)
                     }
                 }
             } else if repository.cachedPoster(for: request) == nil {
-                let consumer = UUID()
+                guard let consumer = tokens[request] else { continue }
                 let task = Task { [weak self] in
-                    _ = try? await repository.posterImage(for: request, priority: item.demand.priority,
-                        distance: item.demand.distance, consumer: consumer)
-                    self?.markFinished(request: request, consumer: consumer)
+                    await admission.value
+                    do {
+                        _ = try await repository.posterImage(for: request, priority: item.demand.priority,
+                            distance: item.demand.distance, readingOrder: item.demand.readingOrder, consumer: consumer)
+                        self?.markFinished(request: request, consumer: consumer, failed: false)
+                    } catch { self?.markFinished(request: request, consumer: consumer, failed: !AsyncCancellationPolicy.isCancellation(error)) }
                 }
                 jobs[request] = Job(consumer: consumer, task: task, demand: item.demand)
             }
@@ -1174,9 +1263,14 @@ final class PosterPreheater {
         return result
     }
 
-    private func markFinished(request: PosterImageRequest, consumer: UUID) {
+    private func markFinished(request: PosterImageRequest, consumer: UUID, failed: Bool) {
         guard jobs[request]?.consumer == consumer else { return }
         jobs[request]?.finished = true
+        jobs[request]?.failed = failed
+    }
+    func retryFailed() {
+        for key in Array(jobs.keys) where jobs[key]?.failed == true { jobs.removeValue(forKey: key)?.task.cancel() }
+        lastPlan.removeAll()
     }
     func cancel() {
         jobs.values.forEach { $0.task.cancel() }

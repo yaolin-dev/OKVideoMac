@@ -203,10 +203,17 @@ void okmpv_destroy(OKMPVClient *client) {
         return;
     }
     if (client->handle != NULL) {
+        mpv_set_wakeup_callback(client->handle, NULL, NULL);
         mpv_terminate_destroy(client->handle);
         client->handle = NULL;
     }
     free(client);
+}
+
+void okmpv_set_wakeup_callback(OKMPVClient *client, OKMPVWakeupCallback callback, void *context) {
+    if (client != NULL && client->handle != NULL) {
+        mpv_set_wakeup_callback(client->handle, callback, context);
+    }
 }
 
 int okmpv_set_option_string(

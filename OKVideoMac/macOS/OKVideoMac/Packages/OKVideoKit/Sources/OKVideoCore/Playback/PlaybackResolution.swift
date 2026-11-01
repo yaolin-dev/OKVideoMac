@@ -77,6 +77,9 @@ public enum MediaNetworkPolicy: Equatable, Sendable {
 }
 
 public struct ResolvedMedia: Equatable, Sendable {
+    /// Host-owned playback preference snapshot; never decoded from a provider.
+    public var mediaProxyPreference: Bool? = nil
+    public var mediaNetworkRouteOverride: PlaybackMediaNetworkRoute? = nil
     /// File-local stop boundary for a bounded catch-up programme.
     public var playbackDurationLimit: TimeInterval? = nil
     public var playbackStartOffset: TimeInterval? = nil

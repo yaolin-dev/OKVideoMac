@@ -17,8 +17,10 @@ function harness(initial = '__uid=a; __puus=old', configured = '') {
   const request = { server: { db, config: { quark: { cookie: configured } } } };
   const context = {
     process: { env: { OKVIDEO_TRANSFER_PATCH_MODULE: 'lifecycle', OKVIDEO_TRANSFER_LEDGER_PATH: 'unused',
-      OKVIDEO_INSTALLATION_UUID: 'unused', OKVIDEO_TRANSFER_OWNER_SESSION_ID: 'unused', OKVIDEO_INSTALLATION_HMAC_KEY: 'unused' } },
-    require: (name) => name === 'node:async_hooks' ? { AsyncLocalStorage } : {
+      OKVIDEO_RANGE_STREAM_MODULE: 'range', OKVIDEO_INSTALLATION_UUID: 'unused', OKVIDEO_TRANSFER_OWNER_SESSION_ID: 'unused', OKVIDEO_INSTALLATION_HMAC_KEY: 'unused' } },
+    Wg: 'unused',
+    require: (name) => name === 'range' ? { createCatPawRangeStream: () => async (...args) => args[4] }
+      : name === 'node:async_hooks' ? { AsyncLocalStorage } : {
       createQuarkCredentialCoordinator,
       createQuarkMediaFailureStore,
       createQuarkTransferLifecycle: (options) => { adapter = options; return {

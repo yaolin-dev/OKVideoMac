@@ -9,6 +9,8 @@ public struct PlaybackMediaInfo: Equatable, Sendable {
     public let width: Int?
     public let height: Int?
     public let videoCodec: String?
+    public let videoIsImage: Bool
+    public let videoIsAlbumArt: Bool
     public let nominalFrameRate: Double?
     public let audioCodec: String?
     public let audioChannels: String?
@@ -25,6 +27,8 @@ public struct PlaybackMediaInfo: Equatable, Sendable {
         width = Self.positiveInt(properties["video-dec-params/w"] ?? properties["video-params/w"])
         height = Self.positiveInt(properties["video-dec-params/h"] ?? properties["video-params/h"])
         videoCodec = Self.text(properties["current-tracks/video/codec"])
+        videoIsImage = ["yes", "true", "1"].contains(properties["current-tracks/video/image"]?.lowercased() ?? "")
+        videoIsAlbumArt = ["yes", "true", "1"].contains(properties["current-tracks/video/albumart"]?.lowercased() ?? "")
         nominalFrameRate = Self.positiveDouble(properties["current-tracks/video/demux-fps"] ?? properties["container-fps"])
         audioCodec = Self.text(properties["current-tracks/audio/codec"])
         audioChannels = Self.text(properties["audio-params/channels"])
@@ -38,6 +42,11 @@ public struct PlaybackMediaInfo: Equatable, Sendable {
         (width != nil && height != nil) || videoCodec != nil || audioCodec != nil
     }
 
+    public var hasDecodedMovingVideo: Bool {
+        width != nil && height != nil && videoCodec != nil
+            && !videoIsImage && !videoIsAlbumArt && (nominalFrameRate ?? 0) > 1
+    }
+
     public var withoutStatistics: PlaybackMediaInfo {
         var properties: [String: String] = [:]
         properties["filename"] = fileName
@@ -46,6 +55,8 @@ public struct PlaybackMediaInfo: Equatable, Sendable {
         properties["video-dec-params/w"] = width.map { String($0) }
         properties["video-dec-params/h"] = height.map { String($0) }
         properties["current-tracks/video/codec"] = videoCodec
+        properties["current-tracks/video/image"] = videoIsImage ? "yes" : "no"
+        properties["current-tracks/video/albumart"] = videoIsAlbumArt ? "yes" : "no"
         properties["container-fps"] = nominalFrameRate.map { String($0) }
         properties["current-tracks/audio/codec"] = audioCodec
         properties["audio-params/channels"] = audioChannels

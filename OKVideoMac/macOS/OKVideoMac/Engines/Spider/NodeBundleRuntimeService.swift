@@ -720,12 +720,17 @@ struct NodeBundleDeterministicPatch: Equatable, Sendable {
             string: "https://raw.githubusercontent.com/Darklessing/catvod/c47d135469d4a32a4178531ce1b8f4e2e936f0b8/douer/index.js"
         )!,
         inputSHA256: "0ad3ed101dc961e6d73b758a5089ac1e10a12d27666468436e1fff2e39df01cc",
-        outputSHA256: "73e5436f3e733e15bd2a6d3e39990277cd190a0da4d0e486cb34a04c57dc8f5d",
+        outputSHA256: "3cbc0e9576270e077974769d05fd322aac318faead78188d08ec27bc3242e0d1",
         patchResourceName: "catpaw-quark-lifecycle.patch",
-        patchResourceSHA256: "e2a150e803fd8ca837e53d235210af1563755bf33312bf0f105709c8a59f7e6c",
+        patchResourceSHA256: "40e440be69398eed52f998b1293ece798841f8cc2193b28b60cfc083b8744466",
         moduleResourceName: "catpaw-quark-transfer-lifecycle",
         moduleResourceSHA256: "92673dc877eadb0881bb5e4c2f4988ce7a2493bcc088f59c05ce813221c05e70",
+        rangeResourceName: "catpaw-range-stream",
+        rangeResourceSHA256: "0b3aab09fe1cb9e4bbd86110ad2c74bad70b5ace55dd13597c1563dcd453b8d7",
         legacyCacheKeys: [
+            // Sealed v3 cache may be upgraded offline after validating both
+            // the complete old artifact and the immutable source prefix.
+            "6a43d24782ca295bd08fc260efd50ba4da0ddf35ca74f0585f66362393541ca4",
             // Cache identity of the formerly unpinned refs/heads/main URL.
             // Migration still requires the exact fixed input SHA before the
             // patch is applied; an updated main cache is rejected.
@@ -743,6 +748,8 @@ struct NodeBundleDeterministicPatch: Equatable, Sendable {
     let patchResourceSHA256: String
     let moduleResourceName: String
     let moduleResourceSHA256: String
+    let rangeResourceName: String
+    let rangeResourceSHA256: String
     let legacyCacheKeys: [String]
 
     static func matching(_ checksumURL: URL) -> Self? {
@@ -2651,7 +2658,22 @@ actor NodeBundleRuntimeService {
             expectedSHA256: patch.moduleResourceSHA256,
             bundle: bundle
         )
+        _ = try Self.validatedNodePatchResourceURL(
+            named: patch.rangeResourceName,
+            expectedSHA256: patch.rangeResourceSHA256,
+            bundle: bundle
+        )
         return output
+    }
+
+    static func unpatchedLegacyData(_ data: Data, patch: NodeBundleDeterministicPatch?) throws -> Data {
+        guard let patch, patch.inputSHA256 == NodeBundleDeterministicPatch.quarkLifecycleV3.inputSHA256,
+              Self.sha256Hex(data) == "73e5436f3e733e15bd2a6d3e39990277cd190a0da4d0e486cb34a04c57dc8f5d" else { return data }
+        let original = Data(data.prefix(5_921_277))
+        guard Self.sha256Hex(original) == patch.inputSHA256 else {
+            throw NodeBundleRuntimeError.integrityRejected("旧补丁源前缀校验失败")
+        }
+        return original
     }
 
     private static func validatedNodePatchResourceURL(
@@ -2822,7 +2844,8 @@ actor NodeBundleRuntimeService {
                 actual: inputMD5
             )
         }
-        let inputSHA256 = Self.sha256Hex(inputData)
+        let unpatchedData = try Self.unpatchedLegacyData(inputData, patch: descriptor.deterministicPatch)
+        let inputSHA256 = Self.sha256Hex(unpatchedData)
         let requiresPin = try Self.requiresTrustedSHA256(
             finalChecksumURL: descriptor.checksumURL,
             finalScriptURL: descriptor.scriptURL
@@ -2835,7 +2858,7 @@ actor NodeBundleRuntimeService {
             finalScriptURL: descriptor.scriptURL
         )
         let data = try applyDeterministicPatchIfNeeded(
-            inputData,
+            unpatchedData,
             descriptor: descriptor
         )
         let actualMD5 = Self.md5Hex(data)
@@ -3362,7 +3385,12 @@ actor NodeBundleRuntimeService {
             named: patch.moduleResourceName,
             expectedSHA256: patch.moduleResourceSHA256
         )
+        let rangeModuleURL = try Self.validatedNodePatchResourceURL(
+            named: patch.rangeResourceName,
+            expectedSHA256: patch.rangeResourceSHA256
+        )
         return [
+            "OKVIDEO_RANGE_STREAM_MODULE": rangeModuleURL.path,
             "OKVIDEO_TRANSFER_PATCH_MODULE": moduleURL.path,
             "OKVIDEO_TRANSFER_LEDGER_PATH": root
                 .appendingPathComponent("ledger-v1.json")

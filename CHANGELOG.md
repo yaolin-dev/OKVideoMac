@@ -2,10 +2,21 @@
 
 ## [Unreleased]
 
-- Add credential-free CI for Core/Persistence Debug and Release, all Node tests, offline audits/static checks, Android Release JVM tests and unsigned main App Release compilation; retain reports and require every job to succeed.
-- Pin CI Actions and tool downloads, isolate build inputs, validate discovered/completed test results and allowed skips, and reject empty, incomplete or failed results. Verify the aggregate gate with an intentional failure in an isolated branch.
-- Make crash-worker tests respect the selected Xcode, replace TMDB test timing sleeps with explicit coordination, publish the loopback fixture port atomically, and preserve Python class-fixture errors in reports.
-- Document CI coverage, local reproduction and remaining limits. App version/build and existing v0.9.0 release assets remain unchanged.
+## [0.9.1] - 2026-11-01
+
+- Recover history using scoped original file identity and fresh source parameters; preserve progress and network errors when restoration fails.
+- Keep TMDB matches after detail enrichment and compare cross-script director identities safely; unify actor-work and home search presentation and top-left poster priority.
+- Restore global and Node/QuickJS/Android search concurrency to 20; learn bounded local source latency/relevance, retain first-page budgets and load more automatically on scroll.
+- Continue bounded EPG generation cleanup after refresh, cancellation and restart; cache repeated XMLTV timestamps and retain manual refresh/coalescing/backoff rules.
+- Reduce redundant main-window updates, poster prefetch and automatic EPG imports during sensitive playback phases; replace idle player event polling with wakeup notifications.
+- Preserve native seek ownership and confirmed history progress across rapid seeks, pause, replacement and close; retain mixed-extension decoded-video episode navigation.
+- Add an opt-in per-playback media system-proxy setting and routing status, recover empty WoGG details, and cancel stale Android HTTP relay reads.
+- Buffer three media seconds on identified Quark original-file bridge routes and refill earlier within existing cache budgets; keep other routes' buffering settings.
+- Adapt the exact pinned CatPaw Quark/UC/Ali range helper to abort pending headers and body reads, bound retries and clean request-owned files without cancelling other readers; verify legacy cache upgrades.
+- Add bounded numeric seek diagnostics, maintain 512 MiB poster disk storage, and retain source-scoped live-picture refresh with stop/retry and playback coordination.
+- Use lightweight playback icons and consistent toolbar hover feedback; dismiss player panels on outside clicks and retain source/track/history controls.
+- Align Android Bridge host and APK versions at 0.3.54 (66), enforce the package contract and preserve authorization continuity.
+- Add credential-free CI for Core/Persistence Debug and Release, Node, offline/static, Android JVM and isolated App Release critical flows, with pinned tools and strict report validation.
 
 ## [0.9.0] - 2026-10-26
 

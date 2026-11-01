@@ -37,10 +37,10 @@ jobs:
         run: python3 Tools/CI/check_jobs.py
 
   app:
-    name: Main App Release compile (unsigned)
+    name: Main App Release compile and critical flows
     needs: android
     runs-on: macos-14
-    timeout-minutes: 35
+    timeout-minutes: 50
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
     steps:
@@ -71,7 +71,7 @@ jobs:
             ${{ runner.temp }}/okvideo-app-dependencies/Downloads
             ${{ runner.temp }}/okvideo-app-dependencies/SourcePackages
           key: app-deps-v1-${{ runner.os }}-${{ runner.arch }}-xcode16.2-${{ hashFiles('OKVideoMac/macOS/OKVideoMac/Packages/OKCrashDiagnostics/Package.swift', 'OKVideoMac/macOS/OKVideoMac/Scripts/prepare-crash-reporter.sh', 'OKVideoMac/macOS/OKVideoMac/Scripts/prepare-sparkle.py', 'ThirdParty/sparkle-lock.json') }}
-      - name: Compile and verify Release App structure without signing
+      - name: Verify unsigned Release structure and run isolated App regressions
         run: >-
           python3 Tools/CI/run_app.py
           --work-dir '${{ runner.temp }}/okvideo-app-compile'
@@ -79,7 +79,7 @@ jobs:
           --output '${{ runner.temp }}/okvideo-reports/app'
           --bridge-input '${{ runner.temp }}/okvideo-android-compile-input'
           --xcodegen '${{ runner.temp }}/okvideo-ci-tools/xcodegen'
-      - name: Retain App compilation evidence only
+      - name: Retain App compilation and regression evidence
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

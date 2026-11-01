@@ -1,6 +1,81 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "tmdb.match.reason.ambiguous": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Multiple titles remain possible. Review the year, type and cast before choosing."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仍有多个可能的同名作品，请核对年份、类型和主演后选择。"
+          }
+        }
+      }
+    },
+    "tmdb.match.reason.identity-conflict": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The source and candidate disagree on the year, media type or season. Review these details before choosing."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "源站与候选的年份、影视类型或季数存在冲突，请核对后确认。"
+          }
+        }
+      }
+    },
+    "tmdb.match.reason.director-conflict": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The source and TMDB director names disagree. Confirm that this is the same work before choosing."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "源站导演与 TMDB 导演不一致，请核对是否为同一作品。"
+          }
+        }
+      }
+    },
+    "tmdb.match.reason.director-unverified": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The director's name or translation is not verified. Check the title, year and cast before choosing."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导演姓名或译名尚未核实，请结合片名、年份和主演确认。"
+          }
+        }
+      }
+    },
+    "search.browse.budget": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Scroll down to load more results" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "滚动到底部自动加载更多" } }
+      }
+    },
     "player.quality.unavailable-after-refresh": {
       "comment": "Playback quality disappeared after refreshing a Bilibili media session.",
       "localizations": {
@@ -6636,13 +6711,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Check could not finish. Retry using the refresh button."
+            "value": "Check could not finish. Update the channel list from the source menu to retry."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "检测未完成，请使用刷新按钮重试。"
+            "value": "检查未能完成，可在直播源菜单中更新频道列表后重试。"
           }
         }
       }
@@ -15434,7 +15509,7 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "播放速度 · %@)"
+            "value": "播放速度 · %@"
           }
         }
       }
@@ -34329,13 +34404,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "New: %d · Cached: %d · Failed: %d"
+            "value": "Updated: %d · Saved: %d · Not updated: %d"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "新获取：%d · 已缓存：%d · 失败：%d"
+            "value": "已更新：%d · 已缓存：%d · 未更新：%d"
           }
         }
       }
@@ -34346,13 +34421,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Retry Failed"
+            "value": "Retry Unupdated Pictures"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "重试失败项"
+            "value": "重试未更新项"
           }
         }
       }
@@ -34363,13 +34438,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This round: %d / %d"
+            "value": "Processed: %d / %d"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "本轮处理：%d / %d"
+            "value": "已处理：%d / %d"
           }
         }
       }
@@ -34397,13 +34472,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Automatic updates refresh visible channels every 10 minutes when enabled. Saved pictures remain available."
+            "value": "Refresh covers all available channels in this source, starting with those on screen. Existing pictures are kept until replaced."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "开启自动更新后，每 10 分钟刷新可见频道；加载期间保留已有画面。"
+            "value": "刷新当前直播源全部可用频道，优先处理屏幕内频道。新画面就绪前保留现有画面。"
           }
         }
       }
@@ -35205,6 +35280,949 @@
           "stringUnit": {
             "state": "translated",
             "value": "連線尚未就緒；自動選擇模式繼續使用原詳情。"
+          }
+        }
+      }
+    },
+    "common.off": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Off"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭"
+          }
+        }
+      }
+    },
+    "history.restore.from-beginning": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Play from Beginning"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "从头播放"
+          }
+        }
+      }
+    },
+    "history.restore.load-failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Original resource could not be loaded: %@. Retry or open the original details."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "原资源加载失败：%@。请重试或打开原影片详情。"
+          }
+        }
+      }
+    },
+    "history.restore.open-original": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Open Original Details"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开原影片详情"
+          }
+        }
+      }
+    },
+    "history.restore.original-unresolved": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The original details loaded, but the saved file could not be located. The resource list may be incomplete. Retry or open the original details."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "原影片详情已加载，但暂时无法定位原文件，资源列表可能尚未完整。请重试或打开原影片详情。"
+          }
+        }
+      }
+    },
+    "history.restore.search-detail-failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recovery details could not be fully loaded: %@. Retry or open the original details."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "找回资源所需的详情未完整加载：%@。请重试或打开原影片详情。"
+          }
+        }
+      }
+    },
+    "history.restore.verify-file": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The original file cannot yet be confirmed. Check the filename, path and version before choosing. Your saved progress is preserved until playback and resume succeed."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂时无法确认原文件。请选择前核对文件名、路径和版本；播放和进度恢复成功前，原观看进度会一直保留。"
+          }
+        }
+      }
+    },
+    "live.preview.refresh-partial": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Some channel pictures could not be updated. Previous pictures were kept."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "部分频道画面未能更新，已保留之前的截图。"
+          }
+        }
+      }
+    },
+    "player.advanced": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Advanced"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "高级设置"
+          }
+        }
+      }
+    },
+    "player.audio.number": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Audio Track %d"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "音轨 %d"
+          }
+        }
+      }
+    },
+    "player.episode.filename": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Original filename"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "原始文件名"
+          }
+        }
+      }
+    },
+    "player.episode.no-results": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No matching episodes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "没有匹配的分集"
+          }
+        }
+      }
+    },
+    "player.episode.number": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Episode %d"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "第 %d 集"
+          }
+        }
+      }
+    },
+    "player.episode.path": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Source path"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "源文件路径"
+          }
+        }
+      }
+    },
+    "player.episode.search": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Search episode, filename or version"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "搜索集数、文件名或版本"
+          }
+        }
+      }
+    },
+    "player.episode.season-number": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Season %d · Episode %d"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "第 %d 季 · 第 %d 集"
+          }
+        }
+      }
+    },
+    "player.episode.source-label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Source label"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "源标签"
+          }
+        }
+      }
+    },
+    "player.option.selected": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Selected"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已选中"
+          }
+        }
+      }
+    },
+    "player.panel.scroll-more": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scroll for more"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "滚动查看更多"
+          }
+        }
+      }
+    },
+    "player.skip.scope": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apply To"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "应用范围"
+          }
+        }
+      }
+    },
+    "player.subtitle.number": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Subtitle Track %d"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "字幕 %d"
+          }
+        }
+      }
+    },
+    "settings.appearance.accent.title": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Accent Color"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "强调色"
+          }
+        }
+      }
+    },
+    "settings.appearance.accent.subtitle": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Follows the macOS accent color for menus and controls"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "菜单和控件统一跟随 macOS 系统强调色"
+          }
+        }
+      }
+    },
+    "settings.appearance.open-system": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "System Appearance…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "系统外观设置…"
+          }
+        }
+      }
+    },
+    "live.update-channel-list": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update Channel List"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新频道列表"
+          }
+        }
+      }
+    },
+    "live.refresh-guide": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh Programme Guide"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新节目单"
+          }
+        }
+      }
+    },
+    "live.preview.enable-to-refresh": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Switch to Channel Pictures to refresh"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "切换到频道画面后可刷新"
+          }
+        }
+      }
+    },
+    "live.preview.refresh-all": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh all channel pictures in this source (⌘R)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新当前直播源的所有频道画面（⌘R）"
+          }
+        }
+      }
+    },
+    "live.background.preview-stopped": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stopped; existing pictures are kept"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已停止，保留现有画面"
+          }
+        }
+      }
+    },
+    "player.live.paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已暂停"
+          }
+        }
+      }
+    },
+    "settings.playback.network.section": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Network"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "网络"
+          }
+        }
+      }
+    },
+    "settings.playback.network.proxy": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use System Proxy for Media"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "媒体播放使用系统代理"
+          }
+        }
+      }
+    },
+    "settings.playback.network.help": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Use the current HTTP/HTTPS system proxy for supported media connections. When off, connect directly. Movie details, posters and sign-in keep their existing network settings."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "支持的媒体连接使用当前系统 HTTP/HTTPS 代理；关闭时直接连接。影片详情、海报和登录保持原有网络设置。"
+          }
+        }
+      }
+    },
+    "settings.playback.network.scope": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Applies when playback is loaded again. Source-managed downloads may not support this setting. This switch does not bypass a system VPN."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新加载播放后生效。由源内部下载的媒体可能不支持此设置；此开关不能绕过系统 VPN。"
+          }
+        }
+      }
+    },
+    "settings.playback.network.current": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Current Media Connection"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前媒体连接"
+          }
+        }
+      }
+    },
+    "settings.playback.network.pending": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The new setting will apply after reloading playback."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新设置将在重新加载播放后生效。"
+          }
+        }
+      }
+    },
+    "settings.playback.network.reload": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reload and Keep Position"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保留进度重新加载"
+          }
+        }
+      }
+    },
+    "player.network.direct": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Direct Connection"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "直接连接"
+          }
+        }
+      }
+    },
+    "player.network.system": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "System Proxy"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用系统代理"
+          }
+        }
+      }
+    },
+    "player.network.provider": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Managed by Source (Local Relay)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "源内部处理（本地中继）"
+          }
+        }
+      }
+    },
+    "player.network.unsupported-short": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unsupported System Proxy"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "不支持的系统代理类型"
+          }
+        }
+      }
+    },
+    "player.network.local": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local File"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本地文件"
+          }
+        }
+      }
+    },
+    "player.network.other": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Protocol Does Not Use HTTP Proxy"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此协议不使用 HTTP 代理"
+          }
+        }
+      }
+    },
+    "player.network.unsupported": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The current system proxy type is not supported for media. HTTP/HTTPS proxies are supported. Turn off Use System Proxy for Media to connect directly."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前系统代理类型暂不支持媒体播放。目前支持 HTTP/HTTPS 代理；可关闭“媒体播放使用系统代理”后直接连接。"
+          }
+        }
+      }
+    },
+    "player.info.media-network": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Media Connection"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "媒体连接"
+          }
+        }
+      }
+    },
+    "player.network.bridge-failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to apply the media network setting. Retry playback."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法应用媒体网络设置，请重试播放。"
+          }
+        }
+      }
+    },
+    "live.guide.status.loading": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading programme guide…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载节目单…"
+          }
+        }
+      }
+    },
+    "live.guide.status.refreshing": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Updating; showing saved programmes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在更新，当前显示已缓存节目"
+          }
+        }
+      }
+    },
+    "live.guide.status.retry": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update failed; retrying in %d min"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新失败，%d 分钟后重试"
+          }
+        }
+      }
+    },
+    "live.guide.status.failed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to update programme guide"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "节目单更新失败"
+          }
+        }
+      }
+    },
+    "live.guide.status.cached": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Update incomplete; showing saved programmes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "部分节目更新失败，当前显示已缓存节目"
+          }
+        }
+      }
+    },
+    "live.guide.status.empty": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No programmes in this time range"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "节目源未提供此时段的节目"
+          }
+        }
+      }
+    },
+    "live.guide.status.unmatched": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No matching programme channels"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "未找到匹配的节目单频道"
+          }
+        }
+      }
+    },
+    "live.guide.status.expired": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The source has not provided later programmes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "节目源尚未提供后续节目"
+          }
+        }
+      }
+    },
+    "live.guide.status.unchanged": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Updated; programme guide unchanged"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已更新，节目单无变化"
+          }
+        }
+      }
+    },
+    "live.guide.status.updated": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last updated: %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上次更新：%@"
           }
         }
       }

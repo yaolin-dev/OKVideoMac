@@ -12,6 +12,7 @@ typedef struct OKMPVRenderContext OKMPVRenderContext;
 
 typedef void *(*OKMPVGetProcAddress)(void *context, const char *name);
 typedef void (*OKMPVRenderUpdateCallback)(void *context);
+typedef void (*OKMPVWakeupCallback)(void *context);
 
 typedef struct OKMPVEvent {
     /* For MPV_EVENT_LOG_MESSAGE: property_name = prefix, string_value = text,
@@ -33,6 +34,9 @@ OKMPVClient *okmpv_create(void);
 int okmpv_initialize(OKMPVClient *client);
 int okmpv_request_log_messages(OKMPVClient *client, const char *level);
 void okmpv_wakeup(OKMPVClient *client);
+/* Callback only signals the host queue; it must never call a client API.
+ * Keep context alive until the callback is cleared and the client destroyed. */
+void okmpv_set_wakeup_callback(OKMPVClient *client, OKMPVWakeupCallback callback, void *context);
 void okmpv_destroy(OKMPVClient *client);
 
 int okmpv_set_option_string(

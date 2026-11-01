@@ -74,7 +74,7 @@ assert_contains_either "$ROOT_README" "current release candidate is **${VERSION}
 assert_contains_either "$ROOT_README_ZH" "当前发布候选为 **${VERSION}（Build ${BUILD}）**" "最新稳定版本为 **${VERSION}（Build ${BUILD}）**"
 assert_contains "$CHANGELOG" "## [${VERSION}] - "
 assert_contains "$NOTICES" "OKVideoMac ${VERSION} (Build ${BUILD})"
-assert_exact_line "$PERFORMANCE" "- 多站搜索全局并发 20；共享同一 Node runtime 的站点并发 20，聚合搜索每站只取第一页；"
+assert_exact_line "$PERFORMANCE" "- App 聚合搜索全局并发 20，Node / QuickJS / Android 分组并发均为 20；"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}.dmg"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}-macOS-arm64.zip"
 assert_contains "$SOURCE_RELEASE_PROCESS" "OKVideoMac-${VERSION}-build${BUILD}-SOURCE_RELEASE_INDEX.json"

@@ -203,7 +203,7 @@ final class LivePreviewProcessJob: @unchecked Sendable {
 }
 
 struct LivePreviewActivityPresentation: Equatable {
-    enum Phase: Equatable { case restoring, capturing, waiting, paused, completed, partial }
+    enum Phase: Equatable { case restoring, capturing, waiting, paused, stopped, completed, partial }
     let sourceKey: String
     let phase: Phase
     let visibleReady: Int
@@ -218,8 +218,7 @@ struct LivePreviewActivityPresentation: Equatable {
     var indicator: LiveBackgroundIndicator {
         switch phase {
         case .restoring, .capturing, .waiting: return .active
-        case .partial: return .warning
-        case .paused, .completed: return .idle
+        case .partial, .paused, .stopped, .completed: return .idle
         }
     }
 }
@@ -277,6 +276,9 @@ struct LivePreviewActivityPresentation: Equatable {
     private var visibleKeys = Set<String>()
     private var visibleImages: [String: ImageEntry] = [:]
     private var demands: [LivePreviewDemand] = []
+    // A manual round belongs to the source, not the current search/group view.
+    private var manualDemands: [LivePreviewDemand]?
+    private var userStopped = false
     private var owner: UUID?
     private var generation = UUID()
     // Cancelling flights retain their slot until their child has actually exited.
@@ -304,6 +306,7 @@ struct LivePreviewActivityPresentation: Equatable {
     private var observers: [NSObjectProtocol] = []
     private var sleeping = false
     private var suspended = false
+    private var cacheSuspended = false
     private var draining = 0
     private var autoRefresh = false
     private var lastAutomaticRound = Date.distantPast
@@ -342,33 +345,46 @@ struct LivePreviewActivityPresentation: Equatable {
         return entry
     }
     func update(owner: UUID, demands: [LivePreviewDemand], mayCapture: @escaping @MainActor () -> Bool,
-                autoRefresh: Bool = false, isActive: Bool = true) {
+                autoRefresh: Bool = false, isActive: Bool = true, isVisible: Bool = true) {
         if self.owner != owner {
             clearCurrentOwner(); self.owner = owner
             quietUntil = clock().addingTimeInterval(0.25)
         }
         var seen = Set<String>()
         self.demands = demands.filter { seen.insert($0.key).inserted }
+        var replacedCatalog = false
+        if let manualDemands {
+            let valid = manualDemands.filter { $0.isValid() }
+            self.manualDemands = valid.isEmpty ? nil : valid
+            if valid.isEmpty {
+                // Stable picture keys may survive a catalog replacement, but
+                // its old URL/credential closures must not survive with them.
+                replacedCatalog = true
+                refreshKeys.removeAll(); userStopped = false
+            }
+            for var demand in valid where seen.insert(demand.key).inserted {
+                demand.priority = 2
+                self.demands.append(demand)
+            }
+            roundKeys.formIntersection(Set(valid.map(\.key)))
+        }
         self.mayCapture = mayCapture; self.autoRefresh = autoRefresh; suspended = !isActive
+        cacheSuspended = !isVisible
         let keys = Set(self.demands.map(\.key))
-        if keys != demandKeys {
+        if keys != demandKeys || replacedCatalog {
             demandKeys = keys
-            beginRound(keys, requiresRefresh: false)
+            if manualDemands == nil { beginRound(keys, requiresRefresh: false) }
         }
         refreshKeys.formIntersection(keys); refreshing = !refreshKeys.isEmpty
         for demand in self.demands { sources[demand.key] = demand.sourceKey }
         retainViewport()
-        for flight in flights.values where !self.demands.contains(where: { $0.key == flight.demand.key && $0.isValid() }) {
+        for flight in flights.values where !flight.demand.isValid()
+            || !self.demands.contains(where: { $0.key == flight.demand.key && $0.isValid() }) {
             flight.cancel()
         }
         loadCache()
         if suspended { interrupt(); timer?.invalidate(); timer = nil }
-        if !suspended, timer == nil, !self.demands.isEmpty {
-            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.pump() }
-            }
-            RunLoop.main.add(timer, forMode: .common); self.timer = timer
-        }
+        ensureTimer()
         pump()
     }
     func updateViewport(owner: UUID, visible: Set<String>, nearby: Set<String>) {
@@ -381,17 +397,21 @@ struct LivePreviewActivityPresentation: Equatable {
         demands = lanes.flatMap { $0 }; retainViewport(); loadCache(); pump()
     }
     func ownsViewport(_ owner: UUID) -> Bool { self.owner == owner }
-    func setSurfaceActive(owner: UUID, isActive: Bool, autoRefresh: Bool) {
+    func setSurfaceActive(owner: UUID, isActive: Bool, autoRefresh: Bool, isVisible: Bool = true) {
         guard self.owner == owner else { return }
         suspended = !isActive; self.autoRefresh = autoRefresh
+        cacheSuspended = !isVisible
+        if isVisible { loadCache() }
         if suspended { interrupt(); timer?.invalidate(); timer = nil }
-        else if timer == nil, !demands.isEmpty {
-            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.pump() }
-            }
-            RunLoop.main.add(timer, forMode: .common); self.timer = timer
-        }
+        ensureTimer()
         pump()
+    }
+    private func ensureTimer() {
+        guard timer == nil, owner != nil, !suspended, !userStopped, !demands.isEmpty else { return }
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.pump() }
+        }
+        RunLoop.main.add(timer, forMode: .common); self.timer = timer
     }
     private func retainViewport() {
         let next = Set(demands.filter { $0.priority == 0 && $0.isValid() }.map(\.key))
@@ -426,21 +446,48 @@ struct LivePreviewActivityPresentation: Equatable {
             if !keys.isEmpty { self.changes.send(keys) }
         }
     }
-    func requestRefresh() {
+    func isRefreshing(sourceKey: String) -> Bool {
+        refreshKeys.contains { sources[$0] == sourceKey }
+    }
+    func requestRefresh(demands allChannels: [LivePreviewDemand]? = nil) {
         guard owner != nil, refreshKeys.isEmpty else { return }
+        userStopped = false
+        if let allChannels {
+            let priorities = Dictionary(uniqueKeysWithValues: demands.map { ($0.key, $0.priority) })
+            var seen = Set<String>()
+            demands = allChannels.filter { $0.isValid() && seen.insert($0.key).inserted }.map {
+                var demand = $0
+                demand.priority = priorities[demand.key] ?? 2
+                return demand
+            }
+            manualDemands = demands
+            demandKeys = Set(demands.map(\.key))
+            for demand in demands { sources[demand.key] = demand.sourceKey }
+            retainViewport()
+        }
         refreshKeys = Set(demands.filter { $0.isValid() }.map(\.key))
         beginRound(refreshKeys, requiresRefresh: true)
-        for key in refreshKeys where flights[key] == nil { attempts[key] = 0 }
+        for key in refreshKeys { attempts[key] = 0; outcomes[key] = nil }
         capacityWaitUntil.removeAll(); deferredUntil.removeAll()
-        refreshing = !refreshKeys.isEmpty; loadCache(); pump()
+        // The explicit click does not wait for the initial-scroll quiet period.
+        quietUntil = .distantPast
+        refreshing = !refreshKeys.isEmpty; ensureTimer(); loadCache(); pump(); publishActivity()
+    }
+    func stopRefresh(sourceKey: String) {
+        guard demands.first?.sourceKey == sourceKey else { return }
+        userStopped = true
+        refreshKeys.removeAll(); refreshing = false
+        interrupt(); timer?.invalidate(); timer = nil
+        publishActivity()
     }
     func suspend(owner: UUID) {
         guard self.owner == owner else { return }
-        suspended = true; interrupt(); timer?.invalidate(); timer = nil; scheduleActivity()
+        suspended = true; cacheSuspended = true
+        interrupt(); timer?.invalidate(); timer = nil; scheduleActivity()
     }
     func clear(owner: UUID) { if self.owner == owner { clearCurrentOwner() } }
     private func clearCurrentOwner() {
-        owner = nil; demands = []; generation = UUID()
+        owner = nil; demands = []; manualDemands = nil; userStopped = false; generation = UUID()
         visibleKeys.removeAll(); visibleImages.removeAll()
         interrupt(); cacheTask?.cancel(); cacheTask = nil
         viewportTask?.cancel(); viewportTask = nil
@@ -466,6 +513,8 @@ struct LivePreviewActivityPresentation: Equatable {
         let keys = Set(sources.filter { $0.value == sourceKey }.map(\.key))
         for flight in flights.values where flight.demand.sourceKey == sourceKey { flight.cancel() }
         demands.removeAll { $0.sourceKey == sourceKey }
+        manualDemands?.removeAll { $0.sourceKey == sourceKey }
+        if manualDemands?.isEmpty == true { manualDemands = nil }
         for key in keys {
             memory.removeObject(forKey: key as NSString); cachedDates[key] = nil
             visibleKeys.remove(key); visibleImages[key] = nil
@@ -486,10 +535,12 @@ struct LivePreviewActivityPresentation: Equatable {
             $0.isValid() && (attempts[$0.key] ?? 0) >= 2 && outcomes[$0.key] != "success"
         }.map(\.key))
         guard !failed.isEmpty else { return }
+        userStopped = false
+        quietUntil = .distantPast
         beginRound(failed, requiresRefresh: true)
         refreshKeys = failed
         for key in failed { attempts[key] = 0; outcomes[key] = nil; deferredUntil[key] = nil }
-        capacityWaitUntil.removeAll(); refreshing = true; pump()
+        capacityWaitUntil.removeAll(); refreshing = true; ensureTimer(); pump(); publishActivity()
     }
     private func scheduleActivity() {
         guard owner != nil, activityTask == nil else { return }
@@ -510,9 +561,10 @@ struct LivePreviewActivityPresentation: Equatable {
         let completed = min(roundKeys.count, captured + cached + failed)
         let currentFlights = flights.values.filter { $0.generation == generation && !$0.cancellationRequested }
         let active = currentFlights.count
-        let queued = max(0, roundKeys.count - completed - currentFlights.filter { roundKeys.contains($0.demand.key) }.count)
+        let queued = userStopped ? 0 : max(0, roundKeys.count - completed - currentFlights.filter { roundKeys.contains($0.demand.key) }.count)
         let phase: LivePreviewActivityPresentation.Phase
-        if suspended || sleeping || draining > 0 { phase = .paused }
+        if userStopped { phase = .stopped }
+        else if suspended || sleeping || draining > 0 { phase = .paused }
         else if active > 0 { phase = .capturing }
         else if cacheTask != nil { phase = .restoring }
         else if completed == roundKeys.count { phase = failed > 0 ? .partial : .completed }
@@ -525,19 +577,25 @@ struct LivePreviewActivityPresentation: Equatable {
             captured: captured, cached: cached, failed: failed))
     }
     private func loadCache() {
-        guard cacheTask == nil else { return }
+        guard !cacheSuspended, cacheTask == nil else { return }
         let generation = self.generation
         cacheTask = Task { [weak self] in
             guard let self else { return }
             defer { if generation == self.generation { self.cacheTask = nil; self.pump() } }
-            while let demand = self.demands.first(where: { !self.loaded.contains($0.key) }) {
-                guard !Task.isCancelled, generation == self.generation else { return }
+            while !self.cacheSuspended, let demand = self.demands.first(where: { !self.loaded.contains($0.key) }) {
+                guard !Task.isCancelled, !self.cacheSuspended, generation == self.generation else { return }
+                let knownCapture = self.cachedDates[demand.key]
                 var entry = await self.cache.read(demand.key)
                 if entry == nil, let legacy = demand.legacyKey {
                     entry = await self.cache.read(legacy)
                     if let entry { await self.cache.store(entry, key: demand.key) }
                 }
-                guard !Task.isCancelled, generation == self.generation else { return }
+                guard !Task.isCancelled, !self.cacheSuspended, generation == self.generation else { return }
+                // Manual captures can finish while disk restoration is awaiting
+                // IO. An older cache read must not erase that new result.
+                if self.cachedDates[demand.key] != knownCapture {
+                    self.loaded.insert(demand.key); continue
+                }
                 guard demand.isValid(), self.sources[demand.key] == demand.sourceKey else {
                     self.loaded.insert(demand.key); continue
                 }
@@ -563,7 +621,10 @@ struct LivePreviewActivityPresentation: Equatable {
     }
     private func pump() {
         defer { scheduleActivity() }
-        guard draining == 0, !sleeping, !suspended, owner != nil else { interrupt(); return }
+        guard draining == 0, !sleeping, !suspended, !userStopped, owner != nil else { interrupt(); return }
+        let invalid = Set(demands.filter { !$0.isValid() }.map(\.key))
+        refreshKeys.subtract(invalid); roundKeys.subtract(invalid)
+        refreshing = !refreshKeys.isEmpty
         for flight in flights.values {
             if !mayCapture(), !(flight.reuseFrame && flight.demand.mayReuseFrame()) { flight.cancel() }
         }
@@ -586,10 +647,11 @@ struct LivePreviewActivityPresentation: Equatable {
                 beginRound(refreshKeys.union(missing), requiresRefresh: true)
             }
         }
-        // Local pictures are restored before network tasks are admitted.
-        guard !demands.contains(where: { $0.priority == 0 && $0.isValid() && !loaded.contains($0.key) }) else { return }
+        // Initial loads restore local pictures first. An explicit refresh can
+        // capture alongside disk restoration without waiting for the whole cache.
+        guard roundRequiresRefresh || !demands.contains(where: { $0.priority == 0 && $0.isValid() && !loaded.contains($0.key) }) else { return }
         let eligible = demands.filter {
-            loaded.contains($0.key) && $0.isValid() && flights[$0.key] == nil
+            (loaded.contains($0.key) || refreshKeys.contains($0.key)) && $0.isValid() && flights[$0.key] == nil
                 && (mayCapture() || $0.mayReuseFrame())
                 && (cachedDates[$0.key] == nil || refreshKeys.contains($0.key))
                 && (attempts[$0.key] ?? 0) < 2
@@ -635,28 +697,22 @@ struct LivePreviewActivityPresentation: Equatable {
             if slow && flights.values.contains(where: {
                 $0.slow || (!$0.slow && (demand.priority > 0 || visibleKeys.contains($0.demand.key)))
             }) { continue }
-            // Offscreen work uses one spare slot; it cannot fill the whole pool.
-            if demand.priority > 0 && flights.values.contains(where: { !visibleKeys.contains($0.demand.key) }) { continue }
+            // Reserve capacity for the visible first pass. Once it finishes,
+            // the remaining source-wide round can use the normal bounded pool.
+            if demand.priority > 0, visibleWaiting > 0 || visibleRunning > 0,
+               flights.values.contains(where: { !visibleKeys.contains($0.demand.key) }) { continue }
             start(demand, slow: slow)
         }
         if !autoRefresh, cacheTask == nil, flights.isEmpty, ordered.isEmpty,
            !demands.contains(where: {
                $0.isValid() && (attempts[$0.key] ?? 0) < 2
                    && (cachedDates[$0.key] == nil || refreshKeys.contains($0.key))
-                   && (mayCapture() || $0.mayReuseFrame())
            }) {
             timer?.invalidate(); timer = nil
         }
     }
     private func start(_ demand: LivePreviewDemand, slow: Bool) {
-        // A manual refresh can restart work after the idle timer was stopped.
-        // Capacity backoff must still wake even if every current check returns busy.
-        if timer == nil {
-            let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
-                MainActor.assumeIsolated { self?.pump() }
-            }
-            RunLoop.main.add(timer, forMode: .common); self.timer = timer
-        }
+        ensureTimer()
         let reuseFrame = demand.mayReuseFrame()
         if reuseFrame { frameAfter[demand.key] = clock().addingTimeInterval(30) }
         let flight = Flight(demand: demand, generation: generation, slow: slow, reuseFrame: reuseFrame, startedAt: clock())
@@ -666,7 +722,7 @@ struct LivePreviewActivityPresentation: Equatable {
             let budget = slow ? LivePreviewPolicy.slowAttempt : LivePreviewPolicy.firstAttempt
             var lease: LivePreviewConnectionLease?
             let admitted: @MainActor () -> Bool = { [weak self] in
-                guard let self, self.owner != nil, !self.sleeping, !self.suspended else { return false }
+                guard let self, self.owner != nil, !self.sleeping, !self.suspended, !self.userStopped else { return false }
                 return reuseFrame ? demand.mayReuseFrame() : self.mayCapture()
             }
             let deadline = Task {

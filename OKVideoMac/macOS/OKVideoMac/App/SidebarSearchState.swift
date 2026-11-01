@@ -15,7 +15,7 @@ final class SidebarSearchState: ObservableObject {
 enum SidebarSearchBinding {
     static func text(for section: AppSection, state: AppState, live: LiveBrowserSession) -> Binding<String> {
         switch section {
-        case .home: return Binding(get: { state.searchDraftKeyword }, set: { state.searchDraftKeyword = $0 })
+        case .home: return Binding(get: { state.sidebarVideoSearchText }, set: { state.sidebarVideoSearchText = $0 })
         case .live: return Binding(get: { live.searchText }, set: { live.searchText = $0 })
         case .favorites: return Binding(get: { state.sidebarSearch.favorites }, set: { state.sidebarSearch.favorites = $0 })
         case .history: return Binding(get: { state.sidebarSearch.history }, set: { state.sidebarSearch.history = $0 })

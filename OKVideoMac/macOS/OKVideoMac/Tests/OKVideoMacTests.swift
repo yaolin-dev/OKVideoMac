@@ -361,6 +361,91 @@ final class PosterNativeGridTests: XCTestCase {
 
 @MainActor
 final class PosterImagePipelineTests: XCTestCase {
+    func testViewportReservationsAdmitTopLeftBeforeLateBottomConsumers() async throws {
+        let client = ImageRepositoryHTTPClientProbe(body: try imageData(width: 32, height: 48), delayNanoseconds: 80_000_000)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let requests = (0..<12).map { PosterImageRequest(url: URL(string: "https://fixture.invalid/order-\($0).png")!, pixels: 256) }
+        let tokens = requests.map { _ in UUID() }
+        await repository.reservePosterDemands(requests.indices.map { .init(request: requests[$0], consumer: tokens[$0],
+            demand: .init(priority: .visible, distance: $0 / 4, readingOrder: $0)) })
+        // Emulate AppKit creating lower cards first. They must wait for the
+        // reserved top row even though their tasks arrive first.
+        var tasks: [Task<Void, Never>] = []
+        for index in (1..<12).reversed() {
+            tasks.append(Task { _ = try? await repository.posterImage(for: requests[index],
+                distance: index / 4, readingOrder: index, consumer: tokens[index]) })
+        }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        let before = await client.requestCount()
+        XCTAssertEqual(before, 0)
+        tasks.append(Task { _ = try? await repository.posterImage(for: requests[0], readingOrder: 0, consumer: tokens[0]) })
+        for task in tasks { await task.value }
+        let stats = await repository.posterPipelineStats()
+        XCTAssertEqual(stats.decoded, 12)
+        XCTAssertEqual(stats.maximumActive, 6)
+        XCTAssertEqual(stats.decodeWorkers, 2)
+        XCTAssertEqual(stats.decodedOnMain, 0)
+        XCTAssertEqual(stats.queued, 0)
+    }
+
+    func testPassiveCardWaitsForViewportAndCancellationDoesNotStrandReservation() async throws {
+        let client = ImageRepositoryHTTPClientProbe(body: try imageData(width: 32, height: 48))
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let first = PosterImageRequest(url: URL(string: "https://fixture.invalid/top.png")!, pixels: 256)
+        let second = PosterImageRequest(url: URL(string: "https://fixture.invalid/bottom.png")!, pixels: 256)
+        let card = Task { _ = try? await repository.posterImage(for: second, priority: .passive) }
+        try await Task.sleep(nanoseconds: 20_000_000)
+        let initial = await client.requestCount(); XCTAssertEqual(initial, 0)
+        let token = UUID()
+        await repository.reservePosterDemands([.init(request: first, consumer: token, demand: .init(priority: .visible, distance: 0))])
+        let cancelled = Task { _ = try? await repository.posterImage(for: first, consumer: token) }
+        cancelled.cancel(); await cancelled.value
+        _ = try await repository.posterImage(for: second, distance: 1, readingOrder: 1)
+        await card.value
+        let stats = await repository.posterPipelineStats()
+        XCTAssertEqual(stats.queued, 0); XCTAssertEqual(stats.active, 0)
+    }
+
+    func testVisibleTransientFailureRetriesOnceAndPermanentFailureDoesNotLoop() async throws {
+        for (failures, expected) in [(1, 2), (3, 2)] {
+            let client = ImageRepositoryHTTPClientProbe(body: try imageData(width: 32, height: 48), failuresBeforeSuccess: failures)
+            let (repository, directory) = try repository(client)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let request = PosterImageRequest(url: URL(string: "https://fixture.invalid/retry.png")!, pixels: 256)
+            do { _ = try await repository.posterImage(for: request); XCTAssertEqual(failures, 1) }
+            catch { XCTAssertEqual(failures, 3) }
+            let count = await client.requestCount(); XCTAssertEqual(count, expected)
+        }
+        let client = ImageRepositoryHTTPClientProbe(error: .statusCode(404))
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        _ = try? await repository.posterImage(for: .init(url: URL(string: "https://fixture.invalid/missing.png")!, pixels: 256))
+        let count = await client.requestCount(); XCTAssertEqual(count, 1)
+    }
+
+    func testNativeFailedPosterRefreshRetriesWithoutViewIdentityChangeAndCacheHeals() async throws {
+        let client = ImageRepositoryHTTPClientProbe(body: try imageData(width: 32, height: 48), failuresBeforeSuccess: 2)
+        let (repository, directory) = try repository(client)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let request = PosterImageRequest(url: URL(string: "https://fixture.invalid/recover.png")!, pixels: 256)
+        let coordinator = PosterNativeRemoteImage.Coordinator(), view = PosterLayerImageView()
+        coordinator.update(view: view, request: request, repository: repository, priority: .visible)
+        for _ in 0..<150 where coordinator.phase != .failed { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(coordinator.phase, .failed)
+        for _ in 0..<10 { coordinator.update(view: view, request: request, repository: repository, priority: .visible) }
+        let before = await client.requestCount(); XCTAssertEqual(before, 2, "Repaints cannot cause a retry loop")
+        coordinator.update(view: view, request: request, repository: repository, priority: .visible, retryRevision: 1)
+        for _ in 0..<100 where coordinator.phase != .loaded { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(coordinator.phase, .loaded); XCTAssertNotNil(view.layer?.contents)
+        let after = await client.requestCount(); XCTAssertEqual(after, 3)
+        coordinator.cancel()
+        coordinator.update(view: view, request: request, repository: repository, priority: .visible)
+        XCTAssertEqual(coordinator.phase, .loaded)
+        let cached = await client.requestCount(); XCTAssertEqual(cached, 3)
+    }
+
     func testLayerPosterCarrierKeepsGeometryAndReleasesImage() throws {
         let view = PosterLayerImageView(frame: NSRect(x: 0, y: 0, width: 140, height: 210))
         let context = try XCTUnwrap(CGContext(data: nil, width: 280, height: 420,
@@ -866,6 +951,25 @@ final class BrowserToolbarNativeScrollTests: XCTestCase {
 
 @MainActor
 final class PosterPaginationTests: XCTestCase {
+    func testScrollDrivenSearchNeedsFreshNearBottomDemandAndDoesNotChainWhileStationary() {
+        var demand = PosterPaginationDemand()
+        func viewport(_ revision: UInt64, top: CGFloat = 700) -> PosterScrollMetrics {
+            .init(offset: 100, viewport: .init(width: 900, height: 600), regionTop: top,
+                  regionSize: .zero, interactionRevision: revision)
+        }
+        XCTAssertFalse(demand.requestIfNeeded(metrics: viewport(0), nextPage: 1, eligible: true, requiresUserInteraction: true))
+        XCTAssertFalse(demand.requestIfNeeded(metrics: viewport(1, top: 1500), nextPage: 1, eligible: true, requiresUserInteraction: true))
+        XCTAssertTrue(demand.requestIfNeeded(metrics: viewport(1), nextPage: 1, eligible: true, requiresUserInteraction: true))
+        XCTAssertFalse(demand.requestIfNeeded(metrics: viewport(2), nextPage: 2, eligible: true, requiresUserInteraction: true))
+        demand.finish(page: 1)
+        // A response/layout change alone cannot expand the result budget again.
+        XCTAssertFalse(demand.requestIfNeeded(metrics: viewport(1), nextPage: 2, eligible: true, requiresUserInteraction: true))
+        XCTAssertTrue(demand.requestIfNeeded(metrics: viewport(2), nextPage: 2, eligible: true, requiresUserInteraction: true))
+        demand.finish(page: 2)
+        XCTAssertFalse(demand.requestIfNeeded(metrics: viewport(2), nextPage: 3, eligible: true, requiresUserInteraction: true))
+        XCTAssertTrue(demand.requestIfNeeded(metrics: viewport(3), nextPage: 3, eligible: true, requiresUserInteraction: true))
+    }
+
     private func metrics(_ offset: CGFloat = 0, top: CGFloat = 1500, width: CGFloat = 900) -> PosterScrollMetrics {
         .init(offset: offset, viewport: CGSize(width: width, height: 600), regionTop: top, regionSize: CGSize(width: width, height: 44))
     }
@@ -1063,9 +1167,12 @@ final class PosterBrowseLayoutTests: XCTestCase {
         let up = PosterPrefetchBand(firstRow: 4, lastRow: 5, columns: 3, pixels: 256,
             count: items.count, direction: .up, hasVisibleRows: true).plan(items: items)
         XCTAssertEqual(Array(down.prefix(9).map { $0.request.url.lastPathComponent }),
-            ["15.png", "16.png", "17.png", "12.png", "13.png", "14.png", "18.png", "19.png", "20.png"])
+            ["12.png", "13.png", "14.png", "15.png", "16.png", "17.png", "18.png", "19.png", "20.png"])
         XCTAssertEqual(Array(up.prefix(9).map { $0.request.url.lastPathComponent }),
             ["12.png", "13.png", "14.png", "15.png", "16.png", "17.png", "9.png", "10.png", "11.png"])
+        XCTAssertEqual(down.prefix(6).map { $0.demand.readingOrder }, Array(12..<18))
+        XCTAssertEqual(up.prefix(6).map { $0.demand.readingOrder }, Array(12..<18))
+        XCTAssertEqual(down.prefix(6).map { $0.demand.distance }, [0, 0, 0, 1, 1, 1])
         XCTAssertEqual(down[6].demand, .init(priority: .forward, distance: 0))
         XCTAssertEqual(up[6].demand, .init(priority: .forward, distance: 0))
         XCTAssertEqual(down[9].demand, .init(priority: .reverse, distance: 0))
@@ -2174,6 +2281,18 @@ final class PlayerSeekBoundaryRegressionTests: XCTestCase {
         _ = guardState.begin(requestGeneration: 7, target: 516.846)
         guardState.markPlaybackRestart(requestGeneration: 7)
         XCTAssertFalse(guardState.permitsHistory(PlayerSnapshot(status: .playing, position: 2773.995, duration: 2773.995), requestGeneration: 7))
+    }
+
+    func testConfirmedSeekCanPersistBeforeThreeSecondsOfPlayback() {
+        var guardState = PlayerPostSeekEndGuard()
+        _ = guardState.begin(requestGeneration: 7, target: 30)
+        let paused = PlayerSnapshot(status: .paused, position: 30, duration: 360)
+        XCTAssertFalse(guardState.permitsHistory(paused, requestGeneration: 7))
+        guardState.markPlaybackRestart(requestGeneration: 7)
+        XCTAssertTrue(guardState.permitsHistory(paused, requestGeneration: 7))
+        XCTAssertTrue(guardState.isProtecting(requestGeneration: 7), "History confirmation must not weaken EOF protection")
+        XCTAssertFalse(guardState.permitsHistory(PlayerSnapshot(status: .paused, position: 360, duration: 360), requestGeneration: 7))
+        XCTAssertFalse(guardState.permitsHistory(PlayerSnapshot(status: .paused, position: 30, duration: 360, isSeeking: true), requestGeneration: 7))
     }
 
     func testIntentionalEndAndNaturalProgressRemainEligibleForHistory() {
@@ -19156,8 +19275,8 @@ final class OKVideoMacTests: XCTestCase {
         )
     }
 
-    func testLiveControlsAutoHideWhenPointerIsParkedOverOverlay() {
-        XCTAssertTrue(
+    func testLiveControlsStayVisibleWhilePointerUsesButtons() {
+        XCTAssertFalse(
             PlayerControlVisibilityPolicy.shouldAutoHide(
                 isLivePlayback: true,
                 controlsHovering: true,
@@ -22210,6 +22329,8 @@ final class NodeBundleCompatibilityTests: XCTestCase {
             patchResourceSHA256: NodeBundleRuntimeService.sha256Hex(patchData),
             moduleResourceName: shipped.moduleResourceName,
             moduleResourceSHA256: NodeBundleRuntimeService.sha256Hex(moduleData),
+            rangeResourceName: shipped.rangeResourceName,
+            rangeResourceSHA256: shipped.rangeResourceSHA256,
             legacyCacheKeys: []
         )
 
@@ -31102,6 +31223,7 @@ final class LiveGuidePresentationStateTests: XCTestCase {
                 slices: [EPGGuideTimeSlice(start: start, end: start.addingTimeInterval(43200))],
                 coherence: .xmltv(token), rows: rows)
             guide.begin(identity, refreshing: false)
+            guide.setRefreshInfo(.init(lastUpdatedAt: Date()), identity: identity)
             XCTAssertTrue(guide.publish(snapshot, identity: identity))
         }
         try publish()
@@ -31308,6 +31430,82 @@ final class LiveGuidePresentationStateTests: XCTestCase {
         state.begin(restarted, refreshing: false)
         XCTAssertEqual(state.lifecycle, .loadingInitial)
         XCTAssertNil(state.snapshot)
+    }
+
+    func testGuidePollingUsesCacheDeadlineAndRetryWithoutBusyLoop() {
+        var schedule = LiveGuideRefreshSchedule()
+        let now = Date(timeIntervalSince1970: 1000)
+        XCTAssertTrue(schedule.isDue(at: now))
+        schedule.completed(info: .init(nextRefreshAt: now.addingTimeInterval(300)), at: now)
+        for second in stride(from: 0, to: 300, by: 30) {
+            XCTAssertFalse(schedule.isDue(at: now.addingTimeInterval(Double(second))))
+        }
+        XCTAssertTrue(schedule.isDue(at: now.addingTimeInterval(300)))
+        schedule.completed(info: .init(nextRefreshAt: now.addingTimeInterval(60), retryAt: now.addingTimeInterval(60)), at: now)
+        XCTAssertFalse(schedule.isDue(at: now.addingTimeInterval(30)))
+        XCTAssertTrue(schedule.isDue(at: now.addingTimeInterval(60)))
+        schedule.completed(info: .init(nextRefreshAt: now.addingTimeInterval(-30)), at: now)
+        XCTAssertFalse(schedule.isDue(at: now), "Expired metadata cannot cause an immediate query loop")
+        schedule.reset()
+        XCTAssertTrue(schedule.isDue(at: now), "A new page/wake must be allowed to check immediately")
+    }
+
+    func testManualUnchangedFeedbackIgnoresTokensAndRejectsLateScope() throws {
+        let state = LiveGuideState(), source = EPGSourceKey(.imported(UUID())), incarnation = UUID()
+        let first = identity(source: source, incarnation: incarnation)
+        let old = try snapshot(first, title: "Same programme")
+        state.begin(first, refreshing: true)
+        XCTAssertTrue(state.publish(old, identity: first))
+        let next = identity(source: source, incarnation: incarnation)
+        state.begin(next, refreshing: true)
+        XCTAssertEqual(state.snapshot, old, "Refreshing must keep the previous schedule mounted")
+        XCTAssertTrue(state.publish(try snapshot(next, title: "Same programme"), identity: next))
+        state.setRefreshInfo(.init(lastUpdatedAt: Date()), identity: next)
+        state.finishRefresh(previous: old, manual: true, identity: next)
+        XCTAssertTrue(state.unchangedAfterManualRefresh)
+        let other = identity(source: EPGSourceKey(.imported(UUID())), incarnation: incarnation)
+        state.begin(other, refreshing: true)
+        state.setRefreshInfo(.init(lastUpdatedAt: .distantPast, retryAt: .distantFuture), identity: next)
+        state.finishRefresh(previous: old, manual: true, identity: next)
+        XCTAssertNil(state.refreshInfo.lastUpdatedAt)
+        XCTAssertFalse(state.unchangedAfterManualRefresh)
+    }
+
+    func testAllRowsFailingRefreshKeepsPreviousGuideAndDoesNotReportSuccess() throws {
+        let state = LiveGuideState(), source = EPGSourceKey(.xtream(UUID())), incarnation = UUID()
+        let first = identity(source: source, incarnation: incarnation, capability: .xtreamShort)
+        let old = try snapshot(first, title: "Saved programme")
+        state.begin(first, refreshing: true)
+        XCTAssertTrue(state.publish(old, identity: first))
+        let next = identity(source: source, incarnation: incarnation, capability: .xtreamShort)
+        state.begin(next, refreshing: true)
+        let failedRows = old.rows.map { EPGGuideRow(channel: $0.channel, token: nil, match: $0.match,
+            availability: .failed, programmes: [], state: .failed(.unavailable)) }
+        let failed = try EPGGuideSnapshot(source: source, revision: next.revision,
+            demandRevision: next.demandRevision, slices: old.slices, coherence: .perRowToken, rows: failedRows)
+        XCTAssertTrue(state.publish(failed, identity: next))
+        let retry = Date().addingTimeInterval(120)
+        state.setRefreshInfo(.init(lastUpdatedAt: Date(), nextRefreshAt: retry, retryAt: retry), identity: next)
+        state.finishRefresh(previous: old, manual: true, identity: next)
+        XCTAssertEqual(state.snapshot, old)
+        XCTAssertFalse(state.unchangedAfterManualRefresh)
+        guard case .content(let content) = state.lifecycle else { return XCTFail("Cached content was discarded") }
+        XCTAssertEqual(content.refreshPhase, .backoff)
+        XCTAssertFalse(state.isRefreshing)
+    }
+
+    func testFailedRefreshWithoutRetryMetadataCannotClaimUnchanged() throws {
+        let state = LiveGuideState(), source = EPGSourceKey(.imported(UUID())), incarnation = UUID()
+        let first = identity(source: source, incarnation: incarnation)
+        let old = try snapshot(first, title: "Saved")
+        state.begin(first, refreshing: true)
+        XCTAssertTrue(state.publish(old, identity: first))
+        let next = identity(source: source, incarnation: incarnation)
+        state.begin(next, refreshing: true)
+        state.fail(.queryBudgetExceeded, identity: next)
+        state.finishRefresh(previous: old, manual: true, identity: next)
+        XCTAssertEqual(state.snapshot, old)
+        XCTAssertFalse(state.unchangedAfterManualRefresh)
     }
 
     private func identity(source: EPGSourceKey, incarnation: UUID,
@@ -33085,6 +33283,51 @@ final class XtreamFileNetworkTests: XCTestCase {
         throw NSError(domain: "XtreamFileNetworkTests", code: 1, userInfo: [NSLocalizedDescriptionKey: "Condition did not become true"])
     }
 
+    func testMediaProxyToggleControlsRealRequestsAndKeepsCurrentLoadPinned() async throws {
+        let proxy = try XtreamNetworkFixture(); try await proxy.start()
+        defer { proxy.close() }
+        let intent = MediaProxyToggleTestIntent()
+        let port = try XCTUnwrap(proxy.url.port)
+        let player = try MPVPlayerClient(audioPreference: .init(muted: true), mediaNetworkPlanProvider: { media in
+            MediaPlaybackNetworkPlan.make(media: media, enabled: intent.enabled,
+                settings: ["HTTPEnable": 1, "HTTPProxy": "127.0.0.1", "HTTPPort": port,
+                           "HTTPSEnable": 1, "HTTPSProxy": "127.0.0.1", "HTTPSPort": port])
+        })
+        var latest = PlayerSnapshot()
+        let reader = Task { @MainActor in
+            for await event in player.events { if case .snapshot(let value, _) = event { latest = value } }
+        }
+        do {
+            try await player.load(media(URL(string: "http://media.fixture.invalid/redirect")!), startPosition: nil, requestID: UUID())
+            try await waitUntil { latest.mediaProxyPreference == true && latest.mediaNetworkRoute == .systemProxy }
+            XCTAssertTrue(proxy.requests.contains { request in
+                let target = request.split(separator: " ").dropFirst().first.flatMap { URL(string: String($0)) }
+                return request.hasPrefix("GET ") && target?.scheme == "http"
+                    && target?.host == "cdn.fixture.invalid" && target?.path == "/audio.wav"
+            }, "Redirect must use an absolute-form request through the selected proxy: \(proxy.requests.compactMap { $0.components(separatedBy: "\r\n").first })")
+            intent.enabled = false
+            let stillApplied = await player.diagnosticPropertyForTesting("http-proxy")
+            XCTAssertEqual(stillApplied, proxy.url.absoluteString)
+            XCTAssertEqual(latest.mediaProxyPreference, true, "Changing the preference must not move an active transfer")
+            try await player.load(media(proxy.url.appendingPathComponent("audio.wav")), startPosition: 3, requestID: UUID())
+            try await waitUntil { latest.mediaProxyPreference == false && latest.position >= 2.5 }
+            let directOption = await player.diagnosticPropertyForTesting("stream-lavf-o")
+            XCTAssertTrue(directOption?.contains("http_proxy=") == true)
+            XCTAssertTrue(proxy.requests.contains { $0.hasPrefix("GET /audio.wav ") })
+            intent.enabled = true
+            do {
+                try await player.load(media(URL(string: "https://secure.fixture.invalid/audio.wav")!), startPosition: nil, requestID: UUID())
+                XCTFail("The fixture deliberately rejects TLS tunnels")
+            } catch { }
+            XCTAssertTrue(proxy.requests.contains { $0.hasPrefix("CONNECT secure.fixture.invalid:443 ") }, "HTTPS must reach the selected proxy using CONNECT")
+            intent.enabled = false
+            try await player.load(media(proxy.url.appendingPathComponent("audio.wav")), startPosition: nil, requestID: UUID())
+            let cleared = await player.diagnosticPropertyForTesting("http-proxy")
+            XCTAssertEqual(cleared, "")
+            reader.cancel(); await player.shutdown()
+        } catch { reader.cancel(); await player.shutdown(); throw error }
+    }
+
     func testNetworkIntentDoesNotSelectLivePlaybackBehavior() {
         let vod = media(URL(string: "https://fixture.invalid/movie.mp4")!)
         XCTAssertTrue(PlayerMediaNetworkPolicy.usesSystemProxy(vod))
@@ -33215,6 +33458,15 @@ final class XtreamFileNetworkTests: XCTestCase {
     }
 }
 
+private final class MediaProxyToggleTestIntent: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = true
+    var enabled: Bool {
+        get { lock.lock(); defer { lock.unlock() }; return value }
+        set { lock.lock(); defer { lock.unlock() }; value = newValue }
+    }
+}
+
 /// A bounded loopback HTTP server also accepts absolute-form proxy requests.
 /// No DNS, upstream service or user proxy configuration is needed by these tests.
 private final class XtreamNetworkFixture: @unchecked Sendable {
@@ -33261,6 +33513,9 @@ private final class XtreamNetworkFixture: @unchecked Sendable {
             if target.contains("/hang") { return }
             if target.contains("/redirect") {
                 self.reply(connection, status: "302 Found", headers: "Location: http://cdn.fixture.invalid/audio.wav\r\n", body: Data()); return
+            }
+            if text.hasPrefix("CONNECT ") {
+                self.reply(connection, status: "403 Forbidden", headers: "", body: Data()); return
             }
             if target.contains("/denied") {
                 self.reply(connection, status: "403 Forbidden", headers: "", body: Data()); return

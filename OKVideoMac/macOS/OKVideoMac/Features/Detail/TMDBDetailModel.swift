@@ -14,6 +14,25 @@ enum TMDBMatchingPreferences {
     }
 }
 
+enum TMDBMatchConfirmationReason: Equatable {
+    case generic, ambiguous, identityConflict, directorConflict, unverifiedDirector
+
+    var message: String {
+        switch self {
+        case .generic:
+            return L10n.string("tmdb.match.pending-help", fallback: "Candidates found. Review the title, year and director to confirm the correct work.")
+        case .ambiguous:
+            return L10n.string("tmdb.match.reason.ambiguous", fallback: "Multiple titles remain possible. Review the year, type and cast before choosing.")
+        case .identityConflict:
+            return L10n.string("tmdb.match.reason.identity-conflict", fallback: "The source and candidate disagree on the year, media type or season. Review these details before choosing.")
+        case .directorConflict:
+            return L10n.string("tmdb.match.reason.director-conflict", fallback: "The source and TMDB director names disagree. Confirm that this is the same work before choosing.")
+        case .unverifiedDirector:
+            return L10n.string("tmdb.match.reason.director-unverified", fallback: "The director's name or translation is not verified. Check the title, year and cast before choosing.")
+        }
+    }
+}
+
 private struct TMDBEpisodeMappingInput: Equatable, Sendable {
     let revision: UInt64
     let source: PlaySource
@@ -84,6 +103,17 @@ final class TMDBDetailModel: ObservableObject {
     var needsMatchConfirmation: Bool {
         selection == nil && !candidates.isEmpty && !isPreparing && !isAwaitingSourceIdentity && !originalRequested
     }
+    var matchConfirmationReason: TMDBMatchConfirmationReason? {
+        guard needsMatchConfirmation, let input else { return nil }
+        let evidence = candidates.map { TMDBMatcher.assess($0, input: input) }
+        if evidence.filter({ $0.exactTitle && !$0.conflict }).count > 1 { return .ambiguous }
+        guard evidence.count == 1, let first = evidence.first else { return .generic }
+        if first.identityConflict { return .identityConflict }
+        if first.directorConflict { return .directorConflict }
+        if first.unresolvedDirector { return .unverifiedDirector }
+        return .generic
+    }
+    var matchConfirmationMessage: String { (matchConfirmationReason ?? .generic).message }
     private var repository: TMDBRepository?
     private var input: TMDBMatchInput? {
         didSet { if oldValue != input { invalidateEpisodeMapping() } }
@@ -205,9 +235,9 @@ final class TMDBDetailModel: ObservableObject {
                 if case .candidates(let candidates) = result {
                     for candidate in candidates.prefix(4) {
                         let evidence = TMDBMatcher.assess(candidate, input: value)
-                        NSLog("[TMDB] rejected work=%d title=%@ year=%@ type=%@ cast=%@ director=%@ conflict=%@ directorPending=%@", candidate.reference.id,
+                        NSLog("[TMDB] rejected work=%d title=%@ year=%@ type=%@ cast=%@ director=%@ conflict=%@ directorPending=%@ directorConflict=%@", candidate.reference.id,
                               String(evidence.exactTitle), String(evidence.matchingYear), String(evidence.matchingType), String(evidence.corroboratedCast),
-                              String(evidence.corroboratedDirector), String(evidence.conflict), String(evidence.unresolvedDirector))
+                              String(evidence.corroboratedDirector), String(evidence.conflict), String(evidence.unresolvedDirector), String(evidence.directorConflict))
                     }
                 }
                 self.apply(result)
@@ -936,7 +966,7 @@ extension EnvironmentValues {
 }
 
 @MainActor final class TMDBRelatedPage: ObservableObject, Identifiable {
-    enum Kind { case person, search, detail }
+    enum Kind { case person, search, detail, folder }
     let id = UUID()
     let kind: Kind
     let title: String
@@ -957,9 +987,19 @@ extension EnvironmentValues {
     var nextPage = 1
     var hasMore = false
     var searchGeneration = UUID()
-    var searchPaging = SearchPagingState()
-    var maximumRetained = Int.max
-    var maximumPerSite = Int.max
+    @Published var searchPaging = SearchPagingState()
+    @Published var selectedSearchSiteKey: String?
+    @Published var failures: [SearchFailure] = []
+    @Published var termination: MultiSiteSearchTermination?
+    @Published var imageRetryRevision: UInt64 = 0
+    var searchSites: [SiteConfiguration] = []
+    let searchBrowseMemory = SearchBrowseMemory()
+    var navigationContext: SearchFolderNavigationContext?
+    var folderPagination: Pagination?
+    var sidebarDraft: String?
+
+    var maximumRetained = SearchPagingState.initialMaximumResults
+    var maximumPerSite = SearchPagingState.initialMaximumPerSite
     @Published var totalSites = 0
     @Published var completedSites = 0
     var task: Task<Void, Never>?
@@ -981,39 +1021,111 @@ extension EnvironmentValues {
 
 @MainActor final class TMDBRelatedBrowser: ObservableObject {
     @Published var pages: [TMDBRelatedPage] = []
-    func open(person: TMDBPerson, source: VideoSummary, state: AppState) {
-        guard let configuration = state.activeConfigurationRecord?.id else { return }
-        let page = TMDBRelatedPage(kind: .person, title: person.name, source: source, configurationID: configuration, person: person)
-        pages.append(page); load(page, state: state)
+    private weak var state: AppState?
+
+    private func rememberDraft() {
+        if let page = pages.last, page.kind == .search { page.sidebarDraft = state?.relatedSearchDraft }
     }
-    func select(_ item: VideoSummary, page: TMDBRelatedPage, state: AppState) {
-        guard page.kind != .detail else { return }
-        if page.kind == .person {
-            guard let work = page.filteredWorks.first(where: { $0.id == item.videoID }) else { return }
-            let search = TMDBRelatedPage(kind: .search, title: work.work.displayTitle, source: page.source, configurationID: page.configurationID, candidate: work)
-            pages.append(search); load(search, state: state)
-        } else {
-            let detail = TMDBRelatedPage(kind: .detail, title: item.title, source: item, configurationID: page.configurationID)
-            pages.append(detail); load(detail, state: state)
+    private func syncSidebar() {
+        guard let state else { return }
+        guard let page = pages.last, page.kind == .search else {
+            state.relatedSearchDraft = nil; state.relatedSearchSubmit = nil; return
+        }
+        state.relatedSearchDraft = page.sidebarDraft ?? page.title
+        state.relatedSearchSubmit = { [weak self, weak state, weak page] keyword in
+            guard let self, let state, let page, self.pages.last?.id == page.id else { return }
+            let normalized = keyword.precomposedStringWithCanonicalMapping.trimmingCharacters(in: .whitespacesAndNewlines)
+            if normalized == page.title { return }
+            self.cancelSearch(page)
+            let next = TMDBRelatedPage(kind: .search, title: normalized, source: page.source, configurationID: page.configurationID)
+            self.pages[self.pages.count - 1] = next
+            self.syncSidebar(); self.load(next, state: state)
         }
     }
-    func pop() { guard let page = pages.popLast() else { return }; page.task?.cancel(); page.metadata.cancel() }
-    func clear() { for page in pages { page.task?.cancel(); page.metadata.cancel() }; pages = [] }
+    func open(person: TMDBPerson, source: VideoSummary, state: AppState) {
+        guard let configuration = state.activeConfigurationRecord?.id else { return }
+        self.state = state; rememberDraft()
+        let page = TMDBRelatedPage(kind: .person, title: person.name, source: source, configurationID: configuration, person: person)
+        pages.append(page); syncSidebar(); load(page, state: state)
+    }
+    func select(_ item: VideoSummary, page: TMDBRelatedPage, state: AppState) {
+        guard page.kind != .detail, state.activeConfigurationRecord?.id == page.configurationID else { return }
+        self.state = state; rememberDraft()
+        let next: TMDBRelatedPage
+        if page.kind == .person {
+            guard let work = page.filteredWorks.first(where: { $0.id == item.videoID }) else { return }
+            next = TMDBRelatedPage(kind: .search, title: work.work.displayTitle, source: page.source, configurationID: page.configurationID, candidate: work)
+        } else {
+            state.recordSearchSelection(item)
+            switch state.relatedItemRoute(item, parent: page) {
+            case .action:
+                Task { await state.performHomeAction(SiteActionItem(summary: item)) }; return
+            case .search:
+                next = TMDBRelatedPage(kind: .search, title: item.title, source: item, configurationID: page.configurationID)
+            case .folder:
+                next = TMDBRelatedPage(kind: .folder, title: item.title, source: item, configurationID: page.configurationID)
+                next.navigationContext = page.navigationContext ?? state.relatedFolderContext(for: item)
+            case .detail:
+                next = TMDBRelatedPage(kind: .detail, title: item.title, source: item, configurationID: page.configurationID, candidate: page.candidate)
+            }
+        }
+        pages.append(next); syncSidebar(); load(next, state: state)
+    }
+    func pop() {
+        rememberDraft()
+        guard let page = pages.popLast() else { return }
+        cancelSearch(page); page.metadata.cancel(); syncSidebar()
+    }
+    func clear() {
+        for page in pages { cancelSearch(page); page.metadata.cancel() }
+        pages = []; syncSidebar()
+    }
+    func cancelSearch(_ page: TMDBRelatedPage) {
+        page.task?.cancel(); page.task = nil; page.searchGeneration = UUID()
+        page.isLoading = false; page.searchPaging.loading = false
+        if page.kind == .search { page.searchPaging.stopped = true; page.termination = .cancelled }
+    }
+    func restartScope(_ page: TMDBRelatedPage, state: AppState) {
+        cancelSearch(page)
+        page.results = []; page.failures = []; page.searchPaging = SearchPagingState()
+        page.selectedSearchSiteKey = nil; page.searchBrowseMemory.reset()
+        page.revision &+= 1
+        load(page, state: state)
+    }
+    func refreshSearch(_ page: TMDBRelatedPage, state: AppState, force: Bool) async {
+        guard !page.isLoading else { return }
+        page.imageRetryRevision &+= 1
+        page.searchBrowseMemory.acceptPendingOrders()
+        let eligible = page.searchPaging.eligible(selected: page.selectedSearchSiteKey, retry: true)
+        if !force, eligible.contains(where: { page.searchPaging.cursors[$0]?.error != nil || page.searchPaging.cursors[$0]?.uncertain == true }) {
+            _ = await loadMore(page, state: state, retry: true, failuresOnly: true); return
+        }
+        if !force, page.searchPaging.stopped, !eligible.isEmpty {
+            _ = await loadMore(page, state: state, retry: true); return
+        }
+        load(page, state: state, refresh: !page.searchPaging.order.isEmpty)
+        await page.task?.value
+    }
     func load(_ page: TMDBRelatedPage, state: AppState, refresh: Bool = false) {
+        self.state = state
         page.task?.cancel(); page.searchGeneration = UUID(); page.isLoading = true; page.error = nil
+        if refresh { page.imageRetryRevision &+= 1 }
+        let generation = page.searchGeneration
         page.task = Task { [weak page, weak state] in
             guard let page, let state else { return }
-            defer { if !Task.isCancelled { page.isLoading = false } }
+            defer { if page.searchGeneration == generation { page.isLoading = false; page.task = nil } }
             do {
                 guard state.activeConfigurationRecord?.id == page.configurationID else { throw CancellationError() }
                 switch page.kind {
                 case .person:
                     guard let repository = state.tmdbRepository, let person = page.person else { throw TMDBError.invalidInput }
-                    if page.works.isEmpty, let cached = await repository.cachedPersonWorks(id: person.id) { page.works = cached }
+                    if page.works.isEmpty, let cached = await repository.cachedPersonWorks(id: person.id) {
+                        try Task.checkCancellation(); page.works = cached
+                    }
                     let values = try await repository.personWorks(id: person.id, refresh: refresh)
                     try Task.checkCancellation(); page.works = values
-                case .search:
-                    try await state.searchRelatedWork(page, refresh: refresh)
+                case .search: try await state.searchRelatedWork(page, refresh: refresh)
+                case .folder: try await state.loadRelatedFolder(page, refresh: refresh)
                 case .detail:
                     let decision = state.tmdbRuntime.decisionForEntry()
                     let detail = try await state.loadRelatedWork(page.source, configurationID: page.configurationID)
@@ -1028,14 +1140,39 @@ extension EnvironmentValues {
                 }
                 page.revision &+= 1
             } catch {
-                if !Task.isCancelled { page.error = L10n.string("tmdb.person.failed", fallback: "Unable to load this page. Try again.") }
+                if !AsyncCancellationPolicy.isCancellation(error), page.searchGeneration == generation {
+                    page.error = L10n.string("tmdb.person.failed", fallback: "Unable to load this page. Try again.")
+                }
             }
         }
     }
-    func loadMore(_ page: TMDBRelatedPage, state: AppState) async -> Bool {
-        if page.kind == .person { page.displayedCount += 48; return true }
-        guard !page.isLoading, page.hasMore else { return false }
-        load(page, state: state); await page.task?.value; return page.error == nil
+    func loadMore(_ page: TMDBRelatedPage, state: AppState, retry: Bool = false, failuresOnly: Bool = false) async -> Bool {
+        if page.kind == .person {
+            guard page.displayedCount < page.filteredWorks.count else { return false }
+            page.displayedCount += 48; return true
+        }
+        guard !page.isLoading else { return false }
+        if page.kind == .folder {
+            guard page.hasMore else { return false }
+            load(page, state: state); await page.task?.value; return page.error == nil
+        }
+        guard page.kind == .search, retry || !page.searchPaging.stopped,
+              !page.searchPaging.eligible(selected: page.selectedSearchSiteKey, retry: retry).isEmpty else { return false }
+        page.isLoading = true; page.searchPaging.loading = true; page.error = nil
+        let generation = page.searchGeneration
+        var advanced = false
+        let task = Task {
+            do { advanced = try await state.continueRelatedSearch(page, retry: retry, failuresOnly: failuresOnly) }
+            catch {
+                if !AsyncCancellationPolicy.isCancellation(error), page.searchGeneration == generation {
+                    page.error = L10n.string("tmdb.person.failed", fallback: "Unable to load this page. Try again.")
+                }
+            }
+        }
+        page.task = task
+        await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
+        if page.searchGeneration == generation { page.task = nil; page.isLoading = false; page.searchPaging.loading = false }
+        return advanced
     }
 }
 

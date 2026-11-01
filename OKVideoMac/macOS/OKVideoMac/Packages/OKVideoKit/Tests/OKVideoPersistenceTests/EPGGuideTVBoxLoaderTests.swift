@@ -45,6 +45,29 @@ final class EPGGuideTVBoxLoaderTests: XCTestCase {
         _ = await repository.close()
     }
 
+    func testManualRefreshAcrossTwoSlicesDownloadsEachDayOnceAndUpdatesNowNext() async throws {
+        let directory = URL(fileURLWithPath: "/private/tmp/EPGCache-TVBox-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let repository = EPGProductionRepository(cacheDirectory: directory)
+        let client = DayClient(), source = LiveSourceID.imported(UUID())
+        let channels = [channel("forced")]
+        let request = try demand(channels, source: source)
+        let first = try await EPGGuideTVBoxLoader.load(repository: repository, demand: request,
+            httpClient: client, xmltvKey: nil)
+        let before = await client.metrics()
+        let forced = try await EPGGuideTVBoxLoader.load(repository: repository, demand: request,
+            httpClient: client, xmltvKey: nil, refreshID: UUID())
+        let after = await client.metrics()
+        XCTAssertEqual(after.calls, before.calls * 2)
+        XCTAssertNotEqual(forced.rows[0].token?.dataVersion, first.rows[0].token?.dataVersion)
+        XCTAssertEqual(forced.rows[0].programmes.map(\.programme), first.rows[0].programmes.map(\.programme))
+        _ = try await EPGGuideTVBoxLoader.nowNext(repository: repository, source: source, revision: request.revision,
+            channel: channels[0], at: anchor.addingTimeInterval(11.5 * 3600), demandRevision: UUID(), httpClient: client)
+        let last = await client.metrics()
+        XCTAssertEqual(last.calls, after.calls, "Now/Next must reuse the refreshed daily data")
+        _ = await repository.close()
+    }
+
     func testXMLTVFallbackAndAPIRowsAreDeliveredTogether() async throws {
         let directory = URL(fileURLWithPath: "/private/tmp/EPGCache-TVBox-" + UUID().uuidString)
         defer { if FileManager.default.fileExists(atPath: directory.path) { try? FileManager.default.removeItem(at: directory) } }

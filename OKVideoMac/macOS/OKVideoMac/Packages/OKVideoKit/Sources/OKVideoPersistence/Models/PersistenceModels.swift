@@ -312,7 +312,7 @@ public extension HistoryNavigationRecipe {
 }
 
 public struct HistoryPlaybackReference: Codable, Equatable, Sendable {
-    public static let currentVersion = 4
+    public static let currentVersion = 5
 
     public var version: Int
     public var sourceIdentity: String
@@ -325,6 +325,7 @@ public struct HistoryPlaybackReference: Codable, Equatable, Sendable {
     /// Exact credential-free navigation path captured when the user selects
     /// the episode. Optional for version 1-3 records.
     public var navigationRecipe: HistoryNavigationRecipe?
+    public var originalResource: OriginalMediaResource?
     /// Only non-sensitive request context may be persisted here. Cookie and
     /// Authorization are intentionally reacquired from the provider.
     public var replayHeaders: [String: String]
@@ -335,6 +336,7 @@ public struct HistoryPlaybackReference: Codable, Equatable, Sendable {
         resourceIdentity: String,
         providerResourceReference: PlaybackResourceReference? = nil,
         navigationRecipe: HistoryNavigationRecipe? = nil,
+        originalResource: OriginalMediaResource? = nil,
         replayHeaders: [String: String] = [:]
     ) {
         self.version = version
@@ -342,6 +344,7 @@ public struct HistoryPlaybackReference: Codable, Equatable, Sendable {
         self.resourceIdentity = resourceIdentity
         self.providerResourceReference = providerResourceReference
         self.navigationRecipe = navigationRecipe
+        self.originalResource = originalResource?.validated
         self.replayHeaders = replayHeaders
     }
 }
@@ -365,6 +368,7 @@ public extension HistoryPlaybackReference {
                     providerResourceReference
                 ),
             navigationRecipe: navigationRecipe?.sanitizedForPersistence(),
+            originalResource: originalResource?.validated,
             replayHeaders: PlaybackPersistencePolicy.sanitizedReplayHeaders(
                 replayHeaders
             )

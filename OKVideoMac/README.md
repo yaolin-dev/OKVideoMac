@@ -1,5 +1,10 @@
 # OKVideoMac
 
+- 当前发布候选：0.9.1（Build 179），仅本地验收，尚未公开发布。
+- 目标 tag：`v0.9.1`，尚未创建；源以 LOCAL_ACCEPTANCE_SNAPSHOT.json 固定。
+- 本地 source release index：`OKVideoMac-0.9.1-build179-SOURCE_RELEASE_INDEX.json`。
+- 本轮说明见[发布说明](../Docs/RELEASE_NOTES_0.9.1.md)和[验收记录](../Docs/RELEASE_READINESS_0.9.1.md)。
+
 OKVideoMac 是面向 Apple Silicon Mac 的原生视频与直播客户端。源兼容性主要取决于
 原生 Xtream、M3U/XMLTV、配置格式和运行时，而不是简单以 TVBox、FongMi、MiraPlay 或 CatPawOpen
 等生态名称判断。最新稳定版本为 **0.9.0（Build 155）**，支持

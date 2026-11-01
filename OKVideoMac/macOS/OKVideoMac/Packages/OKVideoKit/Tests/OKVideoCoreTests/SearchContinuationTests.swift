@@ -2,6 +2,35 @@ import XCTest
 @testable import OKVideoCore
 
 final class SearchContinuationTests: XCTestCase {
+    func testOversizedPageKeepsCursorMemoryBoundedAndRepeatedReorderedPageIsUncertain() {
+        let items = (0..<10_000).map { VideoSummary(siteKey: "large", siteName: "Large", videoID: String($0), title: "Film \($0)") }
+        var cursor = SearchPageCursor(keyword: "film")
+        XCTAssertTrue(cursor.accept(VideoPage(items: items, pagination: Pagination(page: 1, pageCount: 3)), requestedPage: 1))
+        XCTAssertLessThanOrEqual(cursor.seenIDs.count, SearchPageCursor.maximumRememberedIDs)
+        XCTAssertFalse(cursor.accept(VideoPage(items: Array(items.reversed()), pagination: Pagination(page: 2, pageCount: 3)), requestedPage: 2))
+        XCTAssertTrue(cursor.uncertain)
+        XCTAssertEqual(cursor.nextPage, 2)
+        var replay = cursor.replaying(from: 1)
+        XCTAssertTrue(replay.accept(VideoPage(items: items, pagination: Pagination(page: 1, pageCount: 3)), requestedPage: 1))
+        XCTAssertLessThanOrEqual(replay.seenIDs.count, SearchPageCursor.maximumRememberedIDs)
+    }
+
+    func testBudgetTracksEvictedSourceAndCanRecoverItsFinalPage() {
+        func item(_ site: String, _ id: Int, _ title: String) -> VideoSummary {
+            VideoSummary(siteKey: site, siteName: site, videoID: String(id), title: title)
+        }
+        let old = (0..<4).map { item("a", $0, "other") }
+        let incoming = [item("b", 0, "film")]
+        let first = MultiSiteSearch.merging(existing: old, incoming: incoming, keyword: "film",
+            maximumRetainedCandidates: 4, maximumResultsPerSite: 4, incomingPage: 2)
+        XCTAssertEqual(first.items.count, 4)
+        XCTAssertEqual(first.deferredPages, ["a": 1])
+        let expanded = MultiSiteSearch.merging(existing: first.items, incoming: old, keyword: "film",
+            maximumRetainedCandidates: 8, maximumResultsPerSite: 8)
+        XCTAssertEqual(Set(expanded.items.map(\.id)), Set((old + incoming).map(\.id)))
+        XCTAssertTrue(expanded.deferredPages.isEmpty)
+    }
+
     let site = SiteConfiguration(key: "fixture", name: "Fixture", type: 3, api: "csp_Test")
     func page(_ number: Int, ids: [String], end: CategoryPageContinuation = .unknown) -> VideoPage {
         var pagination = Pagination(page: number, pageCount: nil)

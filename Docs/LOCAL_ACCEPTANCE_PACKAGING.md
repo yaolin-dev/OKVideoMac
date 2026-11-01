@@ -11,7 +11,7 @@ bash OKVideoMac/macOS/OKVideoMac/Scripts/package-local-acceptance.sh
 ## 行为与边界
 
 1. 在 `/private/tmp` 创建全新的独立验收目录，不覆盖旧产物。
-2. 捕获当前 Git 已跟踪文件（包括未提交修改、排除已删除项、AGENTS.md 和不参与构建的 Docs/DemoSource），以及 App/Helpers/SourceAudit 代码根目录下非忽略的新文件。不会将未跟踪的个人 Docs、DemoSource 数据或工作区缓存一并打包。不要把私有数据存放在构建代码目录。
+2. 捕获当前 Git 已跟踪文件（包括未提交修改、排除已删除项、AGENTS.md 和不参与构建的 Docs/DemoSource），以及 App/Helpers/SourceAudit 代码根目录下非忽略的新文件，并明确纳入关键流程回归入口、清单及其验证测试（Tools/CI 中的三个指定文件）。不会将未跟踪的个人 Docs、DemoSource 数据或工作区缓存一并打包。不要把私有数据存放在构建代码目录。
 3. 要求处于非 main 的具名开发分支；捕获前后再次检查 Git 身份和输入内容。快照没有 `.git`，不创建 Git commit、不修改原索引或分支。`LOCAL_ACCEPTANCE_SNAPSHOT.json` 保存相对路径、字节摘要、可执行位、完整清单摘要、branch、baselineHEAD、version/build、捕获时间、纳入的 tracked modifications/untracked source；`gitCommitBound=false`、`acceptanceOnly=true`、`publicReleaseEligible=false`，`git_commit` 明确为空。base HEAD 仅作参考，不被宣称为当前源码。仓库/worktree 绝对路径另存为快照旁的 `Source-PRIVATE-PROVENANCE.json`（0600），通过清单 SHA-256 绑定；不进入 App、DMG 或源码归档，以维持绝对路径敏感扫描门禁。
 4. 从快照重新构建 APK 与 macOS Release。构建前后重新核对源码清单，源码字节/执行位或未记录输入发生改变即拒绝继续；构建产物不进入源码归档。
 5. 复用 `package-app.sh` 的原生依赖处理、法律材料、锁定第三方源码校验、SBOM、APK/DEX 检查、敏感信息扫描、Hardened Runtime 本地 ad-hoc 签名和 bundle 校验。

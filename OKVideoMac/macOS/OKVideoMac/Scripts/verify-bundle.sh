@@ -265,6 +265,11 @@ if [[ "$BRIDGE_VERSION_NAME" != "$EXPECTED_BRIDGE_VERSION_NAME" ]] ||
   echo "  actual   $BRIDGE_VERSION_NAME ($BRIDGE_VERSION_CODE)" >&2
   exit 1
 fi
+# Verify the host health contract as well as Gradle and actual APK metadata.
+python3 "$SCRIPT_DIR/check-android-bridge-contract.py" \
+  --apk-version-name "$BRIDGE_VERSION_NAME" \
+  --apk-version-code "$BRIDGE_VERSION_CODE"
+
 if [[ ! -f "$APP/Contents/Resources/LICENSE" ]] ||
    [[ ! -f "$APP/Contents/Resources/NOTICE.md" ]]; then
   echo "GPL license or source/modification notice is missing." >&2

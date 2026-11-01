@@ -24,11 +24,36 @@ struct NativeMPVEvent {
     var endFileReason: Int32 = 0
 }
 
+/// Coalesces native wakeups without losing a signal arriving during a drain.
+/// Full batches re-signal, yielding to commands on the same serial queue.
+final class MPVEventPump: @unchecked Sendable {
+    private let source: DispatchSourceUserDataAdd
+
+    init(queue: DispatchQueue, drain: @escaping () -> Bool) {
+        source = DispatchSource.makeUserDataAddSource(queue: queue)
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            if drain() { self.signal() }
+        }
+        source.resume()
+    }
+
+    func signal() { source.add(data: 1) }
+    func cancel() { source.cancel() }
+    deinit { source.cancel() }
+}
+
+let mpvEventWakeup: MPVRenderUpdateCallback = { context in
+    guard let context else { return }
+    Unmanaged<MPVEventPump>.fromOpaque(context).takeUnretainedValue().signal()
+}
+
 final class MPVLibrary {
     typealias Create = @convention(c) () -> OpaquePointer?
     typealias Initialize = @convention(c) (OpaquePointer?) -> Int32
     typealias RequestLogMessages = @convention(c) (OpaquePointer?, UnsafePointer<CChar>?) -> Int32
     typealias Wakeup = @convention(c) (OpaquePointer?) -> Void
+    typealias SetWakeupCallback = @convention(c) (OpaquePointer?, MPVRenderUpdateCallback?, UnsafeMutableRawPointer?) -> Void
     typealias Destroy = @convention(c) (OpaquePointer?) -> Void
     typealias SetOptionString = @convention(c) (
         OpaquePointer?,
@@ -121,6 +146,7 @@ final class MPVLibrary {
     // Diagnostics are optional: an older bridge must not prevent playback.
     let requestLogMessages: RequestLogMessages?
     let wakeup: Wakeup
+    let setWakeupCallback: SetWakeupCallback
     let destroy: Destroy
     let setOptionString: SetOptionString
     let command: Command
@@ -166,6 +192,7 @@ final class MPVLibrary {
             create = try Self.symbol("okmpv_create", handle: handle)
             initialize = try Self.symbol("okmpv_initialize", handle: handle)
             wakeup = try Self.symbol("okmpv_wakeup", handle: handle)
+            setWakeupCallback = try Self.symbol("okmpv_set_wakeup_callback", handle: handle)
             destroy = try Self.symbol("okmpv_destroy", handle: handle)
             setOptionString = try Self.symbol(
                 "okmpv_set_option_string",

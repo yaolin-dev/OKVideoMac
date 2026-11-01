@@ -389,13 +389,15 @@ struct RootView: View {
             .easeOut(duration: 0.18),
             value: state.siteActionStatus?.id
         )
+        .environment(\.browserSurfaceVisible, state.isBrowserWindowVisible)
         .background {
             ZStack {
                 WindowCloseObserver(
                     onClose: {},
                     onKeyChange: { isKey in
                         state.setBrowserWindowKey(isKey)
-                    }
+                    },
+                    onVisibilityChange: { state.setBrowserWindowVisible($0) }
                 )
                 AppKeyCommandMonitor { event in
                     let modifiers = event.modifierFlags.intersection(
@@ -1551,11 +1553,13 @@ private struct NodeConfigurationWebView: NSViewRepresentable {
 struct WindowCloseObserver: NSViewRepresentable {
     let onClose: () -> Void
     let onKeyChange: (Bool) -> Void
+    var onVisibilityChange: (Bool) -> Void = { _ in }
 
     func makeNSView(context: Context) -> WindowCloseObserverView {
         let view = WindowCloseObserverView()
         view.onClose = onClose
         view.onKeyChange = onKeyChange
+        view.onVisibilityChange = onVisibilityChange
         return view
     }
 
@@ -1565,18 +1569,21 @@ struct WindowCloseObserver: NSViewRepresentable {
     ) {
         nsView.onClose = onClose
         nsView.onKeyChange = onKeyChange
+        nsView.onVisibilityChange = onVisibilityChange
     }
 }
 
 final class WindowCloseObserverView: NSView {
     var onClose: (() -> Void)?
     var onKeyChange: ((Bool) -> Void)?
+    var onVisibilityChange: ((Bool) -> Void)?
     private var observers: [NSObjectProtocol] = []
     private let configurationKey = UUID()
 
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         removeObservers()
+        publishVisibility()
         guard let window else { return }
         // Resizing while SwiftUI is mounting this representable can re-enter
         // AppKit layout. Configure on the next run-loop turn, after the
@@ -1597,6 +1604,7 @@ final class WindowCloseObserverView: NSView {
                 queue: .main
             ) { [weak self] _ in
                 self?.onKeyChange?(false)
+                self?.onVisibilityChange?(false)
                 self?.onClose?()
             },
             NotificationCenter.default.addObserver(
@@ -1614,6 +1622,23 @@ final class WindowCloseObserverView: NSView {
                 self?.onKeyChange?(false)
             }
         ]
+        for name in [NSWindow.didChangeOcclusionStateNotification, NSWindow.didMiniaturizeNotification,
+                     NSWindow.didDeminiaturizeNotification, NSWindow.didBecomeKeyNotification] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: window, queue: .main) { [weak self] _ in
+                self?.publishVisibility()
+            })
+        }
+    }
+
+    private func publishVisibility() {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            let window = self.window
+            self.onVisibilityChange?(BrowserPlaybackActivityPolicy.surfaceVisible(
+                attached: window != nil, visible: window?.isVisible == true,
+                miniaturized: window?.isMiniaturized == true,
+                occluded: window?.occlusionState.contains(.visible) != true))
+        }
     }
 
     deinit {
@@ -1684,6 +1709,13 @@ final class AppKeyCommandMonitorView: NSView {
         if modifiers == [.command, .control], event.charactersIgnoringModifiers?.lowercased() == "f" {
             if !event.isARepeat { window.toggleFullScreen(nil) }
             return nil
+        }
+        // Native player controls own their navigation and activation keys.
+        // Do not turn an arrow on the volume slider into a playback seek.
+        if modifiers.intersection([.command, .control]).isEmpty,
+           let responder = window.firstResponder,
+           responder is NSSlider || responder is NSButton || responder is NSSwitch || responder is NSSegmentedControl {
+            return event
         }
         guard !Self.isEditingText(in: window), handler?(event) == true else { return event }
         return nil
@@ -2380,7 +2412,7 @@ private struct SidebarView: View {
 
     private func submitSearch() {
         guard searchPresentation.kind == .video else { return }
-        let keyword = state.searchDraftKeyword
+        let keyword = state.sidebarVideoSearchText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !keyword.isEmpty else { return }
         state.searchFromSidebar(keyword)
@@ -2882,7 +2914,7 @@ private struct CollapsedSidebarSearchButton: View {
     private func submitSearch() {
         defer { isPresented = false }
         guard searchPresentation.kind == .video else { return }
-        let keyword = state.searchDraftKeyword
+        let keyword = state.sidebarVideoSearchText
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !keyword.isEmpty else { return }
         state.searchFromSidebar(keyword)
@@ -3056,10 +3088,12 @@ private struct BrowserDetailRouteContainer: View {
         GeometryReader { geometry in
             ZStack {
                 TMDBDetailRouteContent(model: state.tmdbDetailModel)
+                    .environment(\.browserSurfaceVisible, state.isBrowserWindowVisible && related.pages.isEmpty)
                     .opacity(related.pages.isEmpty ? 1 : 0).allowsHitTesting(related.pages.isEmpty).accessibilityHidden(!related.pages.isEmpty)
                 ForEach(related.pages) { page in
                     let active = related.pages.last?.id == page.id
                     TMDBRelatedPageView(browser: related, page: page, active: active)
+                        .environment(\.browserSurfaceVisible, state.isBrowserWindowVisible && active)
                         .opacity(active ? 1 : 0).allowsHitTesting(active).accessibilityHidden(!active)
                 }
             }
@@ -3078,7 +3112,7 @@ private struct BrowserDetailRouteContainer: View {
                 ToolbarItemGroup(placement: .primaryAction) {
                     Spacer()
                     if let page = related.pages.last {
-                        TMDBRelatedRefreshButton(browser: related, page: page)
+                        if page.kind != .search { TMDBRelatedRefreshButton(browser: related, page: page) }
                     } else {
                         DetailRefreshButton(isLoading: state.isRefreshingDetail && state.selectedDetail?.playSources.isEmpty == false) { Task { await state.refreshDetail() } }
                             .allowsHitTesting(!state.isRefreshingDetail)

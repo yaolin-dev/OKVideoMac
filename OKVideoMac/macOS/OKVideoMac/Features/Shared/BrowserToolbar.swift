@@ -133,7 +133,51 @@ struct BrowserToolbarModeButton: NSViewRepresentable {
     }
 }
 
-final class BrowserToolbarModeNSButton: NSButton {
+/// Native toolbar controls share the same quiet hover surface as SwiftUI items.
+/// Keep tracking on the button itself so loading swaps and native hit testing work.
+class BrowserToolbarHoverButton: NSButton {
+    private var hoverTracking: NSTrackingArea?
+    private(set) var isHovering = false {
+        didSet { if oldValue != isHovering { needsDisplay = true } }
+    }
+
+    override var isEnabled: Bool {
+        didSet { if !isEnabled { isHovering = false }; needsDisplay = true }
+    }
+    override var isHidden: Bool {
+        didSet { if isHidden { isHovering = false } }
+    }
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        if window == nil { isHovering = false }
+    }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverTracking { removeTrackingArea(hoverTracking) }
+        let area = NSTrackingArea(rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect], owner: self, userInfo: nil)
+        addTrackingArea(area); hoverTracking = area
+    }
+    override func mouseEntered(with event: NSEvent) {
+        isHovering = isEnabled && !isHidden
+    }
+    override func mouseExited(with event: NSEvent) { isHovering = false }
+    override func draw(_ dirtyRect: NSRect) {
+        if isHovering && isEnabled && !isHidden {
+            // NSButton alignment insets can make its frame taller than the toolbar
+            // slot. Keep the painted surface aligned with adjacent 32 pt items.
+            let size = PrimaryToolbarMetrics.iconControlSize
+            let surface = NSRect(x: bounds.midX - size / 2, y: bounds.midY - size / 2, width: size, height: size)
+            let shape = NSBezierPath(roundedRect: surface.insetBy(dx: 0.25, dy: 0.25), xRadius: 7, yRadius: 7)
+            NSColor.labelColor.withAlphaComponent(0.055).setFill(); shape.fill()
+            NSColor.labelColor.withAlphaComponent(0.06).setStroke()
+            shape.lineWidth = 0.5; shape.stroke()
+        }
+        super.draw(dirtyRect)
+    }
+}
+
+final class BrowserToolbarModeNSButton: BrowserToolbarHoverButton {
     private var onActivate: () -> Void = {}
     init() {
         super.init(frame: NSRect(x: 0, y: 0, width: 32, height: 32))

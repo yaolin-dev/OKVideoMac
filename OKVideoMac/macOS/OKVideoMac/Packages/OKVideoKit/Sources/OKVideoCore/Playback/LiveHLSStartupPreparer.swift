@@ -7,8 +7,10 @@ public struct LiveHLSStartupPreparer {
     private let deadline: TimeInterval
     private let maximumBytes: Int
 
-    public init() {
-        self.init(configuration: .ephemeral, deadline: 5, maximumBytes: 256 * 1024)
+    public init(useSystemProxy: Bool = true) {
+        let configuration = URLSessionConfiguration.ephemeral
+        if !useSystemProxy { configuration.connectionProxyDictionary = [:] }
+        self.init(configuration: configuration, deadline: 5, maximumBytes: 256 * 1024)
     }
 
     init(configuration: URLSessionConfiguration, deadline: TimeInterval, maximumBytes: Int = 256 * 1024) {

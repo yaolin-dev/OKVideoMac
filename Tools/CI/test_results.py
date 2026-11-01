@@ -10,9 +10,13 @@ class InvalidResults(ValueError):
 
 
 DISCOVERED = re.compile(r"^[A-Za-z_][\w.]*/[A-Za-z_]\w*$")
-STARTED = re.compile(r"^Test Case '-\[([^ ]+) ([^\]]+)\]' started\.$", re.M)
+# Unified logging can write a partial timestamped line just before XCTest
+# writes its result to the same pipe. Keep the complete XCTest record and all
+# discovery/duplicate/aggregate checks; tolerate only that native log prefix.
+NATIVE_PREFIX = r"^(?:\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+(?:[+-]\d{4})? [^\n]*?)?"
+STARTED = re.compile(NATIVE_PREFIX + r"Test Case '-\[([^ ]+) ([^\]]+)\]' started\.$", re.M)
 COMPLETED = re.compile(
-    r"^Test Case '-\[([^ ]+) ([^\]]+)\]' (passed|skipped|failed) \(([0-9.]+) seconds\)\.$", re.M
+    NATIVE_PREFIX + r"Test Case '-\[([^ ]+) ([^\]]+)\]' (passed|skipped|failed) \(([0-9.]+) seconds\)\.$", re.M
 )
 SKIP_REASON = re.compile(r"-\[([^ ]+) ([^\]]+)\] : Test skipped - (.*)")
 TOTAL = re.compile(
@@ -27,7 +31,8 @@ def discovered_tests(text: str) -> set[str]:
     return set(names)
 
 
-def xctest_results(text: str, discovered: set[str], allowed_skips: dict[str, str], exit_code: int) -> dict:
+def xctest_results(text: str, discovered: set[str], allowed_skips: dict[str, str], exit_code: int,
+                   *, completed_suite: str = 'All tests') -> dict:
     if exit_code != 0:
         raise InvalidResults(f"Test process exited with {exit_code}")
     if not discovered:
@@ -57,7 +62,7 @@ def xctest_results(text: str, discovered: set[str], allowed_skips: dict[str, str
     total, skipped, failures, unexpected = totals[-1]
     if (int(total), int(skipped or 0), int(failures), int(unexpected)) != (len(cases), counts['skipped'], counts['failed'], 0):
         raise InvalidResults("XCTest aggregate disagrees with individual results")
-    if counts['failed'] or not counts['passed'] or "Test Suite 'All tests' passed at " not in text:
+    if counts['failed'] or not counts['passed'] or f"Test Suite '{completed_suite}' passed at " not in text:
         raise InvalidResults("The complete suite did not pass, or all tests were skipped")
     return dict(total=len(cases), **counts, cases=cases)
 

@@ -130,6 +130,7 @@ struct SettingsSearchEntry: Identifiable {
         .init(id: "main-window", title: SettingsL10n.string("settings.window.main.title", "Main Window"), pane: .general, sectionID: "main-window", keywords: "窗口 布局 恢复 尺寸 位置 window layout reset"),
         .init(id: "hardware", title: SettingsL10n.string("settings.playback.hardware-decoding.title", "Hardware Decoding"), pane: .playback, sectionID: "playback", keywords: "硬解 硬件 解码 hardware decoding"),
         .init(id: "autoplay", title: SettingsL10n.string("settings.playback.autoplay.title", "Autoplay Next Episode"), pane: .playback, sectionID: "playback", keywords: "连播 自动 下一集 autoplay next episode"),
+        .init(id: "media-network", title: SettingsL10n.string("settings.playback.network.proxy", "Use System Proxy for Media"), pane: .playback, sectionID: "media-network", keywords: "媒体 网络 代理 直连 播放 proxy network direct VPN"),
         .init(id: "player-window", title: SettingsL10n.string("settings.player-window.title", "Player Window"), pane: .playback, sectionID: "player-window", keywords: "播放 窗口 比例 固定 尺寸 player window aspect fixed"),
         .init(id: "playback-info", title: SettingsL10n.string("settings.organized.playback.information", "Playback Information"), pane: .playback, sectionID: "playback-info", keywords: "内核 libmpv 播放 状态 backend"),
         .init(id: "details", title: L10n.string("detail.presentation.title", fallback: "Detail Page Style"), pane: .details, sectionID: "detail-style", keywords: "详情 原版 tmdb 海报 卡片 style"),

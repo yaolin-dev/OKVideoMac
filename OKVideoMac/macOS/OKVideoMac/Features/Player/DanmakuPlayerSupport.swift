@@ -125,6 +125,7 @@ final class DanmakuSessionCoordinator: ObservableObject {
         displayArea = DanmakuDisplayArea(rawValue: defaults.string(forKey: Keys.displayArea) ?? "") ?? .upperHalf
         density = DanmakuDensity(rawValue: defaults.string(forKey: Keys.density) ?? "") ?? .medium
         externalServiceURL = defaults.string(forKey: Keys.externalServiceURL) ?? ""
+        loadState = isEnabled ? .unavailable : .disabled
         pushObserver = NotificationCenter.default.addObserver(forName: DanmakuPushEvent.notification, object: nil, queue: .main) { [weak self] note in
             guard let event = note.object as? DanmakuPushEvent else { return }
             MainActor.assumeIsolated { self?.acceptPush(event) }
@@ -191,7 +192,10 @@ final class DanmakuSessionCoordinator: ObservableObject {
     }
     private func owns(_ token: UUID) -> Bool { isEnabled && epoch == token && !Task.isCancelled }
     private func resumeCurrentSessionIfNeeded() {
-        guard let context, let playbackSessionID, let database else { return }
+        guard let context, let playbackSessionID, let database else {
+            loadState = isEnabled ? .unavailable : .disabled
+            return
+        }
         begin(context: context, playbackSessionID: playbackSessionID, database: database)
     }
     func select(_ source: DanmakuSourceDescriptor) {

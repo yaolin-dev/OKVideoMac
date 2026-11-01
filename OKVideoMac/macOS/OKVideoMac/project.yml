@@ -21,9 +21,9 @@ settings:
     MACOSX_DEPLOYMENT_TARGET: "12.0"
     SWIFT_VERSION: "5.7"
     CLANG_ENABLE_MODULES: true
-    MARKETING_VERSION: 0.9.0
+    MARKETING_VERSION: 0.9.1
     OKVIDEOMAC_APP_BUNDLE_IDENTIFIER: com.okvideomac.OKVideoMac
-    CURRENT_PROJECT_VERSION: 155
+    CURRENT_PROJECT_VERSION: 179
     OKVIDEOMAC_SPARKLE_ROOT: $(SRCROOT)/Vendor/Build/Sparkle
     OKVIDEOMAC_CRASH_REPORT_DSN: ""
     OKVIDEOMAC_UPDATE_FEED_URL: ""
@@ -279,6 +279,8 @@ targets:
     deploymentTarget: "12.0"
     sources:
       - path: Tests
+      - path: Native/DASHSmoke/fixtures/legacy.mp4
+        buildPhase: resources
     dependencies:
       - framework: $(OKVIDEOMAC_SPARKLE_ROOT)/Sparkle.framework
         embed: false

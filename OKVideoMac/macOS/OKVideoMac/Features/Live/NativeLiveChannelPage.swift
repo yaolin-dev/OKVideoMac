@@ -25,6 +25,7 @@ struct LiveChannelBrowseAnchor {
 
 /// One AppKit scroll surface; EPG and hover never invalidate the SwiftUI grid.
 struct NativeLiveChannelPage: NSViewRepresentable {
+    @Environment(\.browserSurfaceVisible) private var surfaceVisible
     @EnvironmentObject private var state: AppState
     @Environment(\.browserNavigationSelection) private var navigationSelection
     @Environment(\.imageRepository) private var repository
@@ -67,11 +68,10 @@ struct NativeLiveChannelPage: NSViewRepresentable {
         private var boundsObserver: NSObjectProtocol?
         private var epgObserver: AnyCancellable?
         private var previewObserver: AnyCancellable?
-        private let previewOwner = UUID()
+        private var previewOwner = UUID()
         private var previewDemands: [String: LivePreviewDemand] = [:]
         private var previewNeedsRebuild = true
         private var previewVisibleIndices: [IndexPath] = []
-        private var previewRefreshRequest = 0
         private var visibilityObservers: [NSObjectProtocol] = []
         private var timer: Timer?
         private var demandTask: Task<Void, Never>?
@@ -111,11 +111,15 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             // Catalog/account/route updates arrive here. Scroll and EPG ticks
             // only reprioritize these validated demands; they never rebuild them.
             previewNeedsRebuild = true
+            let becameVisible = self.page?.surfaceVisible == false && page.surfaceVisible
             let sourceChanged = self.page?.source != page.source
             let changed = channels != page.channels || sourceChanged
+            previewOwner = page.session.previewOwner
+            page.session.connectPreviewService(state.livePreviews)
             if sourceChanged || !page.session.showsPreviewImages {
-                state.livePreviews.clear(owner: previewOwner)
-                previewRefreshRequest = page.session.previewRefreshRequest
+                if !page.session.showsPreviewImages {
+                    state.livePreviews.clear(owner: previewOwner)
+                }
                 previewDemands.removeAll(); previewVisibleIndices.removeAll()
             }
             let nextFavorites = Set(page.channels.filter { state.isLiveFavorite(sourceID: page.source, channel: $0) }.map(\.id))
@@ -135,15 +139,16 @@ struct NativeLiveChannelPage: NSViewRepresentable {
                     DispatchQueue.main.async { self?.refreshVisible(); self?.publishPreviewDemand() }
                 }
             }
-            if page.session.isActive, timer == nil {
+            if page.session.isActive && page.surfaceVisible, timer == nil {
                 let timer = Timer(timeInterval: 15, repeats: true) { [weak self] _ in
                     MainActor.assumeIsolated { self?.refreshVisible(); self?.publishPreviewDemand() }
                 }
                 RunLoop.main.add(timer, forMode: .common); self.timer = timer
-            } else if !page.session.isActive {
+            } else if !page.session.isActive || !page.surfaceVisible {
                 timer?.invalidate(); timer = nil
                 demandTask?.cancel(); demandTask = nil; preheater.cancel()
-                state.livePreviews.clear(owner: previewOwner)
+                state.livePreviews.suspend(owner: previewOwner)
+                scroll?.collection.visibleItems().forEach { ($0 as? LiveChannelNativeItem)?.card.cancelImage() }
             }
             if changed {
                 channels = page.channels
@@ -170,7 +175,7 @@ struct NativeLiveChannelPage: NSViewRepresentable {
                 }
                 layout()
                 refreshVisible(rebind: true)
-            } else if favoritesChanged { refreshVisible(rebind: true) }
+            } else if favoritesChanged || becameVisible { refreshVisible(rebind: true) }
             if keyChanged || (changed && oldIDs != channels.map(\.id)) { restore(anchor) }
             scheduleViewport()
         }
@@ -215,6 +220,7 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             if let item = item as? LiveChannelNativeItem { bind(item, index: indexPath.item) }
         }
         private func bind(_ item: LiveChannelNativeItem, index: Int) {
+            guard page?.surfaceVisible == true else { item.card.cancelImage(); return }
             guard channels.indices.contains(index), let page else { return }
             let channel = channels[index]
             item.card.bind(channel: channel, favorite: favorites.contains(channel.id),
@@ -236,7 +242,7 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             card.showProgramme(info, date: now, formatter: formatter)
         }
         private func refreshVisible(rebind: Bool = false) {
-            guard let scroll, !scroll.isHiddenOrHasHiddenAncestor, page?.session.isActive == true else { return }
+            guard let scroll, !scroll.isHiddenOrHasHiddenAncestor, page?.session.isActive == true, page?.surfaceVisible == true else { return }
             for path in scroll.viewportIndexPaths where channels.indices.contains(path.item) {
                 guard let item = scroll.collection.item(at: path) as? LiveChannelNativeItem else { continue }
                 if rebind { bind(item, index: path.item) }
@@ -253,7 +259,7 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             }
         }
         private func viewportChanged() {
-            guard let scroll, let page, page.session.isActive else { return }
+            guard let scroll, let page, page.session.isActive, page.surfaceVisible else { return }
             let visibleIndices = scroll.viewportIndexPaths.sorted()
             if visibleIndices != previewVisibleIndices {
                 previewVisibleIndices = visibleIndices
@@ -287,7 +293,7 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             }
         }
         private func publishDemand() {
-            guard let page, page.session.isActive, let scroll, let state else { return }
+            guard let page, page.session.isActive, page.surfaceVisible, let scroll, let state else { return }
             let indices = scroll.viewportIndexPaths.map(\.item).sorted()
             let visible = indices.filter { channels.indices.contains($0) }.prefix(100).map { channels[$0] }
             state.setEPGBrowserDemand(source: page.source, channels: visible)
@@ -295,7 +301,8 @@ struct NativeLiveChannelPage: NSViewRepresentable {
         }
         private var previewSurfaceIsVisible: Bool {
             guard let scroll, let window = scroll.window else { return false }
-            return page?.session.isActive == true && page?.session.showsPreviewImages == true
+            return page?.session.isActive == true && page?.surfaceVisible == true && page?.session.showsPreviewImages == true
+                && page?.session.showsGuide == false
                 && !scroll.isHiddenOrHasHiddenAncestor && window.isVisible && !window.isMiniaturized
         }
         private var previewCaptureIsActive: Bool {
@@ -335,16 +342,12 @@ struct NativeLiveChannelPage: NSViewRepresentable {
                 }
                 state.livePreviews.update(owner: previewOwner, demands: lanes.flatMap { $0 }, mayCapture: { [weak self, weak state] in
                     self?.previewCaptureIsActive == true && state?.permitsBackgroundLivePreview == true
-                }, autoRefresh: page.session.automaticallyRefreshPreviews, isActive: previewCaptureIsActive)
+                }, autoRefresh: page.session.automaticallyRefreshPreviews, isActive: previewCaptureIsActive, isVisible: previewSurfaceIsVisible)
                 previewNeedsRebuild = false
             } else {
                 state.livePreviews.setSurfaceActive(owner: previewOwner, isActive: previewCaptureIsActive,
-                    autoRefresh: page.session.automaticallyRefreshPreviews)
+                    autoRefresh: page.session.automaticallyRefreshPreviews, isVisible: previewSurfaceIsVisible)
                 publishPreviewViewport(indices: indices)
-            }
-            if previewRefreshRequest != page.session.previewRefreshRequest {
-                previewRefreshRequest = page.session.previewRefreshRequest
-                state.livePreviews.requestRefresh()
             }
             refreshPreviewImages()
         }
@@ -435,7 +438,8 @@ struct NativeLiveChannelPage: NSViewRepresentable {
             return menu
         }
         func stop() {
-            state?.livePreviews.clear(owner: previewOwner)
+            // The session owns the round. Replacing a filtered collection must
+            // not cancel the other channels in a source-wide manual refresh.
             previewObserver = nil
             visibilityObservers.forEach { NotificationCenter.default.removeObserver($0) }
             visibilityObservers.removeAll()

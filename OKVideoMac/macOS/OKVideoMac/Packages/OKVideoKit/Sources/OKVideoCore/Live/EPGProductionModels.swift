@@ -1,5 +1,17 @@
 import Foundation
 
+/// Bounded refresh metadata for the requested source/channels; no credentials.
+public struct EPGRefreshInfo: Equatable, Sendable {
+    public let lastUpdatedAt: Date?
+    public let nextRefreshAt: Date?
+    public let retryAt: Date?
+    public init(lastUpdatedAt: Date? = nil, nextRefreshAt: Date? = nil, retryAt: Date? = nil) {
+        self.lastUpdatedAt = lastUpdatedAt
+        self.nextRefreshAt = nextRefreshAt
+        self.retryAt = retryAt
+    }
+}
+
 /// Identity checked as one value immediately before an asynchronous EPG result
 /// reaches presentation state. None of these fields contains an endpoint or credential.
 public struct EPGResultToken: Equatable, Hashable, Sendable {

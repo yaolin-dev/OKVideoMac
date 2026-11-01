@@ -73,6 +73,7 @@ struct UpstreamVideo {
     var action: String?
     var contentKind: VideoContentKind
     var isCategoryNavigation: Bool
+    var originalResources: [[OriginalMediaResource?]]? = nil
 }
 
 /// Interprets only protocol metadata. Human-facing names, poster URLs, and
@@ -237,17 +238,33 @@ enum UpstreamResponseDecoder {
             throw AppError.decoding("详情响应缺少 vod_id 或 vod_name")
         }
         let summary = summaries(from: [video], site: site, baseURL: baseURL)[0]
+        var sources = PlayListParser.parse(sourceNames: video.playFrom ?? "", sourceEpisodes: video.playURL ?? "")
+        if ["csp_WoGG", "csp_WoGGGuard"].contains(site.api), let groups = video.originalResources {
+            for index in sources.indices where index < groups.count {
+                for episode in sources[index].episodes.indices where episode < groups[index].count {
+                    sources[index].episodes[episode].originalResource = groups[index][episode]?.validated
+                }
+            }
+        }
         return VideoDetail(
             summary: summary,
             area: video.area,
             director: video.director,
             actors: video.actors,
             synopsis: video.content,
-            playSources: PlayListParser.parse(
-                sourceNames: video.playFrom ?? "",
-                sourceEpisodes: video.playURL ?? ""
-            )
+            playSources: sources
         )
+    }
+
+    private static func originalResources(_ value: JSONValue?) -> [[OriginalMediaResource?]]? {
+        guard case .array(let groups) = value else { return nil }
+        return groups.map { group in
+            guard case .array(let files) = group else { return [] }
+            return files.map { value in
+                guard let data = try? JSONEncoder().encode(value) else { return nil }
+                return (try? JSONDecoder().decode(OriginalMediaResource.self, from: data))?.validated
+            }
+        }
     }
 
     private static func decodeCategories(
@@ -337,7 +354,8 @@ enum UpstreamResponseDecoder {
                 // consulted.
                 isCategoryNavigation: normalizedCategoryNavigation(
                     object["cate"]
-                )
+                ),
+                originalResources: originalResources(object["okvideo_original_resources"])
             )
         }
     }

@@ -1,4 +1,5 @@
 import XCTest
+import Combine
 import AppKit
 import SwiftUI
 import OKVideoCore
@@ -1782,7 +1783,7 @@ private actor TMDBRelaxedUIProbe: TMDBServing {
         XCTAssertTrue(TMDBEpisodeCards.title(split, mapped: mapped).contains("下"))
         let source = PlaySource(name: "原始线路", episodes: [episode])
         let detail = VideoDetail(summary: .init(siteKey: "a", siteName: "A", videoID: "1", title: "北上", categoryName: "电视剧"), playSources: [source])
-        let info = TMDBEpisodeInformation.make(detail: detail, work: nil, season: nil, source: source, episode: episode, mappedEpisode: mapped)
+        let info = TMDBEpisodeInformation.make(detail: detail, work: nil, season: nil, source: source, episode: episode, mapping: .prepared(mapped))
         XCTAssertTrue(info.facts.contains("45")); XCTAssertFalse(info.facts.contains("46")); XCTAssertFalse(info.facts.contains("4K"))
     }
 
@@ -2252,4 +2253,98 @@ private struct TMDBEntryProvider: SiteProvider {
         .init(summary: summary(id), synopsis: "Source information", playSources: [.init(name: "Line A", episodes: [.init(name: "Episode 1", url: "opaque:1"), .init(name: "Episode 2", url: "opaque:2")])])
     }
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult { throw TMDBError.invalidInput }
+}
+
+// Captured source identity from the reported summary -> full-detail transition.
+private actor TMDBDeadEndJobProbe: TMDBServing {
+    func search(query: String, type: TMDBMediaType?, year: Int?) async throws -> [TMDBWork] {
+        [try await detail(.init(type: .tv, id: 289517))]
+    }
+    func searchPage(query: String, type: TMDBMediaType?, year: Int?) async throws -> TMDBSearchPage {
+        .init(results: try await search(query: query, type: type, year: year), page: 1, totalPages: 1, totalResults: 1)
+    }
+    func detail(_ reference: TMDBReference) async throws -> TMDBWork {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return try decoder.decode(TMDBWork.self, from: Data(#"{"id":289517,"name":"末路兼职","original_name":"꿀알바","media_type":"tv","first_air_date":"2026-10-30","seasons":[{"season_number":1,"episode_count":8,"air_date":"2026-10-30"}],"aggregate_credits":{"cast":[{"id":1879169,"name":"李宰旭"},{"id":1787992,"name":"高旻示"},{"id":2704830,"name":"金敏荷"},{"id":1046863,"name":"李熙俊"}],"crew":[{"id":2756160,"name":"김다민","original_name":"김다민","also_known_as":["김다민","Kim Da-min"],"jobs":[{"job":"Director"}]}]}}"#.utf8))
+    }
+    func season(tvID: Int, number: Int) async throws -> TMDBSeason { throw TMDBError.invalidInput }
+    func imageConfiguration() async throws -> TMDBImageConfiguration { throw TMDBError.invalidInput }
+}
+
+extension TMDBDetailTests {
+    private func deadEndSource(year: String = "2026", category: String = "喜剧 恐怖 奇幻", director: String = "金多珉", actors: String? = "李宰旭 高旻示 金敏荷 李熙俊") -> VideoDetail {
+        .init(summary: .init(siteKey: "wogg", siteName: "玩偶哥哥", videoID: "dead-end", title: "末路兼职", year: year, categoryName: category),
+              director: director, actors: actors, playSources: [.init(name: "夸父原 2", episodes: (1...8).map { .init(name: "第 \($0) 集", url: "opaque:original:\($0)") })])
+    }
+
+    func testDeadEndJobSourceEnrichmentNeverWithdrawsMatchAndPersistsAcrossRepositoryRestart() async throws {
+        for policy in [TMDBMatchPolicy.strict, .relaxed] {
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("tmdb-dead-end-\(UUID())")
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let model = TMDBDetailModel(), store = TMDBRepository(client: TMDBDeadEndJobProbe(), directory: directory)
+            var card = deadEndSource().summary
+            card.year = policy == .strict ? "2026" : nil
+            card.categoryName = policy == .strict ? "电视剧" : nil
+            model.beginEntry(repository: store, key: "dead-end", summary: card, availability: TMDBAvailability(), enabled: true, policy: policy)
+            defer { model.cancel() }
+            try await waitUntil { model.selection != nil && !model.isPreparing }
+            let navigation = model.navigationID
+            var references = [TMDBReference?](), modes = [TMDBPageMode]()
+            let selectionObserver = model.$selection.sink { references.append($0?.reference) }
+            let modeObserver = model.$pageMode.sink { modes.append($0) }
+            let detail = deadEndSource(), originalResources = detail.playSources
+            model.receive(detail: detail, key: "dead-end")
+            XCTAssertEqual(model.selection?.reference.id, 289517, "No synchronous fallback when Chinese name arrives")
+            try await waitUntil { !model.isPreparing }
+            selectionObserver.cancel(); modeObserver.cancel()
+            XCTAssertTrue(references.allSatisfy { $0?.id == 289517 }, "No transient nil/other selection: \(references)")
+            XCTAssertTrue(modes.allSatisfy { $0 == .enhanced }, "No original-page flash: \(modes)")
+            XCTAssertEqual(model.navigationID, navigation)
+            XCTAssertEqual(detail.playSources, originalResources)
+            XCTAssertEqual(model.binding?.manual, false)
+            XCTAssertEqual(model.binding?.isRelaxed, false, "Full cast/year supports strict matching")
+            XCTAssertFalse(model.needsMatchConfirmation)
+            let restarted = TMDBRepository(client: TMDBDeadEndJobProbe(), directory: directory)
+            let restored = await restarted.cachedResolution(key: "dead-end", input: .init(detail: detail), policy: policy)
+            guard case .matched(let selection, let binding) = restored else { return XCTFail("Verified binding must survive repository restart") }
+            XCTAssertEqual(selection.reference.id, 289517)
+            XCTAssertFalse(binding.manual || binding.isRelaxed)
+        }
+    }
+
+    func testDeadEndJobRealIdentityConflictsStillWithdrawPreviewAndExplainWhy() async throws {
+        let cases: [(VideoDetail, TMDBMatchConfirmationReason)] = [
+            (deadEndSource(year: "2025"), .identityConflict),
+            (deadEndSource(category: "电影"), .identityConflict),
+            (deadEndSource(director: "홍길동"), .directorConflict)]
+        for (detail, reason) in cases {
+            let model = TMDBDetailModel(), store = TMDBRepository(client: TMDBDeadEndJobProbe())
+            let card = VideoSummary(siteKey: "wogg", siteName: "玩偶哥哥", videoID: "dead-end", title: "末路兼职")
+            model.beginEntry(repository: store, key: "dead-end", summary: card, availability: TMDBAvailability(), enabled: true, policy: .relaxed)
+            defer { model.cancel() }
+            try await waitUntil { model.selection != nil && !model.isPreparing }
+            model.receive(detail: detail, key: "dead-end")
+            XCTAssertNil(model.selection)
+            try await waitUntil { !model.isPreparing }
+            XCTAssertNil(model.selection)
+            XCTAssertTrue(model.needsMatchConfirmation)
+            XCTAssertEqual(model.matchConfirmationReason, reason)
+        }
+    }
+
+    func testUnverifiedTranslatedDirectorExplainsConfirmationWithoutAutoApproving() async throws {
+        let model = TMDBDetailModel(), store = TMDBRepository(client: TMDBDeadEndJobProbe())
+        let detail = deadEndSource(category: "电视剧", actors: nil)
+        model.beginEntry(repository: store, key: "dead-end", summary: detail.summary, availability: TMDBAvailability(), enabled: true)
+        defer { model.cancel() }
+        model.receive(detail: detail, key: "dead-end")
+        try await waitUntil { !model.isPreparing }
+        XCTAssertNil(model.selection)
+        XCTAssertEqual(model.matchConfirmationReason, .unverifiedDirector)
+        let candidate = try XCTUnwrap(model.candidates.first)
+        let chosen = await model.choose(candidate)
+        XCTAssertTrue(chosen)
+        XCTAssertEqual(model.selection?.reference.id, 289517)
+        XCTAssertEqual(model.binding?.manual, true)
+    }
 }

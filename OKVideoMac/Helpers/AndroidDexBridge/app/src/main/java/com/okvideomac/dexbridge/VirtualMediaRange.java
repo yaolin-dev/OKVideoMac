@@ -71,6 +71,10 @@ final class VirtualMediaRange {
     /** One attempt per session. Peek does not consume the response used by mpv.
      * Both reads are bounded in bytes and time. Failure retains unknown length. */
     static VirtualMediaRange probe(Response initial, Map<String, String> headers) {
+        return probe(initial, headers, MediaRequestNetworkPolicy.direct());
+    }
+
+    static VirtualMediaRange probe(Response initial, Map<String, String> headers, MediaRequestNetworkPolicy networkPolicy) {
         try {
             long length = Long.parseLong(initial.header("Content-Length"));
             if (length <= 8192 || initial.body() == null) return null;
@@ -87,7 +91,7 @@ final class VirtualMediaRange {
                     request.header(h.getKey(), h.getValue());
             }
             request.header("Range", "bytes=4096-").header("Accept-Encoding", "identity");
-            Call call = PROBE.newCall(request.build());
+            Call call = networkPolicy.client(PROBE).newCall(request.build());
             try (Response response = call.execute()) {
                 if (response.code() != 206 || response.body() == null
                         || !response.header("Content-Encoding", "identity").equalsIgnoreCase("identity")) return null;

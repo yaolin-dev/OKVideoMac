@@ -153,6 +153,8 @@ struct LiveEPGPresentation: Equatable {
     let coverage: Coverage
     let refreshFailed: Bool
     let lastProgrammeEnd: Date?
+    let lastUpdatedAt: Date?
+    let retryAt: Date?
 
     var usesCachedData: Bool {
         dataAvailable && (activity == .refreshing || freshness == .stale || refreshFailed)
@@ -163,11 +165,14 @@ struct LiveEPGPresentation: Equatable {
         self.enabled = enabled
         configured = key != nil
         guard enabled, let key else {
+            lastUpdatedAt = nil; retryAt = nil
             activity = .idle; dataAvailable = false; freshness = .unknown
             coverage = .unknown; self.refreshFailed = false; lastProgrammeEnd = nil
             return
         }
         let current = status.flatMap { $0.key == key ? $0 : nil }
+        lastUpdatedAt = current?.summary?.publishedAt
+        retryAt = (current?.consecutiveFailures ?? 0) > 0 ? current?.nextRetryAt : nil
         let parsed = current?.summary != nil && current?.availability != .failed
             && current?.availability != .unsupported
         dataAvailable = parsed && (current?.summary?.programmeCount ?? 0) > 0

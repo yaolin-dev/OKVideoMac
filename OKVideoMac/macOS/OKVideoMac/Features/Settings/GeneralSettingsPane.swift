@@ -69,6 +69,18 @@ struct GeneralSettingsPane: View {
                         set: { value in Task { await state.setAppTheme(value) } }
                     ))
                 }
+                SettingsDivider()
+                SettingsControlRow(icon: "paintbrush.pointed.fill", color: Color(nsColor: .controlAccentColor),
+                    title: SettingsL10n.string("settings.appearance.accent.title", "Accent Color"),
+                    subtitle: SettingsL10n.string("settings.appearance.accent.subtitle", "Follows the macOS accent color for menus and controls")) {
+                    Button(SettingsL10n.string("settings.appearance.open-system", "System Appearance…")) {
+                        if let url = URL(string: "x-apple.systempreferences:com.apple.Appearance-Settings.extension"),
+                           NSWorkspace.shared.open(url) { return }
+                        if let app = NSWorkspace.shared.urlForApplication(withBundleIdentifier: "com.apple.systempreferences") {
+                            NSWorkspace.shared.openApplication(at: app, configuration: .init())
+                        }
+                    }
+                }
             }.settingsAnchor("appearance")
 
             SettingsSectionTitle(SettingsL10n.string("settings.window.section", "Window Layout"))

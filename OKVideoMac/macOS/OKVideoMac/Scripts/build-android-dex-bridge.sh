@@ -6,6 +6,9 @@ REPOSITORY_ROOT=${SCRIPT_DIR:h:h:h}
 HELPER_DIR="$REPOSITORY_ROOT/Helpers/AndroidDexBridge"
 EXPECTED_CERTIFICATE_FILE="$SCRIPT_DIR/android-bridge-signing.sha256"
 
+# Reject a mismatched host before building or touching signing inputs.
+python3 "$SCRIPT_DIR/check-android-bridge-contract.py"
+
 if [[ -n "${ANDROID_HOME:-}" ]]; then
     RESOLVED_ANDROID_SDK="$ANDROID_HOME"
 elif [[ -n "${ANDROID_SDK_ROOT:-}" ]]; then

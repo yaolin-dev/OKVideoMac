@@ -77,6 +77,7 @@ private struct LiveBackgroundActivityPopover: View {
                 nativeEPGEnabled: state.epgPreferences.automaticEPGEnabled,
                 preview: previews.presentation?.sourceKey == key ? previews.presentation : nil,
                 retryPreviews: { state.livePreviews.retryFailed(sourceKey: key) },
+                stopPreviews: { state.livePreviews.stopRefresh(sourceKey: key) },
                 stop: { runID in state.stopLiveBackgroundValidation(sourceID: source.id, runID: runID) })
         }
         .labelStyle(.titleAndIcon)
@@ -96,6 +97,7 @@ struct LiveBackgroundActivityDetails: View {
     let nativeEPGEnabled: Bool
     var preview: LivePreviewActivityPresentation? = nil
     var retryPreviews: (() -> Void)? = nil
+    var stopPreviews: (() -> Void)? = nil
     let stop: (UUID) -> Void
 
     var body: some View {
@@ -147,11 +149,16 @@ struct LiveBackgroundActivityDetails: View {
                     .font(.subheadline.weight(.semibold))
                 Spacer()
                 if value.phase == .partial, let retryPreviews {
-                    Button(activityText("preview-retry", "Retry Failed"), action: retryPreviews)
+                    Button(activityText("preview-retry", "Retry Unupdated Pictures"), action: retryPreviews)
                         .controlSize(.small)
+                        .accessibilityIdentifier("live.background.previews.retry")
+                } else if value.completed < value.total, value.phase != .stopped, let stopPreviews {
+                    Button(activityText("stop", "Stop"), action: stopPreviews)
+                        .controlSize(.small)
+                        .accessibilityIdentifier("live.background.previews.stop")
                 }
             }
-            Text(previewTitle(value)).font(.caption)
+            Text(previewTitle(value)).font(.caption).foregroundColor(.secondary)
             Text(L10n.string("live.background.preview-visible", fallback: "Pictures on screen: %d / %d",
                 value.visibleReady, value.visibleTotal)).font(.caption)
             if value.active > 0 || value.queued > 0 {
@@ -159,7 +166,7 @@ struct LiveBackgroundActivityDetails: View {
                     value.active, value.queued)).font(.caption).foregroundColor(.secondary)
             }
             if value.total > 0 {
-                Text(L10n.string("live.background.preview-round", fallback: "This round: %d / %d",
+                Text(L10n.string("live.background.preview-round", fallback: "Processed: %d / %d",
                     value.completed, value.total)).font(.caption)
                 if value.indicator == .active {
                     ProgressView(value: Double(value.completed), total: Double(value.total))
@@ -167,10 +174,10 @@ struct LiveBackgroundActivityDetails: View {
                         .accessibilityLabel(activityText("preview-round-label", "Channel picture progress"))
                         .accessibilityValue("\(value.completed) / \(value.total)")
                 }
-                Text(L10n.string("live.background.preview-results", fallback: "New: %d · Cached: %d · Failed: %d",
+                Text(L10n.string("live.background.preview-results", fallback: "Updated: %d · Saved: %d · Not updated: %d",
                     value.captured, value.cached, value.failed)).font(.caption).foregroundColor(.secondary)
             }
-            Text(activityText("preview-scope", "Automatic updates refresh visible channels every 10 minutes when enabled. Saved pictures remain available."))
+            Text(activityText("preview-scope", "Refresh covers all available channels in this source, starting with those on screen. Existing pictures are kept until replaced."))
                 .font(.caption).foregroundColor(.secondary)
         }
         .accessibilityIdentifier("live.background.previews")
@@ -182,6 +189,7 @@ struct LiveBackgroundActivityDetails: View {
         case .capturing: return activityText("preview-capturing", "Loading channel pictures…")
         case .waiting: return activityText("preview-waiting", "Waiting for an available source connection…")
         case .paused: return activityText("preview-paused", "Paused while playing or browsing elsewhere")
+        case .stopped: return activityText("preview-stopped", "Stopped; existing pictures are kept")
         case .completed: return activityText("preview-completed", "Pictures are up to date")
         case .partial: return activityText("preview-partial", "Some pictures could not be updated; saved pictures are kept")
         }
@@ -191,6 +199,16 @@ struct LiveBackgroundActivityDetails: View {
         VStack(alignment: .leading, spacing: 6) {
             Text(activityText("epg", "Programme Guide")).font(.subheadline.weight(.semibold))
             Text(epgTitle(value)).font(.caption)
+            if let updated = value.lastUpdatedAt {
+                Text(L10n.string("live.guide.status.updated", fallback: "Last updated: %@",
+                    updated.formatted(date: .omitted, time: .shortened)))
+                    .font(.caption).foregroundColor(.secondary)
+            }
+            if let retry = value.retryAt {
+                Text(L10n.string("live.guide.status.retry", fallback: "Update failed; retrying in %d min",
+                    max(1, Int(ceil(retry.timeIntervalSinceNow / 60)))))
+                    .font(.caption).foregroundColor(.secondary)
+            }
             if value.usesCachedData {
                 Text(value.coverage == .expired
                     ? activityText("cache-expired", "Using cached data · programme data expired")
@@ -258,7 +276,7 @@ struct LiveBackgroundActivityDetails: View {
             return L10n.string("live.background.completed", fallback: "Checked %d channels; %d confirmed unavailable", value.total, value.hiddenCandidates)
         case .cancelled: return activityText("cancelled", "Stopped; no incomplete results applied")
         case .partial: return activityText("partial", "Time limit reached; no incomplete results applied")
-        case .failed: return activityText("failed", "Check could not finish. Retry using the refresh button.")
+        case .failed: return activityText("failed", "Check could not finish. Update the channel list from the source menu to retry.")
         }
     }
 }

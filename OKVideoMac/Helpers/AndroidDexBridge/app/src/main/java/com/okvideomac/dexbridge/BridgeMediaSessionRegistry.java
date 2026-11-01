@@ -156,6 +156,30 @@ final class BridgeMediaSessionRegistry {
         return session;
     }
 
+    /** A new capability pins routing; existing playback and its children remain unchanged. */
+    static Session withNetworkPolicy(String id, MediaRequestNetworkPolicy policy) throws java.io.IOException {
+        Session original = get(id);
+        if (original == null) throw new java.io.IOException("Media session expired or missing");
+        synchronized (original) {
+            Session copy = new Session(UUID.randomUUID().toString(), original.upstreamURL,
+                    original.headerSnapshot(), original.owner, policy);
+            if (!original.isCurrent() || copy.providerEpoch != original.providerEpoch)
+                throw new java.io.IOException("Media context changed");
+            SESSIONS.put(copy.id, copy);
+            return copy;
+        }
+    }
+
+    static Session remoteWithNetworkPolicy(String url, JSONObject headers, MediaRequestNetworkPolicy policy) {
+        prune();
+        Map<String, String> safeHeaders = new LinkedHashMap<>();
+        collectHeaders(headers, safeHeaders);
+        safeHeaders.keySet().removeIf(name -> name.equalsIgnoreCase("X-OKVideo-Media-Network"));
+        Session session = new Session(UUID.randomUUID().toString(), url, safeHeaders, null, policy);
+        SESSIONS.put(session.id, session);
+        return session;
+    }
+
     private static SecuredURL secureURL(
             String raw,
             Map<String, String> headers,
@@ -440,6 +464,8 @@ final class BridgeMediaSessionRegistry {
         final String upstreamURL;
         final BridgeProviderOwnerRegistry.Binding owner;
         final long providerEpoch;
+        final MediaRequestNetworkPolicy networkPolicy;
+        volatile boolean cancelOnDisconnect;
         final Map<String, String> headers;
         final Map<String, DashManifest.Resource> dashResources = new LinkedHashMap<>();
         final Map<List<String>, String> dashResourceIDs = new LinkedHashMap<>();
@@ -457,6 +483,12 @@ final class BridgeMediaSessionRegistry {
                 Map<String, String> headers,
                 BridgeProviderOwnerRegistry.Binding owner
         ) {
+            this(id, upstreamURL, headers, owner, MediaRequestNetworkPolicy.direct());
+        }
+
+        Session(String id, String upstreamURL, Map<String, String> headers,
+                BridgeProviderOwnerRegistry.Binding owner, MediaRequestNetworkPolicy networkPolicy) {
+            this.networkPolicy = networkPolicy;
             this.id = id;
             this.upstreamURL = upstreamURL;
             this.owner = owner;

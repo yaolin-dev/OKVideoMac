@@ -7,7 +7,7 @@ public enum EPGGuideTVBoxLoader {
     public static func load(repository: EPGProductionRepository, demand: EPGGuideDemand,
                             httpClient: HTTPClient, xmltvKey: EPGRequestKey?,
                             xmltvAvailability: EPGAvailability = .fresh,
-                            retainedSnapshotCost: Int = 0) async throws -> EPGGuideSnapshot {
+                            retainedSnapshotCost: Int = 0, refreshID: UUID? = nil) async throws -> EPGGuideSnapshot {
         guard demand.capability == .tvboxDay, demand.source.kind == .imported else {
             throw EPGGuideFailure.invalidRequest
         }
@@ -15,7 +15,7 @@ public enum EPGGuideTVBoxLoader {
         let api = demand.channels.filter { $0.epgAPI != nil }
         if !api.isEmpty {
             let value = try await loadAPI(repository: repository, demand: subset(demand, channels: api, capability: .tvboxDay),
-                                          httpClient: httpClient, retainedSnapshotCost: retainedSnapshotCost)
+                                          httpClient: httpClient, retainedSnapshotCost: retainedSnapshotCost, refreshID: refreshID)
             for row in value.rows { rows[row.id] = row }
         }
         let xml = demand.channels.filter { $0.epgAPI == nil }
@@ -82,7 +82,7 @@ public enum EPGGuideTVBoxLoader {
     }
     private static func schedule(repository: EPGProductionRepository, source: LiveSourceID, revision: String,
                                  channel: LiveChannel, from: Date, to: Date, demandRevision: UUID,
-                                 httpClient: HTTPClient) async throws -> Schedule {
+                                 refreshID: UUID? = nil, httpClient: HTTPClient) async throws -> Schedule {
         guard let configuration = channel.epgAPI else { throw EPGGuideFailure.invalidRequest }
         let days = try TVBoxDayEPG.days(configuration: configuration, from: from, to: to)
         let key = EPGRequestKey(source: source, revision: revision, resource: channel.id)
@@ -91,7 +91,7 @@ public enum EPGGuideTVBoxLoader {
             try Task.checkCancellation()
             do {
                 let value = try await repository.loadTVBoxDay(key: key, day: day, timeZoneID: configuration.timeZoneID,
-                                                             demandRevision: demandRevision) {
+                                                             demandRevision: demandRevision, refreshID: refreshID) {
                     try await TVBoxDayEPG.fetch(configuration: configuration, day: day,
                                               channelID: channel.id, httpClient: httpClient)
                 }
@@ -125,7 +125,7 @@ public enum EPGGuideTVBoxLoader {
         let failure: EPGGuideFailure?
     }
     private static func loadAPI(repository: EPGProductionRepository, demand: EPGGuideDemand,
-                                httpClient: HTTPClient, retainedSnapshotCost: Int) async throws -> EPGGuideSnapshot {
+                                httpClient: HTTPClient, retainedSnapshotCost: Int, refreshID: UUID?) async throws -> EPGGuideSnapshot {
         var coordinator = try EPGGuideWorkCoordinator(demand: demand, retainedSnapshotCost: retainedSnapshotCost)
         var records = Array(repeating: [EPGProgrammeRecordIdentity: EPGWindowProgramme](), count: demand.channels.count)
         var tokens = Array<EPGResultToken?>(repeating: nil, count: demand.channels.count)
@@ -142,7 +142,7 @@ public enum EPGGuideTVBoxLoader {
                             let value = try await schedule(repository: repository, source: .imported(demand.source.id),
                                 revision: demand.revision, channel: assignment.channel,
                                 from: demand.slices[0].start, to: demand.slices.last!.end,
-                                demandRevision: demand.demandRevision, httpClient: httpClient)
+                                demandRevision: demand.demandRevision, refreshID: refreshID, httpClient: httpClient)
                             return Outcome(assignment: assignment, value: value, failure: nil)
                         } catch {
                             return Outcome(assignment: assignment, value: nil,

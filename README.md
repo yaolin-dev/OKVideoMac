@@ -1,5 +1,7 @@
 # OKVideoMac
 
+The current release candidate is **0.9.1 (Build 179)**. Resource-based history recovery; stable TMDB matching; 20-way search with local source ordering and automatic scroll loading; EPG cleanup and timestamp caching; lighter playback controls; scoped media proxy settings; and request-scoped Quark/CatPaw seek recovery. See [release notes](Docs/RELEASE_NOTES_0.9.1.md). Formal signing, notarization and publication are tracked in the release readiness record.
+
 The latest stable release is **0.9.0 (Build 155)** with reorganized Settings, conditional TMDB details, DASH, live previews and playback/stability repairs. Developer ID, Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks passed. See [release notes](Docs/RELEASE_NOTES_0.9.0.md) and [formal verification](Docs/RELEASE_VALIDATION_0.9.0.md).
 
 English | [简体中文](README_zh-CN.md)
@@ -31,6 +33,15 @@ Download the Developer ID signed and Apple-notarized [v0.9.0 DMG](https://github
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs and notices accompany the release.
 
 > OKVideoMac is a player and provider client. It does not include third-party video sources, accounts, cookies, parsing services or DRM keys.
+
+## New in 0.9.1
+
+- Recover history with original resource identity and fresh playback parameters; retain progress on cancellation or failure.
+- Preserve TMDB matches after detail enrichment; share actor-film search presentation with home search and prioritize visible posters.
+- Search up to 20 sources concurrently, use bounded local performance history for ordering, and load more results automatically on scroll.
+- Reclaim obsolete EPG batches, cache repeated timestamps, and reduce unnecessary browser/image/EPG work during playback.
+- Add a media system-proxy preference, lightweight transport icons, bounded seek diagnostics and cancellation of stale cloud-drive reads.
+- Keep the Quark original-file buffering profile; adapt the pinned CatPaw Quark/UC/Ali download helper without changing other source packages.
 
 ## New in 0.9.0
 

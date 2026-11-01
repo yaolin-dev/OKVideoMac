@@ -67,10 +67,21 @@ struct TMDBEpisodeInformation: Equatable {
     let overview: String
     var hasOverview = true
 
-    static func make(detail: VideoDetail, work: TMDBWork?, season: TMDBSeason?, source: PlaySource?, episode: PlayEpisode?, mappedEpisode: TMDBEpisode? = nil) -> Self {
-        let sourceIndex = episode.flatMap { selected in source?.episodes.firstIndex(where: { $0.id == selected.id }) }
-        let mapping = season.map { TMDBEpisodeMapper.episodes(source?.episodes ?? [], category: detail.summary.categoryName, season: $0) } ?? [:]
-        let mapped = mappedEpisode ?? sourceIndex.flatMap { mapping[$0] }
+    enum Mapping {
+        /// nil is an authoritative unresolved result, not permission to rematch.
+        case prepared(TMDBEpisode?)
+        case deriveFromSeason
+    }
+
+    static func make(detail: VideoDetail, work: TMDBWork?, season: TMDBSeason?, source: PlaySource?, episode: PlayEpisode?, mapping: Mapping = .deriveFromSeason) -> Self {
+        let mapped: TMDBEpisode?
+        switch mapping {
+        case .prepared(let value): mapped = value
+        case .deriveFromSeason:
+            let sourceIndex = episode.flatMap { selected in source?.episodes.firstIndex(where: { $0.id == selected.id }) }
+            let values = season.map { TMDBEpisodeMapper.episodes(source?.episodes ?? [], category: detail.summary.categoryName, season: $0) } ?? [:]
+            mapped = sourceIndex.flatMap { values[$0] }
+        }
         let isSeries = isSeries(detail: detail, work: work, season: season)
         let title: String
         if let mapped, let seasonNumber = mapped.seasonNumber ?? season?.seasonNumber {
@@ -828,7 +839,7 @@ struct TMDBMatchSheet: View {
                 Button(L10n.string("tmdb.search", fallback: "Search"), action: search).disabled(query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || metadata.isChoosing)
             }
             if metadata.needsMatchConfirmation {
-                Text(L10n.string("tmdb.match.pending-help", fallback: "Candidates found. Review the title, year and director to confirm the correct work."))
+                Text(metadata.matchConfirmationMessage)
                     .font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
             if metadata.isSearching || metadata.isChoosing { ProgressView().controlSize(.small) }
@@ -898,6 +909,7 @@ struct TMDBArtworkView<Content: View, Placeholder: View>: View {
     @ViewBuilder let content: (Image, Bool) -> Content
     @ViewBuilder let placeholder: () -> Placeholder
     @Environment(\.imageRepository) private var repository
+    @Environment(\.browserSurfaceVisible) private var surfaceVisible
     @State private var loaded: NSImage?
     @State private var loadedURL: URL?
     private func request(_ url: URL) -> PosterImageRequest { .init(url: url, pixels: pixels) }
@@ -915,8 +927,8 @@ struct TMDBArtworkView<Content: View, Placeholder: View>: View {
         }
         .onAppear { if let shown { onDisplayed(shown.1) } }
         .onChange(of: shown?.1) { if let url = $0 { onDisplayed(url) } }
-        .task(id: urls.map(\.absoluteString).joined(separator: "|") + ":\(pixels)") {
-            guard let repository else { return }
+        .task(id: urls.map(\.absoluteString).joined(separator: "|") + ":\(pixels):\(surfaceVisible)") {
+            guard surfaceVisible, let repository else { return }
             if let shown { loaded = shown.0; loadedURL = shown.1 }
             else { loaded = nil; loadedURL = nil }
             // A lower-quality cache hit is a placeholder, not the end of the job.
@@ -941,7 +953,15 @@ struct TMDBRelatedPageView: View {
         Group {
             if page.kind == .detail, let detail = page.detail {
                 DetailView(detail: detail, metadata: page.metadata)
-            } else if active {
+            } else if !active { Color.clear }
+            else if page.kind == .search {
+                SearchResultsScreen(snapshot: SearchScreenSnapshot(page: page), actions: .init(
+                    open: { browser.select($0, page: page, state: state) },
+                    selectSite: { page.selectedSearchSiteKey = $0 },
+                    loadMore: { await browser.loadMore(page, state: state, retry: $0, failuresOnly: $1) },
+                    refresh: { await browser.refreshSearch(page, state: state, force: $0) },
+                    cancel: { browser.cancelSearch(page) }, scopeChanged: { browser.restartScope(page, state: state) }))
+            } else {
                 VStack(spacing: 0) {
                     if page.kind == .person {
                         HStack {
@@ -952,13 +972,6 @@ struct TMDBRelatedPageView: View {
                                 Text(L10n.string("tmdb.person.movies", fallback: "Movies")).tag("movie")
                                 Text(L10n.string("tmdb.person.tv", fallback: "TV Shows")).tag("tv")
                             }.pickerStyle(.segmented).frame(maxWidth: 270)
-                        }.padding(.horizontal, 28).padding(.vertical, 16)
-                    } else if page.kind == .search {
-                        HStack {
-                            Text(L10n.string("tmdb.person.search-all", fallback: "Search “%@” across all sites in the current configuration", page.title)).font(.callout)
-                            Spacer()
-                            if page.isLoading { ProgressView().controlSize(.small) }
-                            Text("\(page.completedSites) / \(page.totalSites)").font(.caption).foregroundStyle(.secondary)
                         }.padding(.horizontal, 28).padding(.vertical, 16)
                     }
                     if let error = page.error {
@@ -980,17 +993,21 @@ struct TMDBRelatedPageView: View {
                             headerKey: .init(categories: [], selectedCategoryID: nil, showsRecommendations: false, filterSelection: [:]),
                             headerHeight: 0, activeFilters: [],
                             footerKey: .init(hasMore: page.kind == .person ? page.displayedCount < page.filteredWorks.count : page.hasMore,
-                                isLoading: page.isLoading, isRefreshing: false, errorMessage: page.error, itemCount: page.items.count, hasPendingUpdate: false),
+                                isLoading: page.isLoading, isRefreshing: false, errorMessage: page.error, itemCount: page.items.count, hasPendingUpdate: false,
+                                statusText: page.kind == .search && page.hasMore ? L10n.string("search.browse.budget", fallback: "Scroll down to load more results") : nil,
+                                automaticLoading: page.error == nil,
+                                scrollDrivenLoading: page.kind != .person),
                             nextPage: page.nextPage, initialAnchor: page.anchor, presentationRevision: page.revision,
                             onCategorySelect: { _ in }, onFilterReset: { _ in }, onClearFilters: {}, onAcceptUpdate: {},
                             onBrowse: { anchor, _, _ in page.anchor = anchor },
                             onLoad: { await browser.loadMore(page, state: state) },
-                            onSelect: { browser.select($0, page: page, state: state) })
+                            onSelect: { browser.select($0, page: page, state: state) },
+                            onManualLoad: { await browser.loadMore(page, state: state) }, imageRetryRevision: page.imageRetryRevision)
                             .id(page.filter)
                     }
                     if page.kind == .person { TMDBAttributionView().padding(.horizontal, 28).padding(.vertical, 12).frame(maxWidth: .infinity, alignment: .leading) }
                 }
-            } else { Color.clear }
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(AppSurfacePalette.background)

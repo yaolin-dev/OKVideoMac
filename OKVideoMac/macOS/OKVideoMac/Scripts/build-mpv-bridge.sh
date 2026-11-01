@@ -71,6 +71,7 @@ MACOSX_DEPLOYMENT_TARGET=12.0 clang \
 required_symbols=(
   okmpv_create
   okmpv_initialize
+  okmpv_set_wakeup_callback
   okmpv_get_property_string
   okmpv_set_property_string
   okmpv_event_size

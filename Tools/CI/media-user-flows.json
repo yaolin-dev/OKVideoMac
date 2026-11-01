@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "tests": [
+    "PlaybackMediaJourneyTests/testPlaySeekPauseCloseResumeAndNextEpisode",
+    "PlaybackMediaJourneyTests/testHTTPFailureThenRetryAndSlowReplacement",
+    "PlaybackMediaJourneyTests/testRepeatedRealOpenSeekAndCloseReleasesNativePlayer",
+    "PlaybackMediaJourneyTests/testOrdinaryLiveNativeButtonAndCatchupLayout",
+    "PlaybackMediaJourneyTests/testRealMouseDragsHoldTargetAndMatchDecodedFrameAcrossFormats",
+    "PlaybackMediaJourneyTests/testRapidExactSeeksAtTwoTimesSpeedAndCloseDoNotRestoreOldTargets",
+    "XtreamFileNetworkTests/testMediaProxyToggleControlsRealRequestsAndKeepsCurrentLoadPinned",
+    "XtreamFileNetworkTests/testProxyRedirectAndReplacementRestoreOptionsOnSamePlayer",
+    "XtreamFileNetworkTests/testRejectedLoadRestoresProxyBeforeFollowingPlayback"
+  ]
+}

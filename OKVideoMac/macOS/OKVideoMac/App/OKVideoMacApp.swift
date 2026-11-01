@@ -2078,16 +2078,23 @@ private struct NavigationCommandItems: View {
     }
 }
 
+struct PlaybackPlayPauseCommand: View {
+    @ObservedObject var state: AppState
+    var body: some View {
+        Button(L10n.string("menu.playback.play-pause", fallback: "Play/Pause")) {
+            Task { await state.togglePlayPause() }
+        }
+        .keyboardShortcut(.space, modifiers: [])
+        .disabled(!state.allowsPlayerShortcuts)
+    }
+}
+
 private struct PlaybackCommandItems: View {
     @ObservedObject var state: AppState
     var body: some View {
         Group {
             PlayerPictureInPictureMenuItem(coordinator: state.pictureInPicture)
-            Button(L10n.string("menu.playback.play-pause", fallback: "Play/Pause")) {
-                Task { await state.togglePlayPause() }
-            }
-                .keyboardShortcut(.space, modifiers: [])
-                .disabled(!state.allowsPlayerShortcuts)
+            PlaybackPlayPauseCommand(state: state)
             Button(L10n.string("menu.playback.seek-back-10", fallback: "Back 10 Seconds")) {
                 Task { await state.seek(by: -10) }
             }

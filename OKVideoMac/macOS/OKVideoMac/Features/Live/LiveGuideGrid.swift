@@ -21,6 +21,17 @@ struct LiveGuideDemandDebounce: Equatable {
     mutating func reset() { startedAt = nil }
 }
 
+/// Uses the existing AppState EPG poller; never creates a per-view timer/request.
+struct LiveGuideRefreshSchedule {
+    private(set) var nextCheckAt = Date.distantPast
+    func isDue(at date: Date) -> Bool { date >= nextCheckAt }
+    mutating func reset() { nextCheckAt = .distantPast }
+    mutating func completed(info: EPGRefreshInfo, at date: Date) {
+        let due = info.nextRefreshAt ?? date.addingTimeInterval(60)
+        nextCheckAt = max(date.addingTimeInterval(30), min(due, date.addingTimeInterval(300)))
+    }
+}
+
 enum LiveGuideFreshness: Equatable {
     case fresh
     case stale
@@ -67,7 +78,69 @@ struct LiveGuideDeliveryIdentity: Equatable {
 @MainActor
 final class LiveGuideState: ObservableObject {
     @Published private(set) var lifecycle: LiveGuideLifecycleState = .inactive
+    @Published private(set) var refreshInfo = EPGRefreshInfo()
+    @Published private(set) var unchangedAfterManualRefresh = false
     private var expectedIdentity: LiveGuideDeliveryIdentity?
+
+    func setRefreshInfo(_ info: EPGRefreshInfo, identity: LiveGuideDeliveryIdentity) {
+        guard expectedIdentity == identity else { return }
+        refreshInfo = info
+    }
+
+    func finishRefresh(previous: EPGGuideSnapshot?, manual: Bool, identity: LiveGuideDeliveryIdentity) {
+        guard expectedIdentity == identity else { return }
+        let succeeded: Bool
+        switch lifecycle {
+        case .content(let value): succeeded = value.refreshPhase == .idle && value.freshness == .fresh
+        case .empty(let value): succeeded = value.refreshPhase == .idle && value.freshness == .fresh
+        default: succeeded = false
+        }
+        unchangedAfterManualRefresh = manual && succeeded && refreshInfo.retryAt == nil
+            && previous.map { old in snapshot.map { Self.sameProgrammes(old, $0) } ?? false } == true
+    }
+
+    static func sameProgrammes(_ left: EPGGuideSnapshot, _ right: EPGGuideSnapshot) -> Bool {
+        guard left.source == right.source, left.revision == right.revision,
+              left.slices == right.slices, left.rows.count == right.rows.count else { return false }
+        return zip(left.rows, right.rows).allSatisfy {
+            $0.id == $1.id && $0.match == $1.match && $0.state == $1.state
+                && $0.programmes.map(\.programme) == $1.programmes.map(\.programme)
+        }
+    }
+
+    func refreshDescription(at date: Date) -> String? {
+        if isRefreshing {
+            return snapshot == nil ? L10n.string("live.guide.status.loading", fallback: "Loading programme guide…")
+                : L10n.string("live.guide.status.refreshing", fallback: "Updating; showing saved programmes")
+        }
+        if let retry = refreshInfo.retryAt {
+            let minutes = max(1, Int(ceil(retry.timeIntervalSince(date) / 60)))
+            return L10n.string("live.guide.status.retry", fallback: "Update failed; retrying in %d min", minutes)
+        }
+        if let snapshot, !snapshot.rows.isEmpty,
+           snapshot.rows.allSatisfy({ $0.state == .unmatched || $0.state == .ambiguous }) {
+            return L10n.string("live.guide.status.unmatched", fallback: "No matching programme channels")
+        }
+        switch lifecycle {
+        case .failed: return L10n.string("live.guide.status.failed", fallback: "Unable to update programme guide")
+        case .content(let value) where value.refreshPhase == .backoff:
+            return L10n.string("live.guide.status.cached", fallback: "Update incomplete; showing saved programmes")
+        case .empty: return L10n.string("live.guide.status.empty", fallback: "No programmes in this time range")
+        default: break
+        }
+        if let snapshot, let end = snapshot.rows.flatMap(\.programmes).map(\.end).max(),
+           end <= date, snapshot.slices.last!.end > date {
+            return L10n.string("live.guide.status.expired", fallback: "The source has not provided later programmes")
+        }
+        if unchangedAfterManualRefresh {
+            return L10n.string("live.guide.status.unchanged", fallback: "Updated; programme guide unchanged")
+        }
+        if let updated = refreshInfo.lastUpdatedAt {
+            return L10n.string("live.guide.status.updated", fallback: "Last updated: %@",
+                updated.formatted(date: .omitted, time: .shortened))
+        }
+        return nil
+    }
 
     var snapshot: EPGGuideSnapshot? {
         switch lifecycle {
@@ -92,6 +165,10 @@ final class LiveGuideState: ObservableObject {
         let retainable = snapshot?.source == identity.source
             && snapshot?.revision == identity.revision
             && snapshot.map { canRetain($0, for: identity) } == true
+        if expectedIdentity?.source != identity.source || expectedIdentity?.revision != identity.revision {
+            refreshInfo = EPGRefreshInfo()
+        }
+        unchangedAfterManualRefresh = false
         expectedIdentity = identity
         guard retainable else {
             lifecycle = .loadingInitial
@@ -106,6 +183,8 @@ final class LiveGuideState: ObservableObject {
     }
 
     func deactivate() {
+        refreshInfo = EPGRefreshInfo()
+        unchangedAfterManualRefresh = false
         expectedIdentity = nil
         lifecycle = .inactive
     }
@@ -145,6 +224,10 @@ final class LiveGuideState: ObservableObject {
             return true
         }
         guard !usableRows.isEmpty else {
+            if snapshot != nil, !failures.isEmpty {
+                fail(failures.values.first ?? .unavailable, identity: identity)
+                return true
+            }
             lifecycle = value.rows.contains(where: { $0.state == .unsupported })
                 ? .unsupported
                 : .failed(failures.values.first ?? .unavailable)

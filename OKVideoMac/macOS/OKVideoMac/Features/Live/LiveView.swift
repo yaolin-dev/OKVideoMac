@@ -92,7 +92,9 @@ final class LiveBrowserSession: ObservableObject {
     private let preferences: LiveBrowserPreferenceStore
     @Published var selectedSourceID: LiveSourceID? {
         didSet {
-            guard selectedSourceID != oldValue, let selectedSourceID else { return }
+            guard selectedSourceID != oldValue else { return }
+            previewService?.clear(owner: previewOwner)
+            guard let selectedSourceID else { return }
             preferences.setSelectedSource(selectedSourceID)
             selectedGroupID = preferences.group(for: selectedSourceID)
         }
@@ -106,9 +108,14 @@ final class LiveBrowserSession: ObservableObject {
         }
     }
     @Published var showsPreviewImages = UserDefaults.standard.object(forKey: "OKVideoMac.LivePreviewImages.v1") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(showsPreviewImages, forKey: "OKVideoMac.LivePreviewImages.v1") }
+        didSet {
+            if !showsPreviewImages { previewService?.clear(owner: previewOwner) }
+            UserDefaults.standard.set(showsPreviewImages, forKey: "OKVideoMac.LivePreviewImages.v1")
+        }
     }
-    @Published var previewRefreshRequest = 0
+    let previewOwner = UUID()
+    private weak var previewService: LivePreviewCoordinator?
+    @Published private(set) var refreshingPageSourceID: LiveSourceID?
     @Published var automaticallyRefreshPreviews = UserDefaults.standard.bool(forKey: "OKVideoMac.LivePreviewAutomatic.v2") {
         didSet { UserDefaults.standard.set(automaticallyRefreshPreviews, forKey: "OKVideoMac.LivePreviewAutomatic.v2") }
     }
@@ -123,6 +130,7 @@ final class LiveBrowserSession: ObservableObject {
     func setDisplayMode(_ mode: LiveDisplayMode) {
         guard displayMode != mode else { return }
         displayMode = mode
+        if mode == .guide { previewService?.suspend(owner: previewOwner) }
         BrowserInteractionTrace.record(mode == .guide ? "guide.mode.guide" : "guide.mode.channels")
     }
     @Published var guideWindowStart = LiveBrowserSession.roundedGuideStart(Date().addingTimeInterval(-3600))
@@ -130,13 +138,50 @@ final class LiveBrowserSession: ObservableObject {
     @Published private(set) var guideRefreshRequest = 0
 
     func refresh(source: LiveSourceDescriptor, state: AppState) {
-        guard !state.isLiveCatalogLoading(source.id) else { return }
-        if showsGuide, state.presentedLiveCatalog(for: source.id) != nil {
+        guard isActive, selectedSourceID == source.id else { return }
+        if state.presentedLiveCatalog(for: source.id) == nil {
+            guard source.canRefresh, !state.isLiveCatalogLoading(source.id) else { return }
+            refreshChannelPage(sourceID: source.id) {
+                await state.refreshLiveSource(source.id)
+                return state.presentedLiveCatalog(for: source.id) != nil
+            }
+        } else if showsGuide {
             guard !state.liveGuide.isRefreshing else { return }
             guideRefreshRequest &+= 1
-        } else if source.canRefresh {
-            Task { await state.refreshLiveSource(source.id) }
+        } else {
+            refreshPictures(sourceID: source.id, state: state)
         }
+    }
+
+    /// Loading a missing catalog is separate from refreshing existing pictures.
+    func refreshChannelPage(sourceID: LiveSourceID, reload: @escaping @MainActor () async -> Bool) {
+        guard refreshingPageSourceID == nil else { return }
+        refreshingPageSourceID = sourceID
+        Task { [weak self] in
+            _ = await reload()
+            self?.refreshingPageSourceID = nil
+        }
+    }
+
+    func connectPreviewService(_ service: LivePreviewCoordinator) {
+        previewService = service
+    }
+
+    func refreshPictures(sourceID: LiveSourceID, state: AppState) {
+        guard selectedSourceID == sourceID, isActive, showsPreviewImages, !showsGuide,
+              let catalog = state.presentedLiveCatalog(for: sourceID) else { return }
+        let service = state.livePreviews
+        connectPreviewService(service)
+        if !service.ownsViewport(previewOwner) {
+            service.update(owner: previewOwner, demands: [], mayCapture: { [weak self, weak state] in
+                self?.isActive == true && self?.showsGuide == false && self?.showsPreviewImages == true
+                    && NSApp.isActive && state?.permitsBackgroundLivePreview == true
+            }, autoRefresh: automaticallyRefreshPreviews, isActive: NSApp.isActive)
+        }
+        let allChannels = catalog.groups.filter { $0.password == nil }.flatMap(\.channels)
+        let demands = state.livePreviewDemands(source: sourceID, channels: allChannels,
+            streams: { self.previewStreams(channel: $0, source: sourceID) }, programmeStart: { _ in nil })
+        service.requestRefresh(demands: demands)
     }
 
     /// Deliberately not published: changing sections must not invalidate the
@@ -148,6 +193,7 @@ final class LiveBrowserSession: ObservableObject {
     func deactivate(owner: UUID) -> Bool {
         guard activeOwner == owner else { return false }
         activeOwner = nil
+        previewService?.suspend(owner: previewOwner)
         isActive = false
         return true
     }
@@ -391,21 +437,26 @@ struct LiveView: View {
             )
             .environmentObject(state)
             .id(sourceID)
-        } else if channels.isEmpty {
-            EmptyStateView(
-                systemImage: session.showsFavoritesOnly ? "star" : "magnifyingglass",
-                title: session.showsFavoritesOnly
-                    ? L10n.string("live.empty.favorites.title", fallback: "No Favorite Channels")
-                    : L10n.string("live.empty.filtered.title", fallback: "No Matching Channels"),
-                message: session.showsFavoritesOnly
-                    ? L10n.string("live.empty.favorites.message", fallback: "Use the star on a channel card to add it to Favorites.")
-                    : L10n.string("live.empty.filtered.message", fallback: "Choose another group or search term.")
-            ).frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            NativeLiveChannelPage(channels: channels, source: sourceID, sourceName: sourceName,
-                catalog: importedCatalog, session: session,
-                browseKey: "\(LiveBrowserPreferenceStore.encode(sourceID))/\(session.selectedGroupID ?? "")/\(session.searchText)/\(session.showsFavoritesOnly)")
-                .environmentObject(state)
+            ZStack {
+                // Keep the viewport host alive even when a filter matches no
+                // channels: the source-wide refresh still needs its lifecycle.
+                NativeLiveChannelPage(channels: channels, source: sourceID, sourceName: sourceName,
+                    catalog: importedCatalog, session: session,
+                    browseKey: "\(LiveBrowserPreferenceStore.encode(sourceID))/\(session.selectedGroupID ?? "")/\(session.searchText)/\(session.showsFavoritesOnly)")
+                    .environmentObject(state)
+                if channels.isEmpty {
+                    EmptyStateView(
+                        systemImage: session.showsFavoritesOnly ? "star" : "magnifyingglass",
+                        title: session.showsFavoritesOnly
+                            ? L10n.string("live.empty.favorites.title", fallback: "No Favorite Channels")
+                            : L10n.string("live.empty.filtered.title", fallback: "No Matching Channels"),
+                        message: session.showsFavoritesOnly
+                            ? L10n.string("live.empty.favorites.message", fallback: "Use the star on a channel card to add it to Favorites.")
+                            : L10n.string("live.empty.filtered.message", fallback: "Choose another group or search term.")
+                    ).frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
         }
     }
 
@@ -550,6 +601,15 @@ struct LiveGuideScreen: View {
     var body: some View {
         VStack(spacing: 0) {
             navigationBar
+            TimelineView(.periodic(from: .now, by: 30)) { context in
+                if let message = guide.refreshDescription(at: context.date) {
+                    Text(message)
+                        .font(.caption).foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 14).padding(.bottom, 6)
+                        .accessibilityIdentifier("live.guide.refresh-status")
+                }
+            }
             Divider()
             LiveGuideViewportHost {
                 if session.showsCatchupList { catchupList } else { content }
@@ -937,10 +997,10 @@ struct LiveGuideScreen: View {
             demandOwner = owner
         }
         recoveryAttempted = false
-        requestGuide(force: true)
+        requestGuide(force: true, refreshFromNetwork: true)
     }
 
-    private func requestGuide(force: Bool = false) {
+    private func requestGuide(force: Bool = false, refreshFromNetwork: Bool = false) {
         guard let owner = demandOwner, session.showsGuide,
               session.selectedSourceID == sourceID else { return }
         let bounded = boundedChannels
@@ -950,7 +1010,7 @@ struct LiveGuideScreen: View {
         }
         state.setLiveGuideDemand(owner: owner, source: sourceID, channels: bounded,
             windowStart: session.guideWindowStart, windowEnd: windowEnd,
-            visibleRange: session.guideVisibleRange, force: force)
+            visibleRange: session.guideVisibleRange, force: force, refreshFromNetwork: refreshFromNetwork)
     }
 
     private func canPlay(_ channel: LiveChannel) -> Bool {
@@ -1107,7 +1167,7 @@ struct LiveToolbarView: View {
             LiveBackgroundActivityControl(epgState: state.liveEPG,
                 validationToolbar: state.liveValidationActivity.toolbar,
                 previewToolbar: state.livePreviews.activity.toolbar, source: source)
-            LiveRefreshToolbarControl(guide: state.liveGuide, session: session, source: source)
+            LiveRefreshToolbarControl(guide: state.liveGuide, previews: state.livePreviews, previewToolbar: state.livePreviews.activity.toolbar, session: session, source: source)
         }
     }
 
@@ -1128,6 +1188,15 @@ struct LiveToolbarView: View {
                     )
                 }
             }
+            if let source = selectedSource, source.canRefresh {
+                Divider()
+                Button {
+                    Task { await state.refreshLiveSource(source.id) }
+                } label: {
+                    Label(L10n.string("live.update-channel-list", fallback: "Update Channel List"), systemImage: "arrow.clockwise")
+                }
+                .disabled(state.isLiveCatalogLoading(source.id))
+            }
         } label: {
             Label {
                 Text(compact ? sourceName : "\(sourceName) · \(channelCount)")
@@ -1138,7 +1207,7 @@ struct LiveToolbarView: View {
         }
         .frame(maxWidth: compact ? 132 : 220)
         .controlSize(.regular)
-        .disabled(state.liveSourceDescriptors.count < 2)
+        .disabled(state.liveSourceDescriptors.count < 2 && selectedSource?.canRefresh != true)
         .help(L10n.string("live.current-source", fallback: "Current source: %@; %d channels", sourceName, channelCount))
     }
 
@@ -2161,21 +2230,34 @@ struct LiveSourceImportSheet: View {
 private struct LiveRefreshToolbarControl: View {
     @EnvironmentObject private var state: AppState
     @ObservedObject var guide: LiveGuideState
+    @ObservedObject var previews: LivePreviewCoordinator
+    @ObservedObject var previewToolbar: LivePreviewActivityModel.Toolbar
     @ObservedObject var session: LiveBrowserSession
     let source: LiveSourceDescriptor
 
     var body: some View {
-        BrowserRefreshToolbarControl(
-            isLoading: state.isLiveCatalogLoading(source.id) || (session.showsGuide && guide.isRefreshing),
-            error: refreshError,
-            title: L10n.string("common.refresh", fallback: "Refresh")
-        ) {
+        BrowserRefreshToolbarControl(isLoading: isLoading, error: refreshError, title: refreshTitle) {
             session.refresh(source: source, state: state)
         }
-        .disabled(!source.canRefresh && !session.showsGuide)
+        .disabled(hasCatalog ? (!session.showsGuide && !session.showsPreviewImages) : !source.canRefresh)
     }
 
+    private var hasCatalog: Bool { state.presentedLiveCatalog(for: source.id) != nil }
+    private var previewSourceKey: String { LivePreviewPolicy.digest([LiveBrowserPreferenceStore.encode(source.id)]) }
+    private var isLoading: Bool {
+        if !hasCatalog { return state.isLiveCatalogLoading(source.id) || session.refreshingPageSourceID == source.id }
+        if session.showsGuide { return guide.isRefreshing }
+        return session.showsPreviewImages && previewToolbar.state?.sourceKey == previewSourceKey
+            && previewToolbar.state?.indicator == .active
+    }
+    private var refreshTitle: String {
+        if !hasCatalog { return L10n.string("live.update-channel-list", fallback: "Update Channel List") }
+        if session.showsGuide { return L10n.string("live.refresh-guide", fallback: "Refresh Programme Guide") }
+        if !session.showsPreviewImages { return L10n.string("live.preview.enable-to-refresh", fallback: "Switch to Channel Pictures to refresh") }
+        return L10n.string("live.preview.refresh-all", fallback: "Refresh all channel pictures in this source (⌘R)")
+    }
     private var refreshError: String? {
+        if !hasCatalog { return state.liveCatalogError(for: source.id) }
         if session.showsGuide {
             switch guide.lifecycle {
             case .failed:
@@ -2189,17 +2271,18 @@ private struct LiveRefreshToolbarControl: View {
             default: break
             }
         }
-        return state.liveCatalogError(for: source.id)
+        // Picture failures live in the neutral background-activity details.
+        return nil
     }
 }
 
 private struct LivePreviewRefreshMenuItem: View {
+    @EnvironmentObject private var state: AppState
     @ObservedObject var previews: LivePreviewCoordinator
     @ObservedObject var session: LiveBrowserSession
     var body: some View {
         Button {
-            session.showsPreviewImages = true
-            session.previewRefreshRequest &+= 1
+            if let source = session.selectedSourceID { session.refreshPictures(sourceID: source, state: state) }
         } label: {
             Label(previews.refreshing
                 ? L10n.string("live.preview.refreshing", fallback: "Refreshing Channel Pictures…")
@@ -2207,6 +2290,6 @@ private struct LivePreviewRefreshMenuItem: View {
                 systemImage: "arrow.clockwise")
         }
         .labelStyle(.titleAndIcon)
-        .disabled(previews.refreshing)
+        .disabled(previews.refreshing || !session.showsPreviewImages || session.showsGuide)
     }
 }

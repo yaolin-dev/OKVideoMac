@@ -39,7 +39,25 @@ public struct MediaTrack: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+/// Correlates native seek observations with the initiating UI operation.
+public struct PlayerSeekTransaction: Equatable, Sendable {
+    public enum Phase: Equatable, Sendable { case pending, completed, failed }
+    public let id: UUID
+    public let target: TimeInterval
+    public var phase: Phase
+    public init(id: UUID, target: TimeInterval, phase: Phase = .pending) {
+        self.id = id; self.target = target; self.phase = phase
+    }
+}
+
+public enum PlaybackMediaNetworkRoute: Equatable, Sendable {
+    case direct, systemProxy, providerManaged, unsupportedProxy, localFile, otherProtocol
+}
+
 public struct PlayerSnapshot: Equatable, Sendable {
+    public var mediaNetworkRoute: PlaybackMediaNetworkRoute? = nil
+    public var mediaProxyPreference: Bool? = nil
+    public var seekTransaction: PlayerSeekTransaction? = nil
     /// False while seek recovery is unconfirmed or playback has failed. UI
     /// position remains the native observation; persistence must not treat it
     /// as confirmed viewing progress.
@@ -140,6 +158,7 @@ public protocol PlayerClient: AnyObject {
     func pause() async throws
     func stop() async
     func seek(to position: TimeInterval) async throws
+    func seek(to position: TimeInterval, transactionID: UUID, playbackRequestID: UUID?) async throws
     func setVolume(_ volume: Double) async throws
     func setMuted(_ muted: Bool) async throws
     func setSpeed(_ speed: Double) async throws
@@ -158,6 +177,9 @@ public protocol PlayerClient: AnyObject {
 }
 
 public extension PlayerClient {
+    func seek(to position: TimeInterval, transactionID: UUID, playbackRequestID: UUID? = nil) async throws {
+        try await seek(to: position)
+    }
     func setMediaInfoVisible(_ visible: Bool) {}
 }
 

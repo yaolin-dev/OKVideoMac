@@ -6,7 +6,252 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 @MainActor final class SearchBrowseMigrationTests: XCTestCase {
-    func testTVBoxPrioritizesPositiveResultsAndOmitsOnlyUnsupportedDexSites() throws {
+    func testRelatedAndHomeUseSameCustomScopeWithoutStartingExcludedProvider() async throws {
+        let selectedRecorder = SearchAppRequestRecorder(), excludedRecorder = SearchAppRequestRecorder()
+        let selected = SearchAppFixture(recorder: selectedRecorder)
+        let excluded = SearchAppFixture(recorder: excludedRecorder,
+            site: .init(key: "excluded", name: "Excluded", type: 1, api: "https://fixture.invalid"))
+        let state = AppState(environment: nil)
+        let record = StoredConfiguration(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        state.seedCategoryHomeForTesting(record: record, provider: selected, home: .init(categories: [], recommendations: []),
+            additionalProviders: ["excluded": excluded], searchScope: .init(mode: .custom, selectedSiteKeys: ["source"]))
+        state.search("film")
+        for _ in 0..<200 where state.isSearching { try await Task.sleep(nanoseconds: 10_000_000) }
+        let page = TMDBRelatedPage(kind: .search, title: "film", source: .init(siteKey: "source", siteName: "Source", videoID: "1", title: "Origin"), configurationID: record.id)
+        try await state.searchRelatedWork(page, refresh: false)
+        XCTAssertEqual(page.searchPaging.order, ["source"])
+        XCTAssertEqual(page.results, state.searchResults)
+        let excludedCalls = await excludedRecorder.count, selectedCalls = await selectedRecorder.count
+        XCTAssertEqual(excludedCalls, 0); XCTAssertEqual(selectedCalls, 2)
+    }
+
+    func testRelatedSearchAndHomeShareResultsFooterAndAutomaticBudgetReplay() async throws {
+        let provider = SearchAppFixture(recorder: SearchAppRequestRecorder(), largeFinalPage: true)
+        let state = AppState(environment: nil)
+        let record = StoredConfiguration(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        state.seedCategoryHomeForTesting(record: record, provider: provider, home: .init(categories: [], recommendations: []))
+        state.search("film")
+        for _ in 0..<200 where state.isSearching { try await Task.sleep(nanoseconds: 10_000_000) }
+        let home = SearchScreenSnapshot(state: state)
+        let page = TMDBRelatedPage(kind: .search, title: "film", source: .init(siteKey: "source", siteName: "Source", videoID: "origin", title: "Origin"), configurationID: record.id)
+        let browser = TMDBRelatedBrowser(); browser.pages = [page]
+        browser.load(page, state: state); await page.task?.value
+        let related = SearchScreenSnapshot(page: page)
+        XCTAssertEqual(home.results, related.results)
+        XCTAssertEqual(home.sites, related.sites)
+        XCTAssertEqual(home.footer, related.footer)
+        for merge in [true, false] {
+            for sort in SearchResultSortOrder.allCases {
+                XCTAssertEqual(SearchResultPresentation.clusters(from: home.results, keyword: home.keyword, mergesDuplicates: merge, sortOrder: sort),
+                    SearchResultPresentation.clusters(from: related.results, keyword: related.keyword, mergesDuplicates: merge, sortOrder: sort))
+            }
+        }
+        XCTAssertNil(related.footer.actionTitle)
+        XCTAssertTrue(related.footer.scrollDrivenLoading)
+        let first = await browser.loadMore(page, state: state)
+        XCTAssertTrue(first); XCTAssertEqual(page.results.count, 240)
+        let last = await browser.loadMore(page, state: state)
+        XCTAssertTrue(last); XCTAssertEqual(page.results.count, 250)
+        XCTAssertFalse(SearchScreenSnapshot(page: page).footer.hasMore)
+        XCTAssertEqual(state.searchResults.count, 120, "Related paging must not mutate home")
+        XCTAssertEqual(page.maximumRetained, SearchPagingState.initialMaximumResults * 3)
+        browser.clear()
+    }
+
+    func testRelatedBackPreservesActorFilterHomeQueryAndSearchSourceSelection() async throws {
+        let provider = SearchAppFixture(recorder: SearchAppRequestRecorder())
+        let state = AppState(environment: nil)
+        let record = StoredConfiguration(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        state.seedCategoryHomeForTesting(record: record, provider: provider, home: .init(categories: [], recommendations: []))
+        state.searchDraftKeyword = "Original home query"
+        let candidate = try relatedCandidate()
+        let person = TMDBRelatedPage(kind: .person, title: "Actor", source: .init(siteKey: "source", siteName: "Source", videoID: "origin", title: "Origin"), configurationID: record.id)
+        person.works = [candidate]; person.filter = "movie"; person.displayedCount = 96
+        let browser = TMDBRelatedBrowser(); browser.pages = [person]
+        browser.select(try XCTUnwrap(person.items.first), page: person, state: state)
+        let page = try XCTUnwrap(browser.pages.last)
+        await page.task?.value
+        XCTAssertEqual(state.sidebarVideoSearchText, "Film")
+        XCTAssertEqual(state.searchDraftKeyword, "Original home query")
+        page.selectedSearchSiteKey = "source"
+        state.sidebarVideoSearchText = "Draft retained"
+        browser.select(try XCTUnwrap(page.results.first), page: page, state: state)
+        XCTAssertEqual(browser.pages.last?.kind, .detail)
+        browser.pop()
+        XCTAssertTrue(browser.pages.last === page)
+        XCTAssertEqual(page.selectedSearchSiteKey, "source")
+        XCTAssertEqual(state.sidebarVideoSearchText, "Draft retained")
+        browser.pop()
+        XCTAssertTrue(browser.pages.last === person)
+        XCTAssertEqual(person.filter, "movie"); XCTAssertEqual(person.displayedCount, 96)
+        XCTAssertEqual(state.sidebarVideoSearchText, "Original home query")
+        XCTAssertNil(state.relatedSearchSubmit)
+        browser.clear()
+    }
+
+    func testRelatedSidebarReplacementAndStopRejectStaleCompletion() async throws {
+        let provider = SearchAppFixture(recorder: SearchAppRequestRecorder())
+        let state = AppState(environment: nil)
+        let record = StoredConfiguration(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        state.seedCategoryHomeForTesting(record: record, provider: provider, home: .init(categories: [], recommendations: []))
+        state.searchDraftKeyword = "Parent"
+        let actor = TMDBRelatedPage(kind: .person, title: "Actor", source: .init(siteKey: "source", siteName: "Source", videoID: "origin", title: "Origin"), configurationID: record.id)
+        actor.works = [try relatedCandidate()]
+        let browser = TMDBRelatedBrowser(); browser.pages = [actor]
+        browser.select(try XCTUnwrap(actor.items.first), page: actor, state: state)
+        let old = try XCTUnwrap(browser.pages.last)
+        state.searchFromSidebar("New film")
+        let current = try XCTUnwrap(browser.pages.last)
+        XCTAssertNotEqual(current.id, old.id); XCTAssertNil(current.candidate)
+        await current.task?.value
+        XCTAssertTrue(current.results.allSatisfy { $0.title.hasPrefix("New film") })
+        XCTAssertTrue(old.results.isEmpty)
+        XCTAssertEqual(state.searchDraftKeyword, "Parent")
+        browser.cancelSearch(current)
+        let stoppedCount = current.results.count
+        let automatic = await browser.loadMore(current, state: state)
+        XCTAssertFalse(automatic); XCTAssertEqual(current.results.count, stoppedCount)
+        let resumed = await browser.loadMore(current, state: state, retry: true)
+        XCTAssertTrue(resumed)
+        browser.clear(); XCTAssertNil(state.relatedSearchDraft)
+    }
+
+    func testRelatedFailedRefreshKeepsResultsAndRequiresExplicitRetry() async throws {
+        let recorder = SearchAppRequestRecorder()
+        let provider = SearchAppFixture(recorder: recorder)
+        let state = AppState(environment: nil)
+        let record = StoredConfiguration(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        state.seedCategoryHomeForTesting(record: record, provider: provider, home: .init(categories: [], recommendations: []))
+        let page = TMDBRelatedPage(kind: .search, title: "film", source: .init(siteKey: "source", siteName: "Source", videoID: "origin", title: "Origin"), configurationID: record.id)
+        let browser = TMDBRelatedBrowser(); browser.pages = [page]
+        browser.load(page, state: state); await page.task?.value
+        let original = page.results
+        await recorder.setFailure(true)
+        await browser.refreshSearch(page, state: state, force: true)
+        XCTAssertEqual(page.results, original); XCTAssertEqual(page.failures.count, 1)
+        XCTAssertFalse(SearchScreenSnapshot(page: page).footer.automaticLoading)
+        XCTAssertNotNil(SearchScreenSnapshot(page: page).footer.actionTitle)
+        await recorder.setFailure(false)
+        await browser.refreshSearch(page, state: state, force: false)
+        XCTAssertTrue(page.failures.isEmpty); XCTAssertEqual(page.results, original)
+        XCTAssertTrue(SearchScreenSnapshot(page: page).footer.automaticLoading)
+        browser.clear()
+    }
+
+    func testRelatedFolderKeepsProviderIdentifiersAndReturnsToSearch() async throws {
+        let provider = SearchAppFixture(recorder: SearchAppRequestRecorder())
+        let state = AppState(environment: nil)
+        let record = StoredConfiguration(name: "Fixture", sourceKind: .pasted, rawData: Data())
+        state.seedCategoryHomeForTesting(record: record, provider: provider, home: .init(categories: [], recommendations: []))
+        let folder = VideoSummary(siteKey: "source", siteName: "Source", videoID: "opaque/folder", title: "Folder", tag: "folder")
+        let page = TMDBRelatedPage(kind: .search, title: "film", source: folder, configurationID: record.id)
+        let browser = TMDBRelatedBrowser(); browser.pages = [page]
+        browser.select(folder, page: page, state: state)
+        let next = try XCTUnwrap(browser.pages.last)
+        XCTAssertEqual(next.kind, .folder); XCTAssertEqual(next.source.videoID, "opaque/folder")
+        await next.task?.value; XCTAssertEqual(next.results.count, 1)
+        let more = await browser.loadMore(next, state: state)
+        XCTAssertTrue(more); XCTAssertEqual(next.results.count, 2)
+        browser.pop(); XCTAssertTrue(browser.pages.last === page)
+        browser.clear()
+    }
+
+    func testKnownTMDBArtworkRequiresMatchingIdentityAndNeverChangesSource() throws {
+        let candidate = try relatedCandidate()
+        let url = URL(string: "https://fixture.invalid/cloud-logo.png")!
+        let source = VideoSummary(siteKey: "source", siteName: "Source", videoID: "opaque:123", title: "Film", posterURL: url, year: "2025", categoryName: "电影")
+        let display = SearchArtworkPresentation.summary(source, candidate: candidate)
+        XCTAssertNotEqual(display.posterURL, url)
+        XCTAssertEqual(source.posterURL, url)
+        XCTAssertEqual(display.id, source.id); XCTAssertEqual(display.videoID, source.videoID)
+        var conflict = source; conflict.year = "2024"
+        XCTAssertEqual(SearchArtworkPresentation.summary(conflict, candidate: candidate), conflict)
+        conflict = source; conflict.categoryName = "电视剧"
+        XCTAssertEqual(SearchArtworkPresentation.summary(conflict, candidate: candidate), conflict)
+        conflict = source; conflict.year = nil
+        XCTAssertEqual(SearchArtworkPresentation.summary(conflict, candidate: candidate), conflict)
+    }
+
+    func testNativeActorSearchUsesSameMergedGridSourceRowAndCardGeometryAsHome() async throws {
+        let defaults = UserDefaults.standard, key = SearchDisplayPreferences.mergesDuplicateTitlesKey
+        let before = defaults.object(forKey: key); defaults.set(true, forKey: key)
+        defer { if let before { defaults.set(before, forKey: key) } else { defaults.removeObject(forKey: key) } }
+        let state = AppState(environment: nil)
+        let rows = (0..<20).flatMap { index in
+            ["a", "b"].map { site in VideoSummary(siteKey: site, siteName: site.uppercased(),
+                videoID: "\(site)-\(index)", title: "Film \(index)", year: "2025", categoryName: "电影") }
+        }
+        state.seedSearchResultsForTesting(rows)
+        let page = TMDBRelatedPage(kind: .search, title: "", source: rows[0], configurationID: UUID(), candidate: try relatedCandidate())
+        page.results = rows
+        let browser = TMDBRelatedBrowser(); browser.pages = [page]
+        let home = NSHostingView(rootView: SearchView().environmentObject(state))
+        let related = NSHostingView(rootView: TMDBRelatedPageView(browser: browser, page: page, active: true).environmentObject(state))
+        var sizes: [NSSize] = []
+        for host in [home as NSView, related as NSView] {
+            let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 980, height: 720), styleMask: [.titled], backing: .buffered, defer: false)
+            window.isReleasedWhenClosed = false; window.contentView = host
+            window.makeKeyAndOrderFront(nil)
+            try await Task.sleep(nanoseconds: 250_000_000); host.layoutSubtreeIfNeeded()
+            let descendants = BrowserKeyboardView.descendants(of: host)
+            let collection = try XCTUnwrap(descendants.compactMap { $0 as? PosterNativePageCollectionView }.first)
+            let row = try XCTUnwrap(descendants.compactMap { $0 as? NativeBrowseCategoryNavigation }.first)
+            XCTAssertEqual(collection.numberOfItems(inSection: 0), 20)
+            XCTAssertEqual(row.segments.segmentCount, 3, "All results plus the two provider filters")
+            sizes.append(try XCTUnwrap((collection.collectionViewLayout as? NSCollectionViewFlowLayout)?.itemSize))
+            window.close()
+        }
+        XCTAssertEqual(sizes[0], sizes[1])
+        browser.clear()
+    }
+
+    private func relatedCandidate() throws -> TMDBCandidate {
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        let work = try decoder.decode(TMDBWork.self, from: Data(#"{"id":123,"title":"Film","release_date":"2025-01-01","poster_path":"/film.jpg"}"#.utf8))
+        return .init(reference: .init(type: .movie, id: 123), work: work)
+    }
+
+    func testBudgetedFinalPageCanBeFullyRecoveredByScrollContinuation() async throws {
+        let recorder = SearchAppRequestRecorder()
+        let provider = SearchAppFixture(recorder: recorder, largeFinalPage: true)
+        let state = AppState(environment: nil, initialProviders: [provider.site.key: provider])
+        state.seedCategoryHomeForTesting(
+            record: StoredConfiguration(name: "Fixture", sourceKind: .pasted, rawData: Data()),
+            provider: provider, home: SiteHome(categories: [], recommendations: []))
+        state.search("film")
+        for _ in 0..<200 where state.isSearching { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(state.searchResults.count, 120)
+        XCTAssertTrue(state.searchPaging.cursors["source"]?.ended == true)
+        XCTAssertTrue(state.searchPaginationFooter.hasMore, "A truncated final page must stay resumable")
+        XCTAssertTrue(state.searchPaginationFooter.automaticLoading)
+        XCTAssertTrue(state.searchPaginationFooter.scrollDrivenLoading)
+        XCTAssertNil(state.searchPaginationFooter.actionTitle, "Healthy results must not require a continue button")
+        let resumed = await state.loadMoreSearchResults()
+        XCTAssertTrue(resumed)
+        XCTAssertEqual(state.searchResults.count, 240)
+        XCTAssertTrue(state.searchPaginationFooter.automaticLoading)
+        let finished = await state.loadMoreSearchResults()
+        XCTAssertTrue(finished)
+        XCTAssertEqual(Set(state.searchResults.map(\.videoID)), Set((0..<250).map(String.init)))
+        XCTAssertFalse(state.searchPaginationFooter.hasMore)
+        XCTAssertTrue(state.searchPaging.deferredPages.isEmpty)
+        let calls = await recorder.count
+        XCTAssertEqual(calls, 3)
+        state.cancelSearch()
+    }
+
+    func testFailedBudgetReplayRemainsRetryableWithoutAutomaticRetryLoop() {
+        var paging = SearchPagingState()
+        paging.order = ["source"]
+        paging.cursors["source"] = SearchPageCursor(keyword: "film")
+        paging.deferResults(["source": 1])
+        paging.cursors["source"]?.fail("offline")
+        XCTAssertTrue(paging.eligible(selected: nil, retry: false).isEmpty)
+        XCTAssertEqual(paging.eligible(selected: nil, retry: true), ["source"])
+        XCTAssertEqual(paging.cursorForLoading("source")?.nextPage, 1)
+    }
+
+    func testLearnedOrderingKeepsFastEmptySourcesAndAllEligibleSources() throws {
         let bridge = AndroidDexBridgeClient(runtimePrerequisite: { XCTFail("ordering must not start Android") })
         func dex(_ key: String, searchable: Int = 1) throws -> AndroidDexSpiderSiteProvider {
             try AndroidDexSpiderSiteProvider(
@@ -17,18 +262,46 @@ import OKVideoPersistence
         let slow = try dex("slow"), unknown = try dex("unknown"), fast = try dex("fast")
         let empty = try dex("empty"), disabled = try dex("disabled", searchable: 0)
         let failed = try dex("failed")
-        slow.searchPerformance.record(elapsed: 5, resultCount: 20, succeeded: true)
-        fast.searchPerformance.record(elapsed: 1, resultCount: 20, succeeded: true)
-        empty.searchPerformance.record(elapsed: 0.1, resultCount: 0, succeeded: true)
-        failed.searchPerformance.record(elapsed: 0.1, resultCount: 0, succeeded: false)
         let all = [failed, empty, slow, unknown, disabled, fast]
-        let ordered = AppState.orderedSearchProviders(catalog: all.map(\.site),
-            providers: Dictionary(uniqueKeysWithValues: all.map { ($0.site.key, $0 as SiteProvider) }))
-        XCTAssertEqual(ordered.map { $0.site.key }, ["fast", "slow", "unknown", "empty", "failed"])
-        XCTAssertTrue(AppState.orderedSearchProviders(catalog: [disabled.site],
-            providers: ["disabled": disabled], selectedKeys: ["disabled"]).isEmpty)
-        // A fresh provider with the same key cannot inherit old account/JAR performance.
-        XCTAssertEqual(try dex("fast").aggregateSearchPriority, unknown.aggregateSearchPriority)
+        let keys = Dictionary(uniqueKeysWithValues: all.map { ($0.site.key, SearchPerformanceStore.key(namespace: "test", identity: $0.site.key)) })
+        let performance = SearchPerformanceStore()
+        for _ in 0..<4 {
+            for (source, seconds, status, relevant) in [(slow, 5.0, SearchAttemptStatus.success, true),
+                    (fast, 0.2, .success, true), (empty, 0.1, .success, false), (failed, 30.0, .timeout, false)] {
+                performance.record(.init(siteKey: source.site.key, elapsed: seconds, status: status, hasRelevantResults: relevant), key: keys[source.site.key]!)
+            }
+        }
+        let providers = Dictionary(uniqueKeysWithValues: all.map { ($0.site.key, $0 as SiteProvider) })
+        let ordered = AppState.orderedSearchProviders(catalog: all.map(\.site), providers: providers,
+            performance: performance, performanceKeys: keys)
+        XCTAssertEqual(ordered.map { $0.site.key }, ["empty", "fast", "unknown", "slow", "failed"])
+        XCTAssertTrue(AppState.orderedSearchProviders(catalog: [disabled.site], providers: providers,
+            selectedKeys: ["disabled"], performance: performance, performanceKeys: keys).isEmpty)
+        // Explicit scope selection cannot be widened by learned priority.
+        XCTAssertEqual(AppState.orderedSearchProviders(catalog: all.map(\.site), providers: providers,
+            selectedKeys: ["slow"], performance: performance, performanceKeys: keys).map { $0.site.key }, ["slow"])
+        XCTAssertEqual(AppState.aggregateSearchPolicies(ordered)["fast"]?.maximumGroupConcurrency, 20)
+    }
+
+    func testSearchRecordsPersistentLearningThroughProductionPipeline() async throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let file = directory.appendingPathComponent("performance.json")
+        let performance = SearchPerformanceStore(file: file)
+        let provider = SearchAppFixture(recorder: SearchAppRequestRecorder())
+        let state = AppState(environment: nil, initialProviders: [provider.site.key: provider], searchPerformance: performance)
+        state.seedCategoryHomeForTesting(record: StoredConfiguration(name: "Fixture", sourceKind: .pasted, rawData: Data()),
+            provider: provider, home: SiteHome(categories: [], recommendations: []))
+        state.search("film")
+        for _ in 0..<200 where state.isSearching { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertFalse(state.isSearching)
+        XCTAssertEqual(state.searchResults.count, 1)
+        XCTAssertEqual(performance.entryCount, 1)
+        try performance.flush()
+        XCTAssertEqual(SearchPerformanceStore(file: file).entryCount, 1)
+        XCTAssertTrue(state.searchPaginationFooter.automaticLoading)
+        XCTAssertNil(state.searchPaginationFooter.actionTitle)
+        state.cancelSearch()
     }
 
     func testRepeatedTVBoxStyleSearchPreservesSessionAndNewKeywordRejectsOldResults() async throws {
@@ -275,12 +548,15 @@ import OKVideoPersistence
 
 private actor SearchAppRequestRecorder {
     var count = 0
+    var fails = false
     func record() { count += 1 }
+    func setFailure(_ value: Bool) { fails = value }
 }
 
 private struct SearchAppFixture: SiteProvider {
     let recorder: SearchAppRequestRecorder
-    let site = SiteConfiguration(key: "source", name: "Source", type: 1, api: "https://example.invalid")
+    var largeFinalPage = false
+    var site = SiteConfiguration(key: "source", name: "Source", type: 1, api: "https://example.invalid")
     let capability: SiteCapability = .standardJSON
     func home() async throws -> SiteHome { SiteHome(categories: [], recommendations: []) }
     func category(id: String, page: Int, filters: [String: String]) async throws -> VideoPage { try await search(keyword: "film", page: page, quick: false) }
@@ -288,7 +564,12 @@ private struct SearchAppFixture: SiteProvider {
     func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult { throw AppError.site("unused") }
     func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage {
         await recorder.record()
+        if await recorder.fails { throw AppError.site("Fixture offline") }
         try await Task.sleep(nanoseconds: 50_000_000)
+        if largeFinalPage {
+            return VideoPage(items: (0..<250).map { VideoSummary(siteKey: site.key, siteName: site.name,
+                videoID: String($0), title: "\(keyword) \($0)") }, pagination: Pagination(page: 1, pageCount: 1))
+        }
         var pagination = Pagination(page: page, pageCount: 4)
         pagination.continuation = page < 4 ? .more : .end
         return VideoPage(items: [VideoSummary(siteKey: site.key, siteName: site.name, videoID: "\(page)", title: "\(keyword) \(page)")], pagination: pagination)

@@ -95,6 +95,22 @@ actor EPGImportCoordinator {
         importer.boundaryForTesting = phaseObserver
         try store.acquireImportPipeline()
         defer { store.releaseImportPipeline() }
+        // Reuse abandoned pages before admitting a new generation. Each burst
+        // is cancellable and yields between slices; active/staging snapshots
+        // remain protected by the Store's cleanup predicate.
+        var needsCleanup = true
+        while needsCleanup {
+            needsCleanup = try await work(worker) {
+                let started = ProcessInfo.processInfo.systemUptime
+                for _ in 0..<4 {
+                    try entry.control.check()
+                    if try !store.cleanupStep().hasWorkRemaining { return false }
+                    if ProcessInfo.processInfo.systemUptime - started >= 0.020 { break }
+                }
+                return true
+            }
+            if needsCleanup { try await Task.sleep(nanoseconds: 25_000_000) }
+        }
         let handle = try await work(worker) {
             try entry.control.check()
             _ = try downloader.recoverStaleFiles()

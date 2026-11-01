@@ -93,6 +93,7 @@ struct PlaybackInformationPanel: View {
     let originalName: String?
     let duration: TimeInterval
     let selectedAudioTrack: MediaTrack?
+    var networkRoute: PlaybackMediaNetworkRoute? = nil
     @State private var showsStatistics = false
     @State private var didCopy = false
 
@@ -117,6 +118,9 @@ struct PlaybackInformationPanel: View {
                 .accessibilityIdentifier("player.info.copy")
             }
             rows(PlaybackInfoPresentation.fileRows(info, originalName: originalName, duration: duration))
+            if let networkRoute {
+                rows([PlaybackInfoRow(id: "media-network", label: L10n.string("player.info.media-network", fallback: "Media Connection"), value: networkRoute.title)])
+            }
             let video = PlaybackInfoPresentation.videoRows(info)
             if !video.isEmpty { Divider(); rows(video) }
             Divider()

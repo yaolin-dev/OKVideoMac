@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 
 struct PlaybackSettingsPane: View {
     @EnvironmentObject private var state: AppState
+    @AppStorage(MediaProxyPreference.key) private var mediaUsesSystemProxy = false
     var body: some View {
         SettingsPage(
             title: SettingsL10n.string("settings.pane.playback.title", "Playback"),
@@ -47,6 +48,40 @@ struct PlaybackSettingsPane: View {
                     .toggleStyle(.switch)
                 }
             }.settingsAnchor("playback")
+
+            SettingsSectionTitle(SettingsL10n.string("settings.playback.network.section", "Network"))
+            SettingsCard {
+                SettingsControlRow(icon: "network", color: .blue,
+                    title: SettingsL10n.string("settings.playback.network.proxy", "Use System Proxy for Media"),
+                    subtitle: SettingsL10n.string("settings.playback.network.help", "Use the current HTTP/HTTPS system proxy for supported media connections. When off, connect directly. Movie details, posters and sign-in keep their existing network settings.")) {
+                    Toggle(SettingsL10n.string("settings.playback.network.proxy", "Use System Proxy for Media"), isOn: $mediaUsesSystemProxy)
+                        .labelsHidden().toggleStyle(.switch).accessibilityIdentifier("settings.playback.media-proxy")
+                }
+                SettingsDivider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(SettingsL10n.string("settings.playback.network.scope", "Applies when playback is loaded again. Source-managed downloads may not support this setting. This switch does not bypass a system VPN."))
+                        .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                    if let route = state.playerSnapshot.mediaNetworkRoute, state.isPlayerPresented {
+                        HStack {
+                            Text(SettingsL10n.string("settings.playback.network.current", "Current Media Connection"))
+                            Spacer()
+                            Text(route.title).foregroundStyle(.secondary)
+                        }.font(.system(size: 12))
+                    }
+                    if let applied = state.playerSnapshot.mediaProxyPreference, applied != mediaUsesSystemProxy, state.canRetryCurrentPlayback {
+                        HStack {
+                            Text(SettingsL10n.string("settings.playback.network.pending", "The new setting will apply after reloading playback."))
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                            Spacer()
+                            Button(state.isLivePlayback
+                                ? L10n.string("player.episode.retry", fallback: "Retry Playback")
+                                : SettingsL10n.string("settings.playback.network.reload", "Reload and Keep Position")) {
+                                Task { await state.retryCurrentPlayback(preserveProgress: true) }
+                            }.disabled(state.playerSnapshot.isSeeking)
+                        }
+                    }
+                }.padding(12)
+            }.settingsAnchor("media-network")
 
             SettingsCard {
                 PlayerWindowSettingsControl(preferences: state.playerWindowPreferences,

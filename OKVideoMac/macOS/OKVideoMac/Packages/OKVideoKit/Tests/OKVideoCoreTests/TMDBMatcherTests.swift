@@ -3,6 +3,77 @@ import XCTest
 
 final class TMDBMatcherTests: XCTestCase {
 
+    private let deadEndCast = "李宰旭 高旻示 金敏荷 李熙俊"
+    private func deadEndCandidate(director: String = "김다민", aliases: [String] = ["김다민", "Kim Da-min"]) throws -> TMDBCandidate {
+        let value: [String: Any] = ["id": 289517, "name": "末路兼职", "original_name": "꿀알바", "first_air_date": "2026-10-30",
+            "seasons": [["season_number": 1, "episode_count": 8, "air_date": "2026-10-30"]],
+            "aggregate_credits": ["cast": deadEndCast.split(separator: " ").enumerated().map { ["id": $0.offset + 1, "name": String($0.element)] as [String: Any] },
+                "crew": [["id": 2756160, "name": director, "original_name": director, "also_known_as": aliases, "jobs": [["job": "Director"]]]]]]
+        let decoder = JSONDecoder(); decoder.keyDecodingStrategy = .convertFromSnakeCase
+        return .init(reference: .init(type: .tv, id: 289517), work: try decoder.decode(TMDBWork.self, from: JSONSerialization.data(withJSONObject: value)))
+    }
+
+    func testDeadEndJobChineseDirectorDoesNotVetoMatchingCastAndYear() throws {
+        let work = try deadEndCandidate()
+        let source = input("末路兼职", year: "2026", category: "喜剧 恐怖 奇幻", director: "金多珉", actors: deadEndCast)
+        let evidence = TMDBMatcher.assess(work, input: source)
+        XCTAssertNil(source.type)
+        XCTAssertTrue(evidence.exactTitle && evidence.matchingYear && evidence.corroboratedCast)
+        XCTAssertTrue(evidence.unresolvedDirector)
+        XCTAssertFalse(evidence.corroboratedDirector)
+        XCTAssertFalse(evidence.directorConflict || evidence.conflict)
+        XCTAssertEqual(TMDBMatcher.automaticMatch([work], input: source)?.reference.id, 289517)
+        XCTAssertTrue(TMDBMatcher.acceptsRelaxed(work, input: source))
+    }
+
+    func testDifferentWritingSystemsAreUnverifiedWithoutInventingIdentityEvidence() throws {
+        for (original, translation) in [("김다민", "金多珉"), ("キムダミン", "金多珉"), ("金ダミン", "金多珉"),
+            ("Алексей", "阿列克谢"), ("Louis Leterrier", "路易斯·莱特列尔"), ("김金", "金多珉"), ("123", "456")] {
+            let work = try deadEndCandidate(director: original, aliases: [])
+            let source = input("末路兼职", year: "2026", category: "电视剧", director: translation)
+            let evidence = TMDBMatcher.assess(work, input: source)
+            XCTAssertFalse(evidence.conflict, original)
+            XCTAssertTrue(evidence.unresolvedDirector, original)
+            XCTAssertFalse(evidence.corroboratedDirector, original)
+            XCTAssertNil(TMDBMatcher.automaticMatch([work], input: source), "Translation alone must never prove identity")
+        }
+    }
+
+    func testDifferentDirectorsInSameWritingSystemStillVetoStrongCast() throws {
+        for (original, wrong) in [("김다민", "홍길동"), ("金多珉", "李添胜"), ("Kim Da-min", "Michael Mann"), ("Алексей", "Андрей"), ("キムダミン", "アオイ")] {
+            let work = try deadEndCandidate(director: original, aliases: [])
+            let source = input("末路兼职", year: "2026", category: "电视剧", director: wrong, actors: deadEndCast)
+            let evidence = TMDBMatcher.assess(work, input: source)
+            XCTAssertTrue(evidence.directorConflict && evidence.conflict, original)
+            XCTAssertFalse(evidence.unresolvedDirector, original)
+            XCTAssertNil(TMDBMatcher.automaticMatch([work], input: source))
+            XCTAssertFalse(TMDBMatcher.acceptsRelaxed(work, input: source))
+        }
+    }
+
+    func testVerifiedChineseAliasStillConfirmsKoreanDirector() throws {
+        let work = try deadEndCandidate(aliases: ["金多珉", "Kim Da-min"])
+        let source = input("末路兼职", year: "2026", category: "电视剧", director: "金多珉")
+        let evidence = TMDBMatcher.assess(work, input: source)
+        XCTAssertTrue(evidence.corroboratedDirector)
+        XCTAssertFalse(evidence.unresolvedDirector || evidence.conflict)
+        XCTAssertNotNil(TMDBMatcher.automaticMatch([work], input: source))
+    }
+
+    func testUnverifiedDirectorCannotOverrideYearFormSeasonOrAmbiguity() throws {
+        let work = try deadEndCandidate()
+        for source in [input("末路兼职", year: "2025", category: nil, director: "金多珉", actors: deadEndCast),
+            input("末路兼职", year: "2026", category: "电影", director: "金多珉", actors: deadEndCast),
+            input("末路兼职 第二季", year: "2026", category: "电视剧", director: "金多珉", actors: deadEndCast)] {
+            XCTAssertTrue(TMDBMatcher.assess(work, input: source).identityConflict)
+            XCTAssertNil(TMDBMatcher.automaticMatch([work], input: source))
+            XCTAssertFalse(TMDBMatcher.acceptsRelaxed(work, input: source))
+        }
+        let source = input("末路兼职", year: "2026", category: "电视剧", director: "金多珉", actors: deadEndCast)
+        let rival = try candidate(999, title: "末路兼职", year: nil)
+        XCTAssertNil(TMDBMatcher.automaticMatch([work, rival], input: source))
+    }
+
     private func releaseInput(_ names: [String], year: String? = nil, category: String? = nil) -> TMDBMatchInput {
         .init(detail: .init(summary: .init(siteKey: "wogg", siteName: "Source", videoID: "last", title: "最后孤屋", year: year, categoryName: category),
             playSources: [.init(name: "original", episodes: names.map { .init(name: $0, url: "opaque:unchanged") })]))

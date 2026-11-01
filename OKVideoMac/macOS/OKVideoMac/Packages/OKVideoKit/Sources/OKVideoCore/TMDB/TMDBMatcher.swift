@@ -187,7 +187,8 @@ public enum TMDBMatcher {
         public let corroboratedCast: Bool
         public let corroboratedDirector: Bool
         /// Year/type/season conflicts cannot be repaired by a person's aliases.
-        let identityConflict: Bool
+        public let identityConflict: Bool
+        public let directorConflict: Bool
         public var requiresCompleteSearch: Bool { !matchingType && !corroboratedCast && corroboratedDirector }
         public let identitySupported: Bool
         public let conflict: Bool
@@ -260,17 +261,34 @@ public enum TMDBMatcher {
         let directorSupportsIdentity = input.canInferTypeFromCast && yearMatches && verifiedDirector && !needsYearRemoval
         let identitySupported = (typeMatches || (input.canInferTypeFromCast && strongCast) || directorSupportsIdentity)
             && (!needsYearRemoval || strongCast)
-        func latin(_ value: String) -> Bool { value.range(of: #"^[\p{Latin}0-9]+$"#, options: .regularExpression) != nil }
         let comparable = crew.allSatisfy { person in
             let original = TMDBTitleNormalizer.key(person.originalName ?? person.name)
-            return input.directors.allSatisfy { latin($0) == latin(original) }
+            guard let script = nameScript(original) else { return false }
+            return input.directors.allSatisfy { nameScript($0) == script }
         }
-        if directorMismatch && comparable { conflict = true }
+        let directorConflict = directorMismatch && comparable
+        if directorConflict { conflict = true }
         let unresolvedDirector = directorMismatch && !comparable
         let peopleMatch = !input.people.intersection(castNames.union(directors)).isEmpty
         let similarity = keys.map { key in aliases.map { similarityScore(key, $0) }.max() ?? 0 }.max() ?? 0
         let rank = (exact ? 60 : similarity) + (yearMatches ? 20 : 0) + (typeMatches ? 15 : 0) + (strongCast ? 10 : peopleMatch ? 5 : 0) - (conflict ? 100 : 0)
-        return Evidence(exactTitle: exact, matchingYear: yearMatches, matchingType: typeMatches, corroboratedCast: strongCast, corroboratedDirector: verifiedDirector, identityConflict: identityConflict, identitySupported: identitySupported, conflict: conflict, hasYearEvidence: !input.yearHints.isEmpty, unresolvedDirector: unresolvedDirector, rank: rank)
+        return Evidence(exactTitle: exact, matchingYear: yearMatches, matchingType: typeMatches, corroboratedCast: strongCast, corroboratedDirector: verifiedDirector, identityConflict: identityConflict, directorConflict: directorConflict, identitySupported: identitySupported, conflict: conflict, hasYearEvidence: !input.yearHints.isEmpty, unresolvedDirector: unresolvedDirector, rank: rank)
+    }
+
+    /// Exact original names and verified aliases are checked before this fallback.
+    /// Different scripts cannot prove two people differ: Han and Hangul are not
+    /// interchangeable just because neither is Latin. Unknown/mixed scripts and
+    /// numeric placeholders also remain unverified rather than vetoing a work.
+    private static func nameScript(_ name: String) -> String? {
+        guard name.range(of: #"\p{L}"#, options: .regularExpression) != nil else { return nil }
+        if name.range(of: #"[\p{Hiragana}\p{Katakana}]"#, options: .regularExpression) != nil,
+           name.range(of: #"^[\p{Han}\p{Hiragana}\p{Katakana}\p{M}ー0-9]+$"#, options: .regularExpression) != nil {
+            return "JapaneseKana"
+        }
+        for script in ["Latin", "Han", "Hangul", "Cyrillic", "Greek", "Arabic", "Hebrew", "Thai", "Devanagari"] {
+            if name.range(of: "^[\\p{\(script)}\\p{M}0-9]+$", options: .regularExpression) != nil { return script }
+        }
+        return nil
     }
 
     public static func automaticMatch(_ candidates: [TMDBCandidate], input: TMDBMatchInput) -> TMDBCandidate? {

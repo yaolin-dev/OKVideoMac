@@ -577,7 +577,7 @@ final class SQLiteStoreTests: XCTestCase {
         let restartedHistory = try await restartedProcess.history()
         let restored = try XCTUnwrap(restartedHistory.first)
 
-        XCTAssertEqual(restored.playbackReference?.version, 4)
+        XCTAssertEqual(restored.playbackReference?.version, 5)
         XCTAssertEqual(restored.playbackReference?.navigationRecipe, recipe)
         XCTAssertEqual(
             try XCTUnwrap(

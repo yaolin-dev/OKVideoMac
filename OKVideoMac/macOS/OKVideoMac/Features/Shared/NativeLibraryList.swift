@@ -378,6 +378,11 @@ final class NativeLibraryCell: NSTableCellView {
     private var rowID = ""
     private var imageURL: URL?
     private var imageTask: Task<Void, Never>?
+    private enum PosterLoadState { case idle, loading, loaded, failed, cancelled }
+    private var posterLoadState: PosterLoadState = .idle
+    private weak var imageRepository: ImageRepository?
+    private var imageGeneration = UUID()
+    private var imageAttempts = 0
     private var openAction: ((String) -> Void)?
     private var deleteAction: ((Set<String>, NSWindow?) -> Void)?
 
@@ -443,7 +448,72 @@ final class NativeLibraryCell: NSTableCellView {
         date.setContentHuggingPriority(.required, for: .horizontal)
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-    deinit { imageTask?.cancel() }
+    deinit {
+        imageTask?.cancel()
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeKeyNotification, object: nil)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didDeminiaturizeNotification, object: nil)
+        if let window {
+            NotificationCenter.default.addObserver(self, selector: #selector(reloadVisiblePoster), name: NSWindow.didBecomeKeyNotification, object: window)
+            NotificationCenter.default.addObserver(self, selector: #selector(reloadVisiblePoster), name: NSWindow.didDeminiaturizeNotification, object: window)
+            reloadVisiblePoster()
+        } else if imageTask != nil {
+            imageGeneration = UUID()
+            imageTask?.cancel()
+            imageTask = nil
+            posterLoadState = .cancelled
+        }
+    }
+
+    @objc private func reloadVisiblePoster() {
+        if posterLoadState == .failed || posterLoadState == .cancelled { imageAttempts = 0 }
+        loadPosterIfNeeded()
+    }
+
+    private func loadPosterIfNeeded() {
+        guard let url = imageURL, let repository = imageRepository else { return }
+        // Cache hits are still allowed after the retry budget was exhausted.
+        // A placeholder image is never evidence of a successful load.
+        if let cached = repository.cachedImage(for: url) {
+            imageGeneration = UUID()
+            imageTask?.cancel(); imageTask = nil
+            poster.image = cached; posterLoadState = .loaded
+            return
+        }
+        guard posterLoadState != .loading, posterLoadState != .loaded, imageAttempts < 2 else { return }
+        imageAttempts += 1
+        posterLoadState = .loading
+        let generation = UUID(); imageGeneration = generation
+        imageTask = Task { @MainActor [weak self] in
+            do {
+                let image = try await repository.image(for: url)
+                try Task.checkCancellation()
+                guard let self, self.imageGeneration == generation else { return }
+                self.poster.image = image
+                self.posterLoadState = .loaded
+                self.imageTask = nil
+            } catch {
+                guard let self, self.imageGeneration == generation else { return }
+                let cancelled = error is CancellationError || Task.isCancelled
+                    || (error as? URLError)?.code == .cancelled
+                self.posterLoadState = cancelled ? .cancelled : .failed
+                self.imageTask = nil
+                // One automatic retry while visible. Cancellation waits for
+                // the next update or reappearance instead of fighting playback.
+                guard !cancelled, self.window != nil, self.imageAttempts < 2 else { return }
+                self.imageTask = Task { @MainActor [weak self] in
+                    do { try await Task.sleep(nanoseconds: 500_000_000) } catch { return }
+                    guard let self, self.imageGeneration == generation else { return }
+                    self.imageTask = nil
+                    self.loadPosterIfNeeded()
+                }
+            }
+        }
+    }
     func update(_ row: NativeLibraryRow, repository: ImageRepository?, openTitle: String, openSymbol: String = "play.fill",
                 onOpen: @escaping (String) -> Void, onDelete: @escaping (Set<String>, NSWindow?) -> Void) {
         rowID = row.id; openAction = onOpen; deleteAction = onDelete
@@ -458,18 +528,18 @@ final class NativeLibraryCell: NSTableCellView {
         open.isEnabled = !row.isLoading
         loading.isHidden = !row.isLoading
         if row.isLoading { loading.startAnimation(nil) } else { loading.stopAnimation(nil) }
+        imageRepository = repository
         if imageURL != row.posterURL || poster.image == nil {
-            imageTask?.cancel(); imageURL = row.posterURL
+            imageGeneration = UUID()
+            imageTask?.cancel(); imageTask = nil
+            imageURL = row.posterURL
+            imageAttempts = 0
+            posterLoadState = .idle
             poster.image = NSImage(systemSymbolName: "film", accessibilityDescription: nil)
-            if let url = row.posterURL, let repository {
-                imageTask = Task { @MainActor [weak self] in
-                    let image = try? await repository.image(for: url)
-                    guard !Task.isCancelled, let self, self.imageURL == url else { return }
-                    if let image { self.poster.image = image }
-                }
-            }
         }
+        loadPosterIfNeeded()
     }
+
     @objc private func openItem() { openAction?(rowID) }
     @objc private func deleteItem() { deleteAction?([rowID], window) }
 }

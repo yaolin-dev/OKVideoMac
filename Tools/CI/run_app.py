@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compile the main Release App and helpers in isolation; never package, install or publish."""
+"""Verify an unsigned Release compile, then run isolated ad-hoc signed App regressions."""
 import argparse
 import hashlib
 import json
@@ -30,8 +30,8 @@ def main():
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     args.dependencies.mkdir(parents=True, exist_ok=True)
-    report = dict(schema=1, suite='Main App Release compile', status='failed', configuration='Release',
-                  compileOnly=True, codeSigningAllowed=False, stages=[])
+    report = dict(schema=1, suite='Main App Release compile and critical flows', status='failed', configuration='Release',
+                  compileOnly=False, distributionBuildSigningAllowed=False, stages=[])
     started = time.monotonic()
     try:
         commit = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=ROOT, text=True).strip()
@@ -105,14 +105,30 @@ def main():
         (args.output / 'signing-inspection.log').write_text(inspection)
         if 'Authority=' in inspection or (app / 'Contents/_CodeSignature/CodeResources').exists():
             raise RuntimeError('Compile-only App unexpectedly has a distribution bundle signature')
-        report.update(status='passed', version=info['CFBundleShortVersionString'], build=info['CFBundleVersion'])
+        # Keep the unsigned distribution-structure check above. The separate test
+        # host below is ad-hoc signed, uses an isolated bundle ID, and is never an
+        # installable deliverable. Logical App workflows need no window focus.
+        run('critical-user-flows', [sys.executable, source / 'Tools/CI/run_app_regressions.py',
+            '--project', project, '--derived-data', args.work_dir / 'RegressionDerivedData',
+            '--source-packages', args.dependencies / 'SourcePackages',
+            '--output', args.output / 'critical-user-flows', '--group', 'logic',
+            '--build-setting', f'OKVIDEOMAC_BUILD_ROOT={args.dependencies}',
+            '--build-setting', f'OKVIDEOMAC_SPARKLE_ROOT={sparkle}',
+            '--build-setting', f'OKVIDEOMAC_NODE_RUNTIME={node}'], 1800)
+        regression = json.loads((args.output / 'critical-user-flows/summary.json').read_text())
+        if regression.get('status') != 'passed' or regression.get('skipped') != 0 or regression.get('passed', 0) <= 0:
+            raise RuntimeError('App critical user flows did not complete successfully')
+        report.update(status='passed', version=info['CFBundleShortVersionString'], build=info['CFBundleVersion'],
+                      criticalUserFlows=regression['passed'], testHostSigning='ad-hoc')
     except Exception as error:
         report['error'] = str(error)
     report['elapsedSeconds'] = round(time.monotonic() - started, 3)
     (args.output / 'summary.json').write_text(json.dumps(report, indent=2) + '\n')
-    text = f"### Main App Release compile\n\nStatus: **{report['status']}**\n\n"
+    text = f"### Main App Release compile and critical flows\n\nStatus: **{report['status']}**\n\n"
     text += 'Main App, preview and relaunch helpers compiled for arm64. No signing credentials, packaging, notarization, installation or release upload.\n' if report['status'] == 'passed' else report.get('error', 'Missing result') + '\n'
-    text += '\nThis gate does not validate playback, UI interaction, signed APK installation or release eligibility.\n'
+    if report.get('criticalUserFlows'):
+        text += f"\nCritical App user-flow assertions: {report['criticalUserFlows']} passed, zero skips.\n"
+    text += '\nThis gate does not validate native mouse interaction, real media decoding, signed APK installation or release eligibility.\n'
     (args.output / 'summary.md').write_text(text)
     if os.environ.get('GITHUB_STEP_SUMMARY'):
         with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as output: output.write(text)

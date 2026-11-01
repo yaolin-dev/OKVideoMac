@@ -14,6 +14,7 @@
     throw new Error('OKVideoMac transfer lifecycle environment is incomplete');
   }
   const { createQuarkTransferLifecycle, createQuarkCredentialCoordinator, createQuarkMediaFailureStore } = require(lifecycleModulePath);
+  const { createCatPawRangeStream } = require(process.env.OKVIDEO_RANGE_STREAM_MODULE);
   const { AsyncLocalStorage } = require('node:async_hooks');
   const credentialContext = new AsyncLocalStorage();
   const stores = new WeakMap();
@@ -34,7 +35,7 @@
   const originalInitialize = mT;
   const originalAPI = ro;
   const originalMaskProbe = _Pr;
-  const originalStream = x_;
+  const originalStream = createCatPawRangeStream({ client: ge, cacheRoot: Wg });
 
   function storeFor(request) {
     const db = request.server.db;

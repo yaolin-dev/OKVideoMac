@@ -5,6 +5,67 @@ import OKVideoPersistence
 import XCTest
 @testable import OKVideoMac
 
+final class MPVEventPumpTests: XCTestCase {
+    func testIdleDoesNotPollAndCancelPreventsFurtherDrains() async throws {
+        let queue = DispatchQueue(label: "test.mpv.event.idle")
+        var count = 0
+        let pump = MPVEventPump(queue: queue) { count += 1; return false }
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(queue.sync { count }, 0)
+        pump.signal()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(queue.sync { count }, 1)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        XCTAssertEqual(queue.sync { count }, 1)
+        pump.cancel()
+        pump.signal()
+        try await Task.sleep(nanoseconds: 50_000_000)
+        XCTAssertEqual(queue.sync { count }, 1)
+    }
+
+    func testCoalescedWakeupDrainsAllBatchesAndYieldsToCommands() async {
+        let queue = DispatchQueue(label: "test.mpv.event.batches")
+        queue.suspend()
+        let done = expectation(description: "all batches drained")
+        var remaining = 1_024, calls = 0, commandSawRemaining = 0
+        let pump = MPVEventPump(queue: queue) {
+            calls += 1
+            if calls == 1 { queue.async { commandSawRemaining = remaining } }
+            let processed = min(64, remaining)
+            remaining -= processed
+            if remaining == 0 && processed == 0 { done.fulfill() }
+            return processed == 64
+        }
+        DispatchQueue.concurrentPerform(iterations: 1_000) { _ in pump.signal() }
+        queue.resume()
+        await fulfillment(of: [done], timeout: 2)
+        XCTAssertEqual(queue.sync { remaining }, 0)
+        XCTAssertGreaterThan(queue.sync { commandSawRemaining }, 0)
+        XCTAssertLessThanOrEqual(queue.sync { calls }, 18)
+        pump.cancel()
+    }
+
+    func testWakeupArrivingDuringFinalDrainIsNotLost() async {
+        let queue = DispatchQueue(label: "test.mpv.event.race")
+        let entered = expectation(description: "first drain entered")
+        let resumed = expectation(description: "second drain delivered")
+        let release = DispatchSemaphore(value: 0)
+        var calls = 0
+        let pump = MPVEventPump(queue: queue) {
+            calls += 1
+            if calls == 1 { entered.fulfill(); _ = release.wait(timeout: .now() + 2) }
+            else { resumed.fulfill() }
+            return false
+        }
+        pump.signal()
+        await fulfillment(of: [entered], timeout: 2)
+        pump.signal()
+        release.signal()
+        await fulfillment(of: [resumed], timeout: 2)
+        pump.cancel()
+    }
+}
+
 @MainActor
 final class PlayerProgressInteractionTests: XCTestCase {
     private final class PointerView: ProgressHoverTrackingNSView {
@@ -157,7 +218,7 @@ final class PlayerOverlayLayoutTests: XCTestCase {
         let long = PlayerOverlayLayout(viewportSize: .init(width: 640, height: 360), timeLabelWidth: 180)
         XCTAssertEqual(long.mode, .stacked)
         let middle = PlayerOverlayLayout(viewportSize: .init(width: 800, height: 450), timeLabelWidth: 190)
-        XCTAssertEqual(middle.mode, .compactVolume)
+        XCTAssertEqual(middle.mode, .stacked)
         XCTAssertTrue(modes.contains("expanded")); XCTAssertTrue(modes.contains("compactTools"))
     }
 
@@ -197,8 +258,9 @@ final class PlayerOverlayLayoutTests: XCTestCase {
             XCTAssertEqual(host.bounds.size, size)
             let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
             host.cacheDisplay(in: host.bounds, to: bitmap)
-            let image = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])),
-                uniformTypeIdentifier: "public.png")
+            let png = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+            try png.write(to: URL(fileURLWithPath: "/private/tmp/OKVideoMac-floating-transport-\(Int(size.width)).png"))
+            let image = XCTAttachment(data: png, uniformTypeIdentifier: "public.png")
             image.name = "player-\(Int(size.width))"
             image.lifetime = .keepAlways
             add(image)
@@ -281,8 +343,13 @@ final class PlayerOverlayLayoutTests: XCTestCase {
                 for _ in 0..<100 where latest.isSeeking { try await Task.sleep(nanoseconds: 20_000_000) }
                 XCTAssertNil(latest.seekTarget)
                 XCTAssertFalse(latest.isSeeking)
-                XCTAssertGreaterThan(abs(latest.position - 8), 5, "Fixture must exercise the previously rejected keyframe offset")
+                XCTAssertEqual(latest.position, 0, accuracy: 0.35, "The 10-second GOP fixture must recover at its indexed keyframe")
                 XCTAssertEqual(latest.status, paused ? .paused : .playing)
+                do {
+                    try await player.seek(to: 32, transactionID: UUID(), playbackRequestID: UUID())
+                    XCTFail("A retired playback request cannot seek a replacement file")
+                } catch is CancellationError { }
+                XCTAssertEqual(latest.position, 0, accuracy: 0.35)
             }
             try await player.play()
             for target in [8.0, 28, 9, 29] { try await player.seek(to: target) }

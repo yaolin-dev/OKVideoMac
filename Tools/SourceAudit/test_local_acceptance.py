@@ -153,6 +153,13 @@ class LocalAcceptanceTests(unittest.TestCase):
             with self.assertRaisesRegex(SystemExit, "clean worktree"):
                 release.validate_repo(self.repo, "HEAD")
 
+    def testRegressionRunnerAndContractAreIncludedWithoutSweepingPrivateCIData(self):
+        inputs = sorted(acceptance.REGRESSION_INPUTS)
+        untracked = inputs + ['Tools/CI/private-token.json', 'Tools/CI/local-report.json']
+        outputs = [b'App.swift\0', b'', ('\0'.join(untracked) + '\0').encode()]
+        with patch.object(acceptance.subprocess, 'check_output', side_effect=outputs):
+            self.assertEqual(acceptance.selected_files(self.repo), ['App.swift'] + inputs)
+
     def testAcceptanceCannotBeDistributionOrNotarized(self):
         script = Path(__file__).resolve().parents[2] / "OKVideoMac/macOS/OKVideoMac/Scripts/package-app.sh"
         for args in [("--mode", "distribution"), ("--notarize",)]:

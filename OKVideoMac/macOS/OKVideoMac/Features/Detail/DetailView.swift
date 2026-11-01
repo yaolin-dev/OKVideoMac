@@ -106,27 +106,28 @@ struct DetailFavoriteButton: View {
     }
 }
 
-/// Default system control: no custom timeline or rotation animation.
+/// Stable native refresh control with shared toolbar hover feedback.
 struct DetailRefreshButton: NSViewRepresentable {
+    @Environment(\.isEnabled) private var isEnabled
     let isLoading: Bool
     var title: String = L10n.string("common.refresh", fallback: "Refresh")
     let action: () -> Void
 
     func makeNSView(context: Context) -> DetailRefreshControl {
         let view = DetailRefreshControl()
-        view.update(isLoading: isLoading, title: title, action: action)
+        view.update(isLoading: isLoading, title: title, enabled: isEnabled, action: action)
         return view
     }
 
     func updateNSView(_ view: DetailRefreshControl, context: Context) {
-        view.update(isLoading: isLoading, title: title, action: action)
+        view.update(isLoading: isLoading, title: title, enabled: isEnabled, action: action)
     }
 }
 
 /// Keep a single toolbar view across state changes. Replacing a SwiftUI
 /// toolbar's root Button with ProgressView can leave its AppKit item stale.
 final class DetailRefreshControl: NSView {
-    let refreshButton = NSButton()
+    let refreshButton = BrowserToolbarHoverButton()
     let progressIndicator = NSProgressIndicator()
     private var onRefresh: () -> Void = {}
 
@@ -168,12 +169,12 @@ final class DetailRefreshControl: NSView {
         NSSize(width: PrimaryToolbarMetrics.iconControlSize, height: PrimaryToolbarMetrics.iconControlSize)
     }
 
-    func update(isLoading: Bool, title: String = L10n.string("common.refresh", fallback: "Refresh"), action: @escaping () -> Void) {
+    func update(isLoading: Bool, title: String = L10n.string("common.refresh", fallback: "Refresh"), enabled: Bool = true, action: @escaping () -> Void) {
         onRefresh = action
         refreshButton.toolTip = title
         refreshButton.setAccessibilityLabel(title)
         refreshButton.isHidden = isLoading
-        refreshButton.isEnabled = !isLoading
+        refreshButton.isEnabled = enabled && !isLoading
         progressIndicator.isHidden = !isLoading
         if isLoading { progressIndicator.startAnimation(nil) }
         else { progressIndicator.stopAnimation(nil) }
@@ -436,7 +437,7 @@ struct DetailView: View {
 
     private var currentEpisodeInformation: TMDBEpisodeInformation {
         .make(detail: detail, work: tmdb.selection?.work, season: tmdb.season, source: selectedSource, episode: primaryEpisode,
-              mappedEpisode: primaryEpisode.flatMap { item in selectedSource?.episodes.firstIndex(where: { $0.id == item.id }) }.flatMap { tmdb.episodeMapping(source: selectedSource, category: detail.summary.categoryName)[$0] })
+              mapping: .prepared(primaryEpisode.flatMap { item in selectedSource?.episodes.firstIndex(where: { $0.id == item.id }) }.flatMap { tmdb.episodeMapping(source: selectedSource, category: detail.summary.categoryName)[$0] }))
     }
 
     private func showWorkSynopsis() {
@@ -472,7 +473,7 @@ struct DetailView: View {
                 .frame(maxWidth: .infinity).frame(height: 42)
             TMDBNativeActionButton(title: tmdb.needsMatchConfirmation ? L10n.string("tmdb.match.pending", fallback: "Review") : L10n.string("tmdb.actions.more", fallback: "More"),
                 symbol: tmdb.needsMatchConfirmation ? "questionmark.circle" : "ellipsis", identifier: "tmdb.match-menu",
-                help: tmdb.needsMatchConfirmation ? L10n.string("tmdb.match.pending-help", fallback: "Candidates found. Review the title, year and director to confirm the correct work.") : nil,
+                help: tmdb.needsMatchConfirmation ? tmdb.matchConfirmationMessage : nil,
                 menuItems: detailMoreItems)
                 .frame(maxWidth: .infinity).frame(height: 42)
         }.frame(maxWidth: .infinity, alignment: .center)

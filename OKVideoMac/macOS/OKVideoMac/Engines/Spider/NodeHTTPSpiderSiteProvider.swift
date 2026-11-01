@@ -675,6 +675,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             .map { "\($0.utf8.count):\($0)" }.joined()
     }
     var aggregateSearchPriority: TimeInterval { searchMemory?.priority(owner: searchOwner) ?? 2 }
+    /// The local HTTP port changes when Node restarts; the semantic revision
+    /// identifies the actual source bundle without tying learning to that port.
+    var searchPerformanceIdentity: String {
+        [configurationIdentity ?? "", configurationSemanticRevision ?? baseURL.absoluteString, site.key]
+            .map { "\($0.utf8.count):\($0)" }.joined()
+    }
     private let diagnosticReporter: (@Sendable (NodeDiagnosticEvent) -> Void)?
     private let ensureRuntimeReady: (@Sendable () async throws -> URL)?
     private let configurationIdentity: String?

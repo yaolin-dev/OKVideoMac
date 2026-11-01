@@ -490,6 +490,25 @@ import OKVideoPersistence
         service.invalidate(sourceKey: "fixture")
         XCTAssertNil(service.image(for: key, programmeStart: nil))
     }
+    func testOccludedSurfaceDefersCacheRestoreThenResumesWithoutRecapture() async throws {
+        let store = cache(), data = try jpeg(), owner = UUID()
+        let cached = demand("occluded-cached")
+        await store.store(.init(data: data, captured: Date(), sourceKey: "fixture"), key: cached.key)
+        var captures = 0
+        let service = LivePreviewCoordinator(cache: store) { _ in captures += 1; return data }
+        defer { service.clear(owner: owner) }
+        service.update(owner: owner, demands: [cached], mayCapture: { false }, isActive: false, isVisible: false)
+        try await settle()
+        XCTAssertNil(service.image(for: cached.key, programmeStart: nil))
+        XCTAssertEqual(captures, 0)
+        service.setSurfaceActive(owner: owner, isActive: false, autoRefresh: false, isVisible: true)
+        try await settle()
+        XCTAssertNotNil(service.image(for: cached.key, programmeStart: nil))
+        XCTAssertEqual(captures, 0)
+        service.suspend(owner: owner)
+        XCTAssertNotNil(service.image(for: cached.key, programmeStart: nil), "Occlusion retains already displayed pictures")
+    }
+
     func testInactiveSurfaceLoadsLocalPicturesWithoutCaptureOrPlayerScreenshot() async throws {
         let store = cache(), data = try jpeg(), owner = UUID()
         let cached = demand("inactive-cached")
@@ -910,8 +929,8 @@ import OKVideoPersistence
     func testRealHelperCapturesFrameAndCancellationReapsIt() async throws {
         let helper = Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/OKVideoLivePreview")
         XCTAssertTrue(FileManager.default.isExecutableFile(atPath: helper.path))
-        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
-        let file = root.appendingPathComponent("Native/DASHSmoke/fixtures/legacy.mp4")
+        // Bundle the fixture so the helper never needs Documents-folder access.
+        let file = try XCTUnwrap(Bundle(for: Self.self).url(forResource: "legacy", withExtension: "mp4"))
         let image = try await LivePreviewProcessJob().run(.init(url: file.absoluteString, headers: [:]), executable: helper)
         let decoded = try XCTUnwrap(NSBitmapImageRep(data: image))
         XCTAssertEqual(decoded.pixelsWide, 640); XCTAssertEqual(decoded.pixelsHigh, 360)

@@ -4,6 +4,76 @@ import XCTest
 @testable import OKVideoPersistence
 
 final class EPGProductionServiceTests: XCTestCase {
+    private func abandonedCount(_ directory: URL) throws -> Int64 {
+        let db = try EPGCacheDatabase(url: directory.appendingPathComponent("EPGCache.sqlite"))
+        return try db.integer("SELECT COUNT(*) FROM generations WHERE id NOT IN (SELECT active_generation FROM resources WHERE active_generation IS NOT NULL)")
+    }
+
+    private func waitForMaintenance(_ directory: URL) async throws {
+        for _ in 0..<100 {
+            if try abandonedCount(directory) == 0 { return }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        XCTAssertEqual(try abandonedCount(directory), 0, "background cleanup did not drain")
+    }
+
+    func testStartupMaintenanceDrainsMultipleBatchesAndResumesAfterPause() async throws {
+        let directory = cacheDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let key = EPGRequestKey(source: .imported(UUID()), revision: String(repeating: "c", count: 64), resource: "xmltv")
+        let store = try EPGCacheStore(directory: directory)
+        let old = try store.begin(key)
+        for batch in 0..<12 {
+            try store.append((0..<512).map { offset in
+                let n = batch * 512 + offset
+                return EPGCacheRecord(ordinal: n, programme: EPGProgramme(channelID: "a", title: "old",
+                    start: Date(timeIntervalSince1970: Double(n) * 60),
+                    end: Date(timeIntervalSince1970: Double(n + 1) * 60)))
+            }, to: old)
+        }
+        try store.abandon(old)
+        let active = try store.begin(key)
+        try store.validate(active, summary: EPGCacheValidation(rawProgrammeCount: 0,
+            emittedProgrammeCount: 0, minimumStart: nil, maximumEnd: nil))
+        _ = try store.activate(active)
+        store.close()
+
+        let service = try EPGProductionService(cacheDirectory: directory)
+        _ = await service.pause()
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(try abandonedCount(directory), 1)
+        try await service.resume()
+        try await waitForMaintenance(directory)
+        let summary = try await service.activeSummary(for: key)
+        XCTAssertEqual(summary?.dataVersion, active.generation)
+        _ = await service.close()
+    }
+
+    func testRefreshFailureCancellationAndRestartDoNotLeaveRetiredGenerations() async throws {
+        let directory = cacheDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let server = try EPGImportTestServer(xml: fixture(), gzip: Data())
+        defer { server.close() }
+        let key = EPGRequestKey(source: .imported(UUID()), revision: String(repeating: "d", count: 64), resource: "xmltv")
+        let service = try EPGProductionService(cacheDirectory: directory)
+        for _ in 0..<3 { _ = try await service.refreshXMLTV(key: key, url: server.url("fixture.xml")) }
+        let active = try await service.activeSummary(for: key)
+        let task = Task { try await service.refreshXMLTV(key: key, url: server.url("slow")) }
+        try await Task.sleep(nanoseconds: 50_000_000)
+        task.cancel()
+        do { _ = try await task.value; XCTFail("cancelled import succeeded") } catch { }
+        do { _ = try await service.refreshXMLTV(key: key, url: server.url("missing")); XCTFail("invalid import succeeded") } catch { }
+        try await waitForMaintenance(directory)
+        let after = try await service.activeSummary(for: key)
+        XCTAssertEqual(after?.dataVersion, active?.dataVersion)
+        _ = await service.close()
+        let reopened = try EPGProductionService(cacheDirectory: directory)
+        try await waitForMaintenance(directory)
+        let restored = try await reopened.activeSummary(for: key)
+        XCTAssertEqual(restored?.dataVersion, active?.dataVersion)
+        _ = await reopened.close()
+    }
+
     private func cacheDirectory() -> URL {
         URL(fileURLWithPath: "/private/tmp/EPGCache-Production-" + UUID().uuidString)
     }
@@ -80,8 +150,11 @@ final class EPGProductionServiceTests: XCTestCase {
             XCTFail("paused service accepted import")
         } catch { XCTAssertEqual(error as? EPGProductionServiceError, .paused) }
 
+        // Keep the wake suspended until cancellation. An immediately scheduled
+        // task may otherwise legitimately finish before cancel() is called.
+        let wakeSignal = AsyncStream<Void> { _ in }
         let cancelledResume = Task {
-            try Task.checkCancellation()
+            for await _ in wakeSignal { }
             try await service.resume()
         }
         cancelledResume.cancel()

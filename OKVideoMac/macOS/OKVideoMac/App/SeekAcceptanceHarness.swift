@@ -23,6 +23,7 @@ enum SeekAcceptanceHarness {
     struct Configuration: Decodable {
         let samples: [Sample]
         let repetitions: Int
+        let replayHistory: Bool?
     }
     struct Observation: Codable {
         let sample: Int
@@ -126,26 +127,30 @@ enum SeekAcceptanceHarness {
                 if state.activeConfigurationRecord?.id != owner {
                     await state.activateConfiguration(owner)
                 }
-                // Resolve a complete current detail first. Replaying a one-file
-                // history recipe can start a different episode before selection.
-                await state.loadDetail(VideoSummary(siteKey: item.siteKey,
-                    siteName: "", videoID: item.playbackReference?.navigationRecipe?.detailID ?? item.videoID,
-                    title: item.title, posterURL: nil))
-                guard let detail = state.selectedDetail else {
-                    record(index, repetition, "detail", "unavailable", nil, 0)
-                    continue
+                if config.replayHistory == true {
+                    state.requestHistoryPlayback(item)
+                } else {
+                    // Resolve a complete current detail first. Replaying a one-file
+                    // history recipe can start a different episode before selection.
+                    await state.loadDetail(VideoSummary(siteKey: item.siteKey,
+                        siteName: "", videoID: item.playbackReference?.navigationRecipe?.detailID ?? item.videoID,
+                        title: item.title, posterURL: nil))
+                    guard let detail = state.selectedDetail else {
+                        record(index, repetition, "detail", "unavailable", nil, 0)
+                        continue
+                    }
+                    let sources = detail.playSources.filter { $0.name == item.sourceName }
+                    guard sources.count == 1, let source = sources.first else {
+                        record(index, repetition, "source_selection", "not_unique", nil, 0)
+                        continue
+                    }
+                    let episodes = source.episodes.filter(sample.matches)
+                    guard episodes.count == 1, let episode = episodes.first else {
+                        record(index, repetition, "episode_selection", "not_unique", nil, 0)
+                        continue
+                    }
+                    await state.startPlayback(detail: detail, source: source, episode: episode, configurationID: owner)
                 }
-                let sources = detail.playSources.filter { $0.name == item.sourceName }
-                guard sources.count == 1, let source = sources.first else {
-                    record(index, repetition, "source_selection", "not_unique", nil, 0)
-                    continue
-                }
-                let episodes = source.episodes.filter(sample.matches)
-                guard episodes.count == 1, let episode = episodes.first else {
-                    record(index, repetition, "episode_selection", "not_unique", nil, 0)
-                    continue
-                }
-                await state.startPlayback(detail: detail, source: source, episode: episode, configurationID: owner)
                 let loaded = await waitForProgress(state, target: nil, budget: 180)
                 record(index, repetition, "load", loaded.0, nil, loaded.1)
                 guard loaded.0 == "passed" else { continue }

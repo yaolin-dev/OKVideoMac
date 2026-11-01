@@ -1,5 +1,9 @@
 # Immutable Corresponding-Source Release Process
 
+## 0.9.1 release candidate
+
+The local validation candidate uses `OKVideoMac-0.9.1.dmg`, `OKVideoMac-0.9.1-macOS-arm64.zip`, and `OKVideoMac-0.9.1-build179-SOURCE_RELEASE_INDEX.json`. Earlier local candidates used captured source snapshots. The formal release must be rebuilt from the exact clean main commit with package-app.sh --mode distribution --notarize --crash-config FILE, using the existing signing, source, SBOM, updater and publication gates. Local acceptance packages are not public release assets.
+
 ## Published 0.9.0 identity
 
 Release `v0.9.0` pins exact clean main commit `4a69c5905cbb1717f86c84e7ac7f6b9d56956cdb`, rebuilt by the existing distribution pipeline. The Accepted/stapled public DMG is `OKVideoMac-0.9.0.dmg`; `OKVideoMac-0.9.0-macOS-arm64.zip` remains internal. Index `OKVideoMac-0.9.0-build155-SOURCE_RELEASE_INDEX.json`, source and third-party source archives, licences, APK, SBOMs, notes and signed feed bind this release. All 16 public assets passed draft and anonymous download SHA-256 checks against local files and GitHub digests. See [formal verification](RELEASE_VALIDATION_0.9.0.md). Documentation commits after publication preserve the tag, binary, signed feed and build-time source/notes snapshots.

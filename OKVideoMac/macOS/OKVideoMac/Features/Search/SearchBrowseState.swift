@@ -142,14 +142,25 @@ final class CatPawSearchMemory: @unchecked Sendable {
 }
 
 struct SearchPagingState: Equatable {
+    static let initialMaximumResults = 600
+    static let initialMaximumPerSite = 120
+    var deferredPages: [String: Int] = [:]
     var cursors: [String: SearchPageCursor] = [:]
     var order: [String] = []
     var restricted: Set<String> = []
     var loading = false
     var stopped = false
-    var manualContinuation = false
     var lastServed: String?
     var revision = 0
+
+    mutating func deferResults(_ pages: [String: Int]) {
+        for (key, page) in pages { deferredPages[key] = min(deferredPages[key] ?? page, page) }
+    }
+
+    func cursorForLoading(_ key: String) -> SearchPageCursor? {
+        guard let cursor = cursors[key] else { return nil }
+        return deferredPages[key].map { cursor.replaying(from: $0) } ?? cursor
+    }
 
     func keys(selected: String?) -> [String] {
         if let selected { return order.contains(selected) ? [selected] : [] }
@@ -161,9 +172,11 @@ struct SearchPagingState: Equatable {
         let pivot = lastServed.flatMap { keys.firstIndex(of: $0) }.map { $0 + 1 } ?? 0
         let rotated = Array(keys.dropFirst(pivot)) + Array(keys.prefix(pivot))
         return rotated.filter { key in
-            guard let cursor = cursors[key], !cursor.ended,
+            guard let cursor = cursors[key], retry || (cursor.error == nil && !cursor.uncertain) else { return false }
+            if deferredPages[key] != nil { return true }
+            guard !cursor.ended,
                   !restricted.contains(key) || cursor.nextPage == 1 else { return false }
-            return retry || (cursor.error == nil && !cursor.uncertain)
+            return true
         }
     }
 }
@@ -227,5 +240,130 @@ enum SearchRefreshSnapshot {
     static func merge(retained: [VideoSummary], incoming: [VideoSummary], successfulKeys: Set<String>) -> [VideoSummary] {
         retained.filter { !successfulKeys.contains($0.siteKey) }
             + incoming.filter { successfulKeys.contains($0.siteKey) }
+    }
+}
+
+@MainActor enum SearchPagingPresentation {
+    static func footer(searchPaging: SearchPagingState, selectedSearchSiteKey: String?, isSearching: Bool,
+                       resultCount: Int, sourceNames: [String: String]) -> PosterNativeFooterKey {
+        let keys = searchPaging.keys(selected: selectedSearchSiteKey)
+        let cursors = keys.compactMap { searchPaging.cursors[$0] }
+        let ready = searchPaging.eligible(selected: selectedSearchSiteKey, retry: false)
+        let retry = searchPaging.eligible(selected: selectedSearchSiteKey, retry: true)
+        let busy = isSearching || searchPaging.loading
+        let stopped = searchPaging.stopped
+        let uncertain = cursors.contains { $0.uncertain }
+        let failed = cursors.contains { $0.error != nil }
+        let restricted = keys.contains { searchPaging.restricted.contains($0) && searchPaging.cursors[$0]?.ended != true }
+        let text: String
+        if busy {
+            text = resultCount == 0
+                ? L10n.string("search.browse.loading", fallback: "Searching for more results…")
+                : L10n.string("search.browse.waiting-providers", fallback: "Results are ready; some providers are still searching…")
+        }
+        else if searchPaging.stopped { text = L10n.string("search.browse.stopped", fallback: "Search stopped; results retained") }
+        else if keys.contains(where: { searchPaging.deferredPages[$0] != nil }) {
+            text = L10n.string("search.browse.budget", fallback: "Scroll down to load more results")
+        }
+        else if !ready.isEmpty {
+            text = failed || uncertain
+                ? L10n.string("search.browse.partial", fallback: "Some providers need attention; other results can continue")
+                : L10n.string("search.browse.continue", fallback: "More results are available")
+        } else if uncertain { text = L10n.string("pagination.uncertain", fallback: "No new titles; the end of results is not confirmed") }
+        else if failed { text = L10n.string("search.browse.failed", fallback: "Some providers failed; results retained") }
+        else if restricted { text = L10n.string("search.browse.limited", fallback: "Further paging is not confirmed for this provider") }
+        else if !cursors.isEmpty && cursors.allSatisfy({ $0.ended }) {
+            text = L10n.string("search.browse.complete", fallback: "All results in this scope have loaded")
+        } else { text = L10n.string("search.browse.pending", fallback: "No further page has been confirmed") }
+        let details = keys.compactMap { key -> String? in
+            guard let message = searchPaging.cursors[key]?.error else { return nil }
+            return "\(sourceNames[key] ?? key): \(message)"
+        }.joined(separator: "\n")
+        return PosterNativeFooterKey(hasMore: !retry.isEmpty, isLoading: busy, isRefreshing: false,
+            errorMessage: details.isEmpty ? nil : details, itemCount: resultCount, hasPendingUpdate: false,
+            statusText: text,
+            actionTitle: (failed || uncertain) && !retry.isEmpty ? L10n.string("common.retry", fallback: "Try Again") : nil,
+            automaticLoading: !busy && !stopped && !ready.isEmpty,
+            scrollDrivenLoading: true)
+        }
+}
+
+@MainActor struct SearchScreenActions {
+    let open: (VideoSummary) -> Void
+    let selectSite: (String?) -> Void
+    let loadMore: (Bool, Bool) async -> Bool
+    let refresh: (Bool) async -> Void
+    let cancel: () -> Void
+    let scopeChanged: () -> Void
+}
+
+@MainActor struct SearchScreenSnapshot {
+    let id: UUID
+    let keyword: String
+    let results: [VideoSummary]
+    let selectedSiteKey: String?
+    let sites: [SearchSiteOption]
+    let memory: SearchBrowseMemory
+    let footer: PosterNativeFooterKey
+    let pagingRevision: Int
+    let isLoading: Bool
+    let error: String?
+    let refreshTitle: String
+    let completedSites: Int
+    let totalSites: Int
+    let failures: [SearchFailure]
+    let termination: MultiSiteSearchTermination?
+    var candidate: TMDBCandidate? = nil
+
+    init(state: AppState) {
+        id = state.searchBrowseSessionID; keyword = state.activeSearchKeyword
+        results = state.searchResults; selectedSiteKey = state.selectedSearchSiteKey
+        sites = state.searchSiteOptions; memory = state.searchBrowseMemory
+        footer = state.searchPaginationFooter; pagingRevision = state.searchPaging.revision
+        isLoading = state.searchPageIsLoading; error = state.searchPageError
+        refreshTitle = state.searchRefreshTitle; completedSites = state.searchFirstPageCompletedSiteCount
+        totalSites = state.searchTotalSiteCount; failures = state.searchFailures; termination = state.searchTermination
+    }
+    init(page: TMDBRelatedPage) {
+        id = page.id; keyword = page.title; results = page.results
+        selectedSiteKey = page.selectedSearchSiteKey; sites = Self.siteOptions(page.results, catalog: page.searchSites)
+        memory = page.searchBrowseMemory; pagingRevision = page.searchPaging.revision
+        isLoading = page.isLoading; completedSites = page.completedSites; totalSites = page.totalSites
+        failures = page.failures; termination = page.termination; candidate = page.candidate
+        footer = SearchPagingPresentation.footer(searchPaging: page.searchPaging, selectedSearchSiteKey: page.selectedSearchSiteKey,
+            isSearching: page.isLoading, resultCount: page.results.count,
+            sourceNames: Dictionary(uniqueKeysWithValues: page.searchSites.map { ($0.key, $0.name) }))
+        error = page.error ?? footer.errorMessage
+        let needsRetry = page.searchPaging.keys(selected: page.selectedSearchSiteKey).contains {
+            page.searchPaging.cursors[$0]?.error != nil || page.searchPaging.cursors[$0]?.uncertain == true
+        }
+        refreshTitle = needsRetry ? L10n.string("browser.refresh.retry", fallback: "Retry Failed Requests") :
+            (page.searchPaging.stopped ? L10n.string("browser.refresh.resume", fallback: "Continue Search") : L10n.string("common.refresh", fallback: "Refresh"))
+    }
+    static func siteOptions(_ results: [VideoSummary], catalog: [SiteConfiguration]) -> [SearchSiteOption] {
+        let grouped = Dictionary(grouping: results, by: \.siteKey)
+        var seen = Set<String>(), options: [SearchSiteOption] = []
+        for site in catalog where grouped[site.key]?.isEmpty == false && seen.insert(site.key).inserted {
+            options.append(.init(key: site.key, name: site.name, resultCount: grouped[site.key]?.count ?? 0))
+        }
+        for item in results where seen.insert(item.siteKey).inserted {
+            options.append(.init(key: item.siteKey, name: item.siteName, resultCount: grouped[item.siteKey]?.count ?? 0))
+        }
+        return options
+    }
+}
+
+/// Artwork is a presentation copy only. Source IDs, URLs used for playback,
+/// source-picker entries and persisted match decisions keep their original owner.
+enum SearchArtworkPresentation {
+    static func summary(_ original: VideoSummary, candidate: TMDBCandidate?) -> VideoSummary {
+        guard !original.isFolder, original.resolvedContentKind == .media, let candidate,
+              let url = TMDBClient.imageURL(path: candidate.work.posterPath, size: "w500") else { return original }
+        let input = TMDBMatchInput(detail: VideoDetail(summary: original,
+            director: original.identityDirector, actors: original.identityActors))
+        guard input.year != nil, input.type == candidate.reference.type,
+              TMDBMatcher.assess(candidate, input: input).acceptsAutomatically else { return original }
+        var display = original; display.posterURL = url
+        return display
     }
 }

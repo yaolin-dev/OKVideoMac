@@ -27,6 +27,13 @@ class ResultValidationTests(unittest.TestCase):
     def test_complete_pass(self):
         self.assertEqual(self.check()['passed'], 1)
 
+    def test_native_log_prefix_does_not_hide_complete_xctest_records(self):
+        prefix = '2026-10-30 11:07:40.418299+0800 OKVideoMac[123:456] [connection] partial'
+        text = log([('testOne', 'passed')]).replace('Test Case ', prefix + 'Test Case ')
+        self.assertEqual(self.check(text)['passed'], 1)
+        with self.assertRaises(InvalidResults):
+            self.check(text.replace('passed (0.001 seconds)', 'failed (0.001 seconds)'))
+
     def test_discovery_ignores_build_noise(self):
         self.assertEqual(discovered_tests('Building for production...\nFixture.Tests/testOne\n'), {'Fixture.Tests/testOne'})
 

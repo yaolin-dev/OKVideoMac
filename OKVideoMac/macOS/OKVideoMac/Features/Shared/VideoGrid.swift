@@ -34,6 +34,7 @@ struct AppActivityIndicatorLifecycle: Equatable {
 }
 
 struct AppActivityIndicator: View {
+    @Environment(\.browserSurfaceVisible) private var surfaceVisible
     enum Size {
         case mini
         case small
@@ -70,7 +71,7 @@ struct AppActivityIndicator: View {
         TimelineView(
             .animation(
                 minimumInterval: 1.0 / 60.0,
-                paused: !lifecycle.isAnimating
+                paused: !lifecycle.isAnimating || !surfaceVisible
             )
         ) { timeline in
             Circle()
@@ -367,6 +368,7 @@ struct PosterNativeFooterKey: Hashable {
     var statusText: String? = nil
     var actionTitle: String? = nil
     var automaticLoading = true
+    var scrollDrivenLoading = false
 }
 
 /// A default NSScrollView owns the native poster grid. Collection items are
@@ -378,6 +380,7 @@ struct PosterNativeCardPresentation: Equatable {
 }
 
 struct PosterNativePage: NSViewRepresentable {
+    @Environment(\.browserSurfaceVisible) private var surfaceVisible
     @Environment(\.imageRepository) private var repository
     @Environment(\.displayScale) private var displayScale
     @Environment(\.browserToolbarScrollReporter) private var reportScroll
@@ -399,6 +402,7 @@ struct PosterNativePage: NSViewRepresentable {
     var cardPresentations: [PosterNativeCardPresentation]? = nil
     var onSelectSource: ((VideoSummary) -> Void)? = nil
     var onManualLoad: (() async -> Bool)? = nil
+    var imageRetryRevision: UInt64 = 0
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -442,7 +446,8 @@ struct PosterNativePage: NSViewRepresentable {
             onClearFilters: onClearFilters,
             onAcceptUpdate: onAcceptUpdate,
             reportScroll: reportScroll, onBrowse: onBrowse, onLoad: onLoad,
-            onSelect: onSelect, cardPresentations: cardPresentations, onSelectSource: onSelectSource, onManualLoad: onManualLoad)
+            onSelect: onSelect, cardPresentations: cardPresentations, onSelectSource: onSelectSource, onManualLoad: onManualLoad,
+            imageRetryRevision: imageRetryRevision, surfaceVisible: surfaceVisible)
     }
 
     static func dismantleNSView(_ view: PosterNativePageScrollView,
@@ -486,6 +491,7 @@ struct PosterNativePage: NSViewRepresentable {
         private var lastScrolledState: Bool?
         private var lastReportedInteraction: UInt64 = 0
         private var interactionRevision: UInt64 = 0
+        private var paginationInteractionRevision: UInt64 = 0
         private var restorationRevision: UInt64?
         private var pendingRestoration: (anchor: PosterBrowseAnchor?, generation: UInt64)?
         private var observations: [NSObjectProtocol] = []
@@ -497,7 +503,9 @@ struct PosterNativePage: NSViewRepresentable {
         private var viewportUpdatePending = false
         private var lastOffset: CGFloat?
         private var direction: PosterScrollDirection = .down
+        private var imageRetryRevision: UInt64 = 0
         private var highlightedID: String?
+        private var surfaceVisible = true
 
         func attach(scroll: PosterNativePageScrollView,
                     collection: PosterNativePageCollectionView) {
@@ -555,7 +563,18 @@ struct PosterNativePage: NSViewRepresentable {
                     onSelect: @escaping (VideoSummary) -> Void,
                     cardPresentations: [PosterNativeCardPresentation]?,
                     onSelectSource: ((VideoSummary) -> Void)?,
-                    onManualLoad: (() async -> Bool)?) {
+                    onManualLoad: (() async -> Bool)?, imageRetryRevision: UInt64 = 0, surfaceVisible: Bool = true) {
+            let visibilityChanged = self.surfaceVisible != surfaceVisible
+            self.surfaceVisible = surfaceVisible
+            if visibilityChanged {
+                preheater.cancel(); prefetchGate.reset()
+                if !surfaceVisible {
+                    collection?.visibleItems().forEach { ($0 as? PosterNativeCardItem)?.suspendImage() }
+                }
+            }
+            let retryChanged = self.imageRetryRevision != imageRetryRevision
+            self.imageRetryRevision = imageRetryRevision
+            if retryChanged { preheater.retryFailed(); prefetchGate.reset() }
             self.reportScroll = reportScroll
             self.onBrowse = onBrowse
             self.onLoad = onLoad
@@ -613,7 +632,7 @@ struct PosterNativePage: NSViewRepresentable {
                 updateLayout()
                 if imageSourceChanged || oldIDs != itemIDs {
                     collection?.reloadData()
-                } else if contentChanged || presentationsChanged, let collection {
+                } else if contentChanged || presentationsChanged || retryChanged || (visibilityChanged && surfaceVisible), let collection {
                     for path in collection.indexPathsForVisibleItems() {
                         if let card = collection.item(at: path) as? PosterNativeCardItem {
                             bind(card, at: path.item)
@@ -690,7 +709,15 @@ struct PosterNativePage: NSViewRepresentable {
                     inside = scroll.bounds.contains(
                         scroll.convert(event.locationInWindow, from: nil))
                 }
-                if inside { self.interactionRevision &+= 1 }
+                if inside {
+                    self.interactionRevision &+= 1
+                    if (event.type == .scrollWheel && event.scrollingDeltaY < 0) ||
+                        (event.type == .keyDown && [125, 121, 119].contains(event.keyCode)) {
+                        self.paginationInteractionRevision &+= 1
+                        // A short list may not move its bounds when scrolled.
+                        self.scheduleViewportChanged()
+                    }
+                }
                 return event
             }
         }
@@ -728,7 +755,7 @@ struct PosterNativePage: NSViewRepresentable {
             DispatchQueue.main.async { [weak self] in
                 guard let self else { return }
                 self.viewportUpdatePending = false
-                guard self.scroll?.window != nil else { return }
+                guard self.surfaceVisible, self.scroll?.window != nil else { return }
                 self.scroll?.layoutSubtreeIfNeeded()
                 self.updateLayout()
                 self.collection?.layoutSubtreeIfNeeded()
@@ -755,7 +782,7 @@ struct PosterNativePage: NSViewRepresentable {
         }
 
         private func viewportChanged() {
-            guard let scroll, let collection, !items.isEmpty,
+            guard surfaceVisible, let scroll, let collection, !items.isEmpty,
                   collection.bounds.width > 1 else { return }
             let clip = scroll.contentView
             let offset = max(0, clip.bounds.minY -
@@ -787,7 +814,10 @@ struct PosterNativePage: NSViewRepresentable {
                 onBrowse(anchor, !scrolled, interacted)
             }
             if let lastOffset {
-                if offset > lastOffset + 1 { direction = .down }
+                if offset > lastOffset + 1 {
+                    direction = .down
+                    if NSEvent.pressedMouseButtons & 1 != 0 { paginationInteractionRevision &+= 1 }
+                }
                 if offset < lastOffset - 1 { direction = .up }
             }
             lastOffset = offset
@@ -815,7 +845,7 @@ struct PosterNativePage: NSViewRepresentable {
                 regionTop: footerTop,
                 regionSize: CGSize(width: width,
                     height: 1),
-                interactionRevision: interactionRevision)
+                interactionRevision: footerKey?.scrollDrivenLoading == true ? paginationInteractionRevision : interactionRevision)
             let eligible = footerKey?.automaticLoading == true &&
                 footerKey?.hasMore == true &&
                 footerKey?.isLoading == false &&
@@ -824,7 +854,7 @@ struct PosterNativePage: NSViewRepresentable {
                 (footerKey?.statusText != nil || footerKey?.errorMessage == nil)
             if paginationDemand.requestIfNeeded(
                 metrics: footerMetrics, nextPage: nextPage,
-                eligible: eligible
+                eligible: eligible, requiresUserInteraction: footerKey?.scrollDrivenLoading == true
             ) { loadNextPage() }
         }
 
@@ -884,7 +914,8 @@ struct PosterNativePage: NSViewRepresentable {
         private func bind(_ item: PosterNativeCardItem, at index: Int) {
             guard items.indices.contains(index) else { return }
             let id = itemIDs[index]
-            item.bind(summary: items[index], repository: repository, pixels: pixels) { [weak self] in
+            item.bind(summary: items[index], repository: repository, pixels: pixels,
+                      priority: .passive, retryRevision: imageRetryRevision, isActive: surfaceVisible) { [weak self] in
                 guard let self, let current = self.itemIDs.firstIndex(of: id) else { return }
                 self.onSelect(self.items[current])
             }
@@ -1297,8 +1328,12 @@ private final class PosterNativePageFooterView: NSView {
                 views.append(label(L10n.string("pagination.complete",
                     fallback: "All %d items loaded", key.itemCount)))
             case .idle:
-                views.append(button(L10n.string("pagination.continue",
-                    fallback: "Continue Loading"), action: #selector(load)))
+                if key.scrollDrivenLoading {
+                    views.append(label(L10n.string("search.browse.budget", fallback: "Scroll down to load more results")))
+                } else {
+                    views.append(button(L10n.string("pagination.continue",
+                        fallback: "Continue Loading"), action: #selector(load)))
+                }
             }
         }
         views.forEach(addSubview)
@@ -1389,10 +1424,13 @@ private final class PosterNativeCardItem: NSCollectionViewItem {
     }
 
     func bind(summary: VideoSummary, repository: ImageRepository?,
-              pixels: Int, onSelect: @escaping () -> Void) {
+              pixels: Int, priority: PosterImagePriority = .reverse, retryRevision: UInt64 = 0, isActive: Bool = true,
+              onSelect: @escaping () -> Void) {
         (view as? PosterNativeCardView)?.bind(summary: summary,
-            repository: repository, pixels: pixels, onSelect: onSelect)
+            repository: repository, pixels: pixels, priority: priority, retryRevision: retryRevision, isActive: isActive, onSelect: onSelect)
     }
+
+    func suspendImage() { (view as? PosterNativeCardView)?.suspendImage() }
 
     func present(_ presentation: PosterNativeCardPresentation?, onSelectSource: ((VideoSummary) -> Void)?) {
         (view as? PosterNativeCardView)?.present(presentation, onSelectSource: onSelectSource)
@@ -1462,7 +1500,8 @@ final class PosterNativeCardView: NSView, BrowserHoverTarget {
     }
 
     func bind(summary: VideoSummary, repository: ImageRepository?,
-              pixels: Int, onSelect: @escaping () -> Void) {
+              pixels: Int, priority: PosterImagePriority = .reverse, retryRevision: UInt64 = 0, isActive: Bool = true,
+              onSelect: @escaping () -> Void) {
         self.onSelect = onSelect
         title.stringValue = summary.title
         clearTitleToolTip()
@@ -1476,12 +1515,14 @@ final class PosterNativeCardView: NSView, BrowserHoverTarget {
         if let url = summary.posterURL {
             imageCoordinator.update(view: poster,
                 request: PosterImageRequest(url: url, pixels: pixels),
-                repository: repository, priority: .reverse)
+                repository: repository, priority: priority, retryRevision: retryRevision, isActive: isActive)
         } else {
             imageCoordinator.cancel()
         }
         needsLayout = true
     }
+
+    func suspendImage() { imageCoordinator.suspend() }
 
     private var titleTipTag: NSView.ToolTipTag?
     private(set) var titleTipText: NSString?
@@ -1674,16 +1715,19 @@ struct PosterPrefetchBand: Equatable {
                 guard let url = items[index].posterURL else { continue }
                 let request = PosterImageRequest(url: url, pixels: pixels)
                 if seen.insert(request).inserted {
-                    result.append(.init(request: request, demand: .init(priority: priority, distance: distance)))
+                    result.append(.init(request: request, demand: .init(priority: priority, distance: distance,
+                        readingOrder: priority.isImmediate ? index : 0)))
                 }
             }
         }
         let rowsAhead = min((48 + columns - 1) / columns, max(1, lastRow - firstRow + 1))
+        // Reading order owns visible work. Scroll direction only chooses the
+        // offscreen prefetch band, including on first layout and restoration.
+        for row in firstRow...lastRow {
+            append(row: row, priority: .visible, distance: row - firstRow)
+        }
         switch direction {
         case .down:
-            for row in Swift.stride(from: lastRow, through: firstRow, by: -1) {
-                append(row: row, priority: .visible, distance: lastRow - row)
-            }
             for distance in 0..<rowsAhead {
                 append(row: lastRow + 1 + distance, priority: .forward, distance: distance)
                 if distance == 0, firstRow > 0 {
@@ -1691,9 +1735,6 @@ struct PosterPrefetchBand: Equatable {
                 }
             }
         case .up:
-            for row in firstRow...lastRow {
-                append(row: row, priority: .visible, distance: row - firstRow)
-            }
             for distance in 0..<rowsAhead where firstRow > distance {
                 append(row: firstRow - 1 - distance, priority: .forward, distance: distance)
                 if distance == 0 { append(row: lastRow + 1, priority: .reverse, distance: distance) }
@@ -2190,6 +2231,7 @@ enum HomePaginationPhase: Equatable {
 /// query store, not in a permanent UI page/offset latch.
 struct PosterPaginationDemand {
     private(set) var pendingPage: Int?
+    private var lastScrollDemandRevision: UInt64 = 0
 
     mutating func begin(page: Int) -> Bool {
         guard pendingPage == nil else { return false }
@@ -2202,10 +2244,14 @@ struct PosterPaginationDemand {
         pendingPage = nil
     }
 
-    mutating func requestIfNeeded(metrics: PosterScrollMetrics, nextPage: Int, eligible: Bool) -> Bool {
+    mutating func requestIfNeeded(metrics: PosterScrollMetrics, nextPage: Int, eligible: Bool,
+                                 requiresUserInteraction: Bool = false) -> Bool {
         guard eligible, metrics.viewport.height > 0,
-              metrics.remaining <= metrics.viewport.height * 2 else { return false }
-        return begin(page: nextPage)
+              metrics.remaining <= metrics.viewport.height * (requiresUserInteraction ? 0.75 : 2) else { return false }
+        if requiresUserInteraction, metrics.interactionRevision == lastScrollDemandRevision { return false }
+        guard begin(page: nextPage) else { return false }
+        if requiresUserInteraction { lastScrollDemandRevision = metrics.interactionRevision }
+        return true
     }
 }
 

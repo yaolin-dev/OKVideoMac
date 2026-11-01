@@ -103,9 +103,6 @@ final class BridgeServer {
                     .writeTimeout(15, TimeUnit.SECONDS)
                     .build();
     private static final int MAX_MEDIA_REDIRECTS = 10;
-    // A smaller relay buffer notices an abandoned mpv Range request sooner
-    // and bounds the bytes copied after a large seek supersedes the request.
-    private static final int MEDIA_COPY_BUFFER_BYTES = 64 * 1024;
     private static final String[] FORWARDED_MEDIA_REQUEST_HEADERS = {
             "range",
             "if-range",
@@ -345,11 +342,37 @@ final class BridgeServer {
                     writeJSON(output, 200, continuity);
                     return;
                 }
+                if ("POST".equals(method) && "/v1/media-network".equals(path)) {
+                    JSONObject payload = readJSONPayload(input, headers, 131072);
+                    URI source = requireHTTPMediaURI(payload.optString("url", ""));
+                    String host = source.getHost().toLowerCase(Locale.ROOT);
+                    if (!("127.0.0.1".equals(host) || "localhost".equals(host) || "::1".equals(host) || "[::1]".equals(host))
+                            || !(source.getPort() == PORT || source.getPort() == 19978)) {
+                        throw new IOException("Expected local media capability");
+                    }
+                    MediaRequestNetworkPolicy policy = MediaRequestNetworkPolicy.decode(payload.optString("policy", ""));
+                    BridgeMediaSessionRegistry.Session selected;
+                    String mediaPath = source.getPath();
+                    if ("/v1/media".equals(mediaPath)) {
+                        URI remote = requireRemoteMediaURI(parseQuery(source.toString()).get("url"));
+                        selected = BridgeMediaSessionRegistry.remoteWithNetworkPolicy(remote.toString(), payload.optJSONObject("headers"), policy);
+                    } else {
+                        String prefix = mediaPath.startsWith("/proxy/media/") ? "/proxy/media/" : "/v1/media-sessions/";
+                        if (!mediaPath.startsWith(prefix)) throw new IOException("Invalid media capability");
+                        String id = mediaPath.substring(prefix.length());
+                        if (!id.matches("[a-fA-F0-9-]{36}")) throw new IOException("Invalid media capability");
+                        selected = BridgeMediaSessionRegistry.withNetworkPolicy(id, policy);
+                    }
+                    // Only the host-created capability opts into the full-duplex mpv contract.
+                    selected.cancelOnDisconnect = payload.optBoolean("cancelOnDisconnect", false);
+                    writeJSON(output, 200, new JSONObject().put("ok", true).put("path", "/proxy/media/" + selected.id));
+                    return;
+                }
                 if (path.startsWith("/proxy/media/")
                         && ("GET".equals(method) || "HEAD".equals(method))) {
                     runMedia(() -> writeSessionMedia(
                                 context,
-                                output,
+                                client, input, output,
                                 path.substring("/proxy/media/".length()),
                                 headers,
                                 parseQuery(target),
@@ -361,7 +384,7 @@ final class BridgeServer {
                         && ("GET".equals(method) || "HEAD".equals(method))) {
                     runMedia(() -> writeSessionMedia(
                                 context,
-                                output,
+                                client, input, output,
                                 path.substring("/v1/media-sessions/".length()),
                                 headers,
                                 parseQuery(target),
@@ -1261,12 +1284,31 @@ final class BridgeServer {
     }
 
     private static void writeSessionMedia(
+            Context context, Socket client, BufferedInputStream input,
+            BufferedOutputStream output, String sessionID,
+            Map<String, String> clientHeaders, Map<String, String> query,
+            boolean headersOnly
+    ) throws IOException {
+        BridgeMediaSessionRegistry.Session session = BridgeMediaSessionRegistry.get(sessionID.split("/dash/", 2)[0]);
+        // Legacy clients may half-close their write side before reading the
+        // response. Monitor only capabilities explicitly prepared by our mpv
+        // host, and only body-free requests handled by cancellable HTTP calls.
+        boolean watch = session != null && session.cancelOnDisconnect && !headersOnly
+                && providerProxyURI(session.upstreamURL) == null
+                && !clientHeaders.containsKey("transfer-encoding")
+                && parseLength(clientHeaders.get("content-length")) == 0;
+        try (MediaRequestLifetime lifetime = new MediaRequestLifetime(client, input, watch)) {
+            writeSessionMediaOwned(context, output, sessionID, clientHeaders, query, headersOnly, lifetime);
+        }
+    }
+
+    private static void writeSessionMediaOwned(
             Context context,
             BufferedOutputStream output,
             String sessionID,
             Map<String, String> clientHeaders,
             Map<String, String> query,
-            boolean headersOnly
+            boolean headersOnly, MediaRequestLifetime lifetime
     ) throws IOException {
         String[] resourcePath = sessionID.split("/dash/", 2);
         boolean dashChild = resourcePath.length == 2;
@@ -1284,6 +1326,7 @@ final class BridgeServer {
             return;
         }
         String upstreamURL = upstreamURLs.get(0);
+        MediaRequestNetworkPolicy networkPolicy = session.networkPolicy;
         String requestID = UUID.randomUUID().toString().substring(0, 8);
         LinkedHashMap<String, String> forwarded = new LinkedHashMap<>();
 
@@ -1343,6 +1386,7 @@ final class BridgeServer {
                 );
             }
             Object[] response;
+            long proxyStarted = System.nanoTime();
             try {
                 response = runProvider(
                         () -> DexSpiderRegistry.get(context)
@@ -1373,7 +1417,12 @@ final class BridgeServer {
                 // Content-Length no longer describe the downstream manifest.
                 response = new Object[]{200, "application/dash+xml", session.guardStream(new java.io.ByteArrayInputStream(manifest))};
             }
-            writeProxy(output, response, headersOnly);
+            Log.i(TAG, "MediaProxyReady request=" + requestID + " session=" + shortHash(session.id)
+                    + " setupMs=" + (System.nanoTime() - proxyStarted) / 1_000_000
+                    + " status=" + response[0] + " clientRange=" + safeByteMetadata(range));
+            MEDIA_READ_REQUEST.set(requestID);
+            try { writeProxy(output, response, headersOnly); }
+            finally { MEDIA_READ_REQUEST.remove(); }
             return;
         }
         synchronized (session) {
@@ -1387,15 +1436,16 @@ final class BridgeServer {
             SessionMediaResponse selected = null;
             IOException lastFailure = null;
             for (String candidate : upstreamURLs) {
+                lifetime.checkConnected();
                 try {
-                    selected = executeSessionMedia(requireSessionMediaURI(candidate), forwarded, headersOnly);
+                    selected = executeSessionMedia(requireSessionMediaURI(candidate), forwarded, headersOnly, networkPolicy, lifetime);
                     int status = selected.response.code();
                     if (dashChild && status == 403) {
                         Map<String, String> compatibility = DashManifest.forbiddenCDNHeaders(candidate, forwarded, sessionHeaders);
                         if (compatibility != null) {
                             selected.response.close();
                             selected = null;
-                            selected = executeSessionMedia(requireSessionMediaURI(candidate), compatibility, headersOnly);
+                            selected = executeSessionMedia(requireSessionMediaURI(candidate), compatibility, headersOnly, networkPolicy, lifetime);
                             status = selected.response.code();
                         }
                     }
@@ -1438,7 +1488,7 @@ final class BridgeServer {
                 if (!dashChild && !headersOnly && !session.virtualRangeProbeAttempted
                         && VirtualMediaRange.candidate(response, range)) {
                     session.virtualRangeProbeAttempted = true;
-                    session.virtualRange = VirtualMediaRange.probe(response, mediaResponse.headers);
+                    session.virtualRange = VirtualMediaRange.probe(response, mediaResponse.headers, networkPolicy);
                     if (BridgeMediaSessionRegistry.get(session.id) != session) throw new IOException("Media session expired during proof");
                     Log.i(TAG, "MediaRangeProof session=" + shortHash(session.id)
                             + " outcome=" + (session.virtualRange == null ? "unproven" : "verified"));
@@ -1525,7 +1575,8 @@ final class BridgeServer {
     private static SessionMediaResponse executeSessionMedia(
             URI initialUpstream,
             Map<String, String> initialHeaders,
-            boolean headersOnly
+            boolean headersOnly,
+            MediaRequestNetworkPolicy networkPolicy, MediaRequestLifetime lifetime
     ) throws IOException {
         URI upstream = initialUpstream;
         LinkedHashMap<String, String> headers = new LinkedHashMap<>(
@@ -1543,7 +1594,9 @@ final class BridgeServer {
             request.header("Accept-Encoding", "identity");
             if (headersOnly) request.head(); else request.get();
 
-            Call call = SESSION_MEDIA_CLIENT.newCall(request.build());
+            Call call = networkPolicy.client(SESSION_MEDIA_CLIENT).newCall(request.build());
+            lifetime.attach(call::cancel);
+            lifetime.checkConnected();
             Response response = call.execute();
             String location = response.header("Location");
             if (!isRedirect(response.code())
@@ -1683,7 +1736,7 @@ final class BridgeServer {
         }
 
         final Response mediaResponse;
-        final Call mediaCall = MEDIA_CLIENT.newCall(request.build());
+        final Call mediaCall = MediaRequestNetworkPolicy.direct().client(MEDIA_CLIENT).newCall(request.build());
         try {
             mediaResponse = mediaCall.execute();
         } catch (IOException error) {
@@ -1918,61 +1971,22 @@ final class BridgeServer {
             }
         }
         rawHeaders.append("\r\n");
-        long bytesWritten = 0L;
-        String termination = "complete";
+        String requestID = MEDIA_READ_REQUEST.get();
+        MediaRelay.Observer observer = requestID == null ? MediaRelay.QUIET : new MediaRelay.Observer() {
+            public void firstByte(long elapsed) {
+                Log.i(TAG, "MediaFirstByte request=" + requestID + " relayMs=" + elapsed / 1_000_000);
+            }
+            public void finished(long bytes, long elapsed, long reads, long maxRead, String termination) {
+                Log.i(TAG, "MediaReadEnd request=" + requestID + " bytes=" + bytes
+                        + " elapsedMs=" + elapsed / 1_000_000 + " readMs=" + reads / 1_000_000
+                        + " maxReadMs=" + maxRead / 1_000_000 + " termination=" + termination);
+            }
+        };
         try {
-            output.write(
-                    rawHeaders.toString().getBytes(StandardCharsets.US_ASCII)
-            );
-            try (InputStream stream = body) {
-                if (!headersOnly) {
-                    byte[] buffer = new byte[MEDIA_COPY_BUFFER_BYTES];
-                    while (expectedBytes < 0 || bytesWritten < expectedBytes) {
-                        int count;
-                        try {
-                            int limit = expectedBytes < 0 ? buffer.length : (int) Math.min(buffer.length, expectedBytes - bytesWritten);
-                            count = stream.read(buffer, 0, limit);
-                            if (count == -1 && expectedBytes >= 0) throw new EOFException("Incomplete media range");
-                        } catch (IOException upstreamFailure) {
-                            // A normal final chunk certifies success. Never emit
-                            // it for premature EOF or a failed upstream read.
-                            output.flush();
-                            throw new MediaResponseCommittedException(upstreamFailure, bytesWritten, "truncated_upstream");
-                        }
-                        if (count == -1) break;
-                        if (count == 0) continue;
-                        output.write(
-                                Integer.toHexString(count).getBytes(
-                                        StandardCharsets.US_ASCII
-                                )
-                        );
-                        output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
-                        output.write(buffer, 0, count);
-                        output.write("\r\n".getBytes(StandardCharsets.US_ASCII));
-                        bytesWritten += count;
-                    }
-                }
-                if (!headersOnly) output.write("0\r\n\r\n".getBytes(StandardCharsets.US_ASCII));
-                output.flush();
-            }
-        } catch (MediaResponseCommittedException error) {
-            termination = error.category;
-            throw error;
-        } catch (IOException error) {
-            termination = bytesWritten > 0 ? "client_transport_interrupted" : "relay_setup_failed";
-            throw new MediaResponseCommittedException(
-                    error,
-                    bytesWritten,
-                    bytesWritten > 0L
-                            ? "client_transport_interrupted"
-                            : "relay_setup_failed"
-            );
-        } finally {
-            String requestID = MEDIA_READ_REQUEST.get();
-            if (requestID != null) {
-                Log.i(TAG, "MediaReadEnd request=" + requestID
-                        + " bytes=" + bytesWritten + " termination=" + termination);
-            }
+            MediaRelay.write(output, rawHeaders.toString().getBytes(StandardCharsets.US_ASCII),
+                    body, expectedBytes, headersOnly, observer);
+        } catch (MediaRelay.Failure error) {
+            throw new MediaResponseCommittedException(error, error.bytesWritten, error.category);
         }
     }
 

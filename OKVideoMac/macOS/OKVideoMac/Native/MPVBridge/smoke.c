@@ -2,6 +2,11 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <stdatomic.h>
+
+static void event_wakeup(void *context) {
+    atomic_fetch_add((_Atomic int *)context, 1);
+}
 
 int main(void) {
     OKMPVClient *client = okmpv_create();
@@ -20,6 +25,10 @@ int main(void) {
     const char *headers[] = {
         "User-Agent: OKVideoMac-Bridge-Smoke"
     };
+    _Atomic int wakeups = 0;
+    okmpv_set_wakeup_callback(client, event_wakeup, &wakeups);
+    okmpv_wakeup(client);
+    if (atomic_load(&wakeups) == 0) return 6;
     if (okmpv_request_log_messages(client, "warn") < 0) return 2;
     // A rejected command produces a native error without network or media.
     const char *invalid[] = {"OKVIDEOMAC_DIAGNOSTIC_CANARY_INVALID_COMMAND"};
@@ -52,6 +61,10 @@ int main(void) {
         okmpv_destroy(client);
         return 1;
     }
+    okmpv_set_wakeup_callback(client, NULL, NULL);
+    int detached_wakeups = atomic_load(&wakeups);
+    okmpv_wakeup(client);
+    if (atomic_load(&wakeups) != detached_wakeups) return 7;
     printf(
         "OKMPVBridge smoke passed (client API %s, event size %d)\n",
         okmpv_client_api_version_string(),

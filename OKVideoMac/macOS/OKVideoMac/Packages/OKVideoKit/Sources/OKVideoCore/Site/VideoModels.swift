@@ -295,6 +295,7 @@ public struct PlayEpisode: Codable, Equatable, Hashable, Identifiable, Sendable 
     }
 
     public var metadata: PlaybackEpisodeMetadata?
+    public var originalResource: OriginalMediaResource?
     public var referenceIdentity: String?
 
     /// A secret-free, provider-bound locator captured while detail data is
@@ -307,22 +308,25 @@ public struct PlayEpisode: Codable, Equatable, Hashable, Identifiable, Sendable 
         url: String,
         referenceIdentity: String? = nil,
         providerResourceReference: PlaybackResourceReference? = nil,
-        metadata: PlaybackEpisodeMetadata? = nil
+        metadata: PlaybackEpisodeMetadata? = nil,
+        originalResource: OriginalMediaResource? = nil
     ) {
         self.name = name
         self.url = url
         self.referenceIdentity = referenceIdentity
         self.providerResourceReference = providerResourceReference
         self.metadata = metadata
+        self.originalResource = originalResource?.validated
     }
 
     private enum CodingKeys: String, CodingKey {
-        case name, url, referenceIdentity, providerResourceReference, metadata
+        case name, url, referenceIdentity, providerResourceReference, metadata, originalResource
     }
 
     public init(from decoder: Decoder) throws {
         let values = try decoder.container(keyedBy: CodingKeys.self)
         metadata = try values.decodeIfPresent(PlaybackEpisodeMetadata.self, forKey: .metadata)
+        originalResource = try values.decodeIfPresent(OriginalMediaResource.self, forKey: .originalResource)?.validated
         name = try values.decode(String.self, forKey: .name)
         url = try values.decode(String.self, forKey: .url)
         referenceIdentity = try values.decodeIfPresent(String.self, forKey: .referenceIdentity)
@@ -346,6 +350,7 @@ public struct PlayEpisode: Codable, Equatable, Hashable, Identifiable, Sendable 
         }
         var values = encoder.container(keyedBy: CodingKeys.self)
         try values.encodeIfPresent(metadata, forKey: .metadata)
+        try values.encodeIfPresent(originalResource?.validated, forKey: .originalResource)
         try values.encode(name, forKey: .name)
         try values.encode(url, forKey: .url)
         try values.encodeIfPresent(referenceIdentity, forKey: .referenceIdentity)

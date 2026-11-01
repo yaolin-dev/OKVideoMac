@@ -5,11 +5,24 @@ public struct SearchPageCursor: Equatable, Sendable {
     public var keyword: String
     public private(set) var nextPage: Int = 1
     public private(set) var seenIDs: Set<String> = []
+    // Cursor bookkeeping must not retain every ID from an oversized response
+    // after the result pool has discarded it. Recent page signatures also catch
+    // providers that repeatedly return the same oversized page in a new order.
+    private var recentPageSignatures: [Int] = []
+    static let maximumRememberedIDs = 4_096
     public private(set) var ended = false
     public private(set) var uncertain = false
     public var error: String?
 
     public init(keyword: String) { self.keyword = keyword }
+
+    /// A budget limit is not an upstream end-of-results signal. Re-fetch the
+    /// incomplete page on demand; aggregate merging deduplicates retained rows.
+    public func replaying(from page: Int) -> SearchPageCursor {
+        var cursor = SearchPageCursor(keyword: keyword)
+        cursor.nextPage = max(1, page)
+        return cursor
+    }
 
     public mutating func fail(_ message: String, uncertain: Bool = false) {
         error = message
@@ -27,14 +40,22 @@ public struct SearchPageCursor: Equatable, Sendable {
              page.pagination.pageCount.map { requestedPage >= $0 } == true)
         let declaredMore = page.pagination.continuation == .more ||
             page.pagination.pageCount.map { requestedPage < $0 } == true
-        let newIDs = Set(page.items.map(\.id)).subtracting(seenIDs)
+        var hasher = Hasher()
+        for value in page.items.map({ $0.id.hashValue }).sorted() { hasher.combine(value) }
+        let signature = hasher.finalize()
+        let hasNewIDs = !recentPageSignatures.contains(signature) && page.items.contains { !seenIDs.contains($0.id) }
         guard page.pagination.page == requestedPage,
               !(end && declaredMore),
-              !newIDs.isEmpty || end || (page.items.isEmpty && !declaredMore) else {
+              hasNewIDs || end || (page.items.isEmpty && !declaredMore) else {
             uncertain = true
             return false
         }
-        seenIDs.formUnion(newIDs)
+        if seenIDs.count + min(page.items.count, Self.maximumRememberedIDs) > Self.maximumRememberedIDs {
+            seenIDs.removeAll(keepingCapacity: true)
+        }
+        for item in page.items where seenIDs.count < Self.maximumRememberedIDs { seenIDs.insert(item.id) }
+        recentPageSignatures.append(signature)
+        if recentPageSignatures.count > 8 { recentPageSignatures.removeFirst() }
         nextPage = requestedPage + 1
         ended = end || (page.items.isEmpty && !declaredMore)
         return true

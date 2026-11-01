@@ -146,3 +146,147 @@ final class PlayerEpisodeNavigationStateTests: XCTestCase {
         XCTAssertNil(app.playerEpisodeNavigation(offset: 1, automatic: true).uniqueEpisode)
     }
 }
+
+@MainActor
+final class PlayerMislabeledVideoNavigationTests: XCTestCase {
+    private var motion: [String: String] {
+        ["video-dec-params/w": "1920", "video-dec-params/h": "1080",
+         "current-tracks/video/codec": "h264", "container-fps": "25",
+         "current-tracks/video/image": "no", "current-tracks/video/albumart": "no"]
+    }
+    private func family() -> [PlayEpisode] {
+        (1...16).map { PlayEpisode(name: "[\($0 == 11 ? "2.6" : "2.7")GB]E\($0).mp3【小程量房2026】", url: "fixture:\($0)") }
+    }
+
+    private func mixedFamily() -> [PlayEpisode] {
+        (1...16).map { number in
+            let size = number == 15 ? "1.5" : number == 16 ? "1.6" : "2.6"
+            let suffix = number < 15 ? "mp3" : "mp4"
+            return PlayEpisode(name: "[\(size)GB]E\(String(format: "%02d", number)).\(suffix)【小程量房2026】",
+                               url: "fixture:mixed:\(number)")
+        }
+    }
+
+    func testRealMixedSuffixLineReconnectsFromEitherSideAfterVideoDecodes() async {
+        let values = mixedFamily(), app = AppState(environment: nil)
+        let source = PlaySource(name: "夸克原画", episodes: values)
+        await app.seedEpisodeNavigationForTesting(source: source, current: values[14])
+        XCTAssertFalse(app.hasPreviousEpisode, "A filename alone must not establish moving-video evidence")
+        app.observeEpisodeVideoForTesting(motion, requestID: app.playbackPresentationID)
+        XCTAssertEqual(app.playerEpisodeNavigation(offset: -1), .available(values[13]), "E15.mp4 must reconnect to E14.mp3")
+        XCTAssertEqual(app.playerEpisodeNavigation(offset: 1), .available(values[15]))
+
+        for number in [1, 11, 13, 14, 15, 16] {
+            await app.seedEpisodeNavigationForTesting(source: source, current: values[number - 1])
+            app.observeEpisodeVideoForTesting(motion, requestID: app.playbackPresentationID)
+            XCTAssertEqual(app.playerEpisodeNavigation(offset: -1), number == 1 ? .boundary : .available(values[number - 2]))
+            let next: PlayerEpisodeNavigationResult = number == 16 ? .boundary : .available(values[number])
+            XCTAssertEqual(app.playerEpisodeNavigation(offset: 1), next)
+            XCTAssertEqual(app.playerEpisodeNavigation(offset: 1, automatic: true), next)
+        }
+        XCTAssertEqual(app.playerEpisodes, values)
+    }
+
+    func testMixedFamilyRequiresFreshVideoEvidenceAndPreservesExclusions() async {
+        let values = mixedFamily(), app = AppState(environment: nil)
+        let source = PlaySource(name: "夸克原画", episodes: values)
+        await app.seedEpisodeNavigationForTesting(source: source, current: values[14])
+        let previousRequest = app.playbackPresentationID
+        await app.seedEpisodeNavigationForTesting(source: source, current: values[14])
+        app.observeEpisodeVideoForTesting(motion, requestID: previousRequest)
+        XCTAssertFalse(app.hasPreviousEpisode)
+        app.observeEpisodeVideoForTesting(motion.merging(["current-tracks/video/albumart": "yes"]) { _, new in new },
+                                         requestID: app.playbackPresentationID)
+        XCTAssertFalse(app.hasPreviousEpisode)
+        app.observeEpisodeVideoForTesting(motion, requestID: app.playbackPresentationID)
+        XCTAssertTrue(app.hasPreviousEpisode)
+        await app.seedEpisodeNavigationForTesting(source: PlaySource(name: "另一线路", episodes: values), current: values[14])
+        XCTAssertFalse(app.hasPreviousEpisode, "Evidence cannot cross sources or playback requests")
+
+        let excluded = ["E17.mp3", "E17.mp3【其他节目】", "E17.mp3【小程量房2026】花絮",
+                        "E17.srt【小程量房2026】", "E17.mp3【小程量房2026】国语", "S02E17.mp3【小程量房2026】"]
+            .map { PlayEpisode(name: $0, url: "fixture:" + $0) }
+        let index = PlayerEpisodeNavigationIndex(episodes: values + excluded, confirmedVideoEpisodeID: values[14].id)
+        XCTAssertEqual(index.adjacent(to: values[14].id, offset: -1), .available(values[13]))
+        XCTAssertEqual(index.adjacent(to: values[15].id, offset: 1), .boundary)
+        for item in excluded { XCTAssertEqual(index.adjacent(to: item.id, offset: -1), .unavailable) }
+        let sparse = Array(values[13...14])
+        XCTAssertEqual(PlayerEpisodeNavigationIndex(episodes: sparse, confirmedVideoEpisodeID: values[14].id)
+            .adjacent(to: values[14].id, offset: -1), .boundary, "Two mixed files alone must not infer an audio family")
+    }
+
+    func testRealFilenameBecomesNavigableOnlyAfterDecodedVideoEvidence() async {
+        let values = family(), app = AppState(environment: nil)
+        let source = PlaySource(name: "夸克原画", episodes: values)
+        await app.seedEpisodeNavigationForTesting(source: source, current: values[10])
+        XCTAssertFalse(app.hasPreviousEpisode); XCTAssertFalse(app.hasNextEpisode)
+        app.observeEpisodeVideoForTesting(motion, requestID: app.playbackPresentationID)
+        XCTAssertEqual(app.playerEpisodeNavigation(offset: -1), .available(values[9]))
+        XCTAssertEqual(app.playerEpisodeNavigation(offset: 1), .available(values[11]))
+        XCTAssertEqual(app.playerEpisodeNavigation(offset: 1, automatic: true), .available(values[11]))
+        XCTAssertEqual(app.playerEpisodes, values, "Do not rename or change persistent source identities")
+        XCTAssertEqual(app.playerEpisodePresentations.count, 16)
+        await app.seedEpisodeNavigationForTesting(source: source, current: values[0])
+        app.observeEpisodeVideoForTesting(motion, requestID: app.playbackPresentationID)
+        XCTAssertFalse(app.hasPreviousEpisode); XCTAssertTrue(app.hasNextEpisode)
+        await app.seedEpisodeNavigationForTesting(source: source, current: values[15])
+        app.observeEpisodeVideoForTesting(motion, requestID: app.playbackPresentationID)
+        XCTAssertTrue(app.hasPreviousEpisode); XCTAssertFalse(app.hasNextEpisode)
+    }
+
+    func testAudioCoverArtUnknownAndStaleRequestsCannotGrantVideoEvidence() async {
+        let values = family(), app = AppState(environment: nil)
+        let source = PlaySource(name: "line", episodes: values)
+        for properties in [[String: String](), ["current-tracks/audio/codec": "mp3"],
+                           motion.merging(["current-tracks/video/albumart": "yes"]) { _, new in new },
+                           motion.merging(["current-tracks/video/image": "yes"]) { _, new in new }] {
+            await app.seedEpisodeNavigationForTesting(source: source, current: values[10])
+            app.observeEpisodeVideoForTesting(properties, requestID: app.playbackPresentationID)
+            XCTAssertFalse(app.hasNextEpisode)
+        }
+        let oldRequest = app.playbackPresentationID
+        await app.seedEpisodeNavigationForTesting(source: source, current: values[11])
+        app.observeEpisodeVideoForTesting(motion, requestID: oldRequest)
+        XCTAssertFalse(app.hasNextEpisode)
+        app.observeEpisodeVideoForTesting(motion, requestID: app.playbackPresentationID)
+        XCTAssertTrue(app.hasNextEpisode)
+        await app.seedEpisodeNavigationForTesting(source: source, current: values[12])
+        XCTAssertFalse(app.hasNextEpisode, "Each new resource must confirm its own media type")
+        await app.closePlayer(); XCTAssertFalse(app.hasNextEpisode)
+    }
+
+    func testKnownVideoDoesNotAdmitSubtitlesBonusOrDifferentAudioFamilies() {
+        let values = family() + [PlayEpisode(name: "E17.mp3", url: "unrelated"),
+            PlayEpisode(name: "E17.mp3【小程量房2026】花絮", url: "bonus"),
+            PlayEpisode(name: "E17.srt【小程量房2026】", url: "subtitle"),
+            PlayEpisode(name: "E17.mp3【小程量房2026】国语", url: "other-version")]
+        let index = PlayerEpisodeNavigationIndex(episodes: values, confirmedVideoEpisodeID: values[10].id)
+        XCTAssertEqual(index.adjacent(to: values[15].id, offset: 1), .boundary)
+        for excluded in values.suffix(4) { XCTAssertEqual(index.adjacent(to: excluded.id, offset: 1), .unavailable) }
+        let subtitle = values[18]
+        XCTAssertEqual(PlayerEpisodeNavigationIndex(episodes: values, confirmedVideoEpisodeID: subtitle.id)
+            .adjacent(to: subtitle.id, offset: 1), .unavailable)
+        XCTAssertEqual(PlayerEpisodeNavigationIndex(episodes: values, categoryName: "电影", confirmedVideoEpisodeID: values[10].id)
+            .adjacent(to: values[10].id, offset: 1), .unavailable)
+    }
+
+    func testSingleMislabeledVideoAndDuplicateSiblingRetainNavigationRules() {
+        let values = [PlayEpisode(name: "E10.mp4", url: "10"), family()[10], PlayEpisode(name: "E12.mp4", url: "12")]
+        let index = PlayerEpisodeNavigationIndex(episodes: values, confirmedVideoEpisodeID: values[1].id)
+        XCTAssertEqual(index.adjacent(to: values[1].id, offset: -1), .available(values[0]))
+        XCTAssertEqual(index.adjacent(to: values[1].id, offset: 1), .available(values[2]))
+        let duplicate = PlayEpisode(name: "[3GB]E12.mp3【小程量房2026】", url: "12-other")
+        let group = family() + [duplicate]
+        XCTAssertEqual(PlayerEpisodeNavigationIndex(episodes: group, confirmedVideoEpisodeID: group[10].id)
+            .adjacent(to: group[10].id, offset: 1), .choice([group[11], duplicate]))
+    }
+
+    func testMediaInfoRetainsCoverFlagsWhenStatisticsAreRemoved() {
+        XCTAssertTrue(PlaybackMediaInfo(properties: motion).hasDecodedMovingVideo)
+        for flag in ["current-tracks/video/albumart", "current-tracks/video/image"] {
+            let info = PlaybackMediaInfo(properties: motion.merging([flag: "yes"]) { _, new in new })
+            XCTAssertFalse(info.hasDecodedMovingVideo)
+            XCTAssertFalse(info.withoutStatistics.hasDecodedMovingVideo)
+        }
+    }
+}

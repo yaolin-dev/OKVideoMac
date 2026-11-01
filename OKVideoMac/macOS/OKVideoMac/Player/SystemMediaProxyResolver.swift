@@ -62,6 +62,12 @@ enum PlayerMediaNetworkPolicy {
     }
 
     static func decision(for media: ResolvedMedia) -> MediaProxyDecision? {
+        // The Android/CatPaw relay is local infrastructure. Explicitly clear
+        // inherited FFmpeg proxy options even for provider-owned VOD routing.
+        if ["http", "https"].contains(media.url.scheme?.lowercased() ?? ""),
+           let host = media.url.host, SystemMediaProxyResolver.isLoopback(host) {
+            return .direct
+        }
         guard usesSystemProxy(media) else { return nil }
         return SystemMediaProxyResolver.resolve(
             for: media.hlsStartupSelection?.routingURL ?? media.url

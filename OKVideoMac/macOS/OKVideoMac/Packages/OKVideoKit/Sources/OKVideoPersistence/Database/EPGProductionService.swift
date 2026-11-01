@@ -81,9 +81,15 @@ public actor EPGProductionService {
     private let coordinator: EPGImportCoordinator
     private let stagingRootPath: String
     private let queryQueue = DispatchQueue(label: "com.okvideomac.epg.production.query", qos: .utility)
+    // Queries use the Store's WAL reader and must not sit behind a complete
+    // cleanup burst. The Store still serializes each write transaction itself.
+    private let maintenanceQueue = DispatchQueue(label: "com.okvideomac.epg.production.maintenance", qos: .utility)
     private var lifecycle: Lifecycle = .accepting
     private var pauseDrain: Task<Void, Never>?
     private var closeDrain: Task<Void, Never>?
+    private var maintenanceTask: Task<Void, Never>?
+    private var maintenanceID: UUID?
+    private var maintenanceRevision: UInt64 = 0
 
     public init(cacheDirectory: URL, incarnation: UUID = UUID()) throws {
         let components = try Self.makeComponents(cacheDirectory: cacheDirectory)
@@ -91,6 +97,7 @@ public actor EPGProductionService {
         store = components.store
         coordinator = components.coordinator
         stagingRootPath = components.stagingRootPath
+        Task { [weak self] in await self?.requestMaintenance() }
     }
 
     /// Internal measurement seam. It changes only observation and the private
@@ -107,6 +114,49 @@ public actor EPGProductionService {
         store = components.store
         coordinator = components.coordinator
         stagingRootPath = components.stagingRootPath
+        Task { [weak self] in await self?.requestMaintenance() }
+    }
+
+    deinit { maintenanceTask?.cancel() }
+
+    /// One short slice per wake; stop completely when there is no work. A new
+    /// request arriving during a slice must not be lost when that slice finishes.
+    public func requestMaintenance() {
+        guard lifecycle == .accepting else { return }
+        maintenanceRevision &+= 1
+        guard maintenanceID == nil else { return }
+        let id = UUID()
+        maintenanceID = id
+        scheduleMaintenance(id)
+    }
+
+    private func scheduleMaintenance(_ id: UUID) {
+        maintenanceTask = Task(priority: .utility) { [weak self] in
+            do { try await Task.sleep(nanoseconds: 100_000_000) }
+            catch { return }
+            await self?.runMaintenance(id)
+        }
+    }
+
+    private func runMaintenance(_ id: UUID) async {
+        guard maintenanceID == id, lifecycle == .accepting, !Task.isCancelled else { return }
+        let revision = maintenanceRevision
+        let result = try? await performMaintenance()
+        guard maintenanceID == id, lifecycle == .accepting, !Task.isCancelled else { return }
+        if result?.hasWorkRemaining == true || revision != maintenanceRevision {
+            scheduleMaintenance(id)
+        } else {
+            // Errors do not create a busy retry loop. Startup, resume, source
+            // changes and every import completion will request another pass.
+            maintenanceTask = nil
+            maintenanceID = nil
+        }
+    }
+
+    private func stopMaintenance() {
+        maintenanceID = nil
+        maintenanceTask?.cancel()
+        maintenanceTask = nil
     }
 
     private static func makeComponents(cacheDirectory: URL,
@@ -141,6 +191,7 @@ public actor EPGProductionService {
     public func refreshXMLTV(key: EPGRequestKey, url: URL, headers: HTTPHeaders = [:],
                              force: Bool = false) async throws -> EPGResourceSummary {
         try requireAccepting()
+        defer { requestMaintenance() }
         do {
             _ = try await coordinator.load(key: key,
                 request: XMLTVDownloadRequest(url: url, headers: headers), force: force)
@@ -211,6 +262,7 @@ public actor EPGProductionService {
 
     public func setSourceEnabled(_ source: EPGSourceKey, enabled: Bool) async throws {
         try requireAccepting()
+        defer { requestMaintenance() }
         do { try await coordinator.setSourceEnabled(source, enabled: enabled) }
         catch { throw map(error) }
     }
@@ -220,6 +272,7 @@ public actor EPGProductionService {
     public func pause(deadlineNanoseconds: UInt64 = 750_000_000) async -> Bool {
         guard lifecycle == .accepting else { return lifecycle == .paused && pauseDrain == nil }
         lifecycle = .paused
+        stopMaintenance()
         let task = Task { await coordinator.pause() }
         pauseDrain = task
         let completed = await wait(task, deadlineNanoseconds: deadlineNanoseconds)
@@ -240,6 +293,7 @@ public actor EPGProductionService {
         guard lifecycle == .paused else { throw EPGProductionServiceError.closed }
         await coordinator.resume()
         lifecycle = .accepting
+        requestMaintenance()
     }
 
     public func performMaintenance(maximumSteps: Int = 4,
@@ -251,7 +305,7 @@ public actor EPGProductionService {
         }
         do {
             let store = store
-            return try await performQuery {
+            return try await performQuery(on: maintenanceQueue) {
                 let started = ProcessInfo.processInfo.systemUptime
                 var steps = 0, remaining = true
                 while steps < maximumSteps,
@@ -271,6 +325,7 @@ public actor EPGProductionService {
     public func close(deadlineNanoseconds: UInt64 = 2_000_000_000) async -> Bool {
         if lifecycle == .closed { return true }
         lifecycle = .closing
+        stopMaintenance()
         let task: Task<Void, Never>
         if let closeDrain { task = closeDrain }
         else {
@@ -305,9 +360,10 @@ public actor EPGProductionService {
         }
     }
 
-    private func performQuery<T>(_ operation: @escaping @Sendable () throws -> T) async throws -> T {
+    private func performQuery<T>(on queue: DispatchQueue? = nil,
+                                 _ operation: @escaping @Sendable () throws -> T) async throws -> T {
         try await withCheckedThrowingContinuation { continuation in
-            queryQueue.async { continuation.resume(with: Result { try operation() }) }
+            (queue ?? queryQueue).async { continuation.resume(with: Result { try operation() }) }
         }
     }
 

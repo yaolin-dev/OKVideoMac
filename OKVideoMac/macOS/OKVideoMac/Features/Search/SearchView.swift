@@ -4,10 +4,42 @@ import OKVideoCore
 
 struct SearchView: View {
     @EnvironmentObject private var state: AppState
+    var body: some View {
+        Group {
+            if let folder = state.currentSearchFolder {
+                SearchFolderBrowser(page: folder, path: state.searchFolderPath)
+                    .toolbar { ToolbarItemGroup(placement: .primaryAction) {
+                        BrowserRefreshToolbarControl(isLoading: state.searchPageIsLoading, error: state.searchPageError,
+                            title: state.searchRefreshTitle, restart: { Task { await state.refreshSearchPage(force: true) } },
+                            action: { Task { await state.refreshSearchPage() } })
+                    } }
+            } else {
+                SearchResultsScreen(snapshot: SearchScreenSnapshot(state: state), actions: .init(
+                    open: state.openSearchResult, selectSite: state.selectSearchSite,
+                    loadMore: { await state.loadMoreSearchResults(retry: $0, failuresOnly: $1) },
+                    refresh: { await state.refreshSearchPage(force: $0) }, cancel: state.cancelSearch,
+                    scopeChanged: { state.search(state.activeSearchKeyword) }))
+            }
+        }
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                SearchToolbarLeadingItem(title: state.currentSearchFolder?.folder.title ?? L10n.string("search.results.title", fallback: "Search Results"),
+                    backHelp: state.homeSearchBackHelp, onBack: { _ = state.performSearchBackAction() })
+            }
+            ToolbarItem(placement: .principal) { Spacer(minLength: 0).frame(maxWidth: .infinity).accessibilityHidden(true) }
+        }
+    }
+}
+
+struct SearchResultsScreen: View {
+    let snapshot: SearchScreenSnapshot
+    let actions: SearchScreenActions
+    @State private var imageRetryRevision: UInt64 = 0
+    @EnvironmentObject private var state: AppState
     @State private var projection: [SearchResultCluster] = []
     @State private var projectionKey: String?
     @State private var projectionWorker = SearchPresentationWorker()
-    @State private var sortOrder: SearchResultSortOrder = .relevance
+    @AppStorage(SearchDisplayPreferences.sortOrderKey) private var sortOrder: SearchResultSortOrder = .relevance
     @AppStorage(SearchDisplayPreferences.mergesDuplicateTitlesKey)
     private var mergesDuplicateTitles = true
     @State private var sourceSelectionCluster: SearchResultCluster?
@@ -31,22 +63,8 @@ struct SearchView: View {
                 .navigationTitle("")
                 .background(AppSurfacePalette.background, ignoresSafeAreaEdges: [.horizontal, .bottom])
                 .toolbar {
-                    ToolbarItem(placement: .navigation) {
-                        SearchToolbarLeadingItem(
-                            title: toolbarTitle,
-                            backHelp: state.homeSearchBackHelp,
-                            onBack: {
-                                _ = state.performSearchBackAction()
-                            }
-                        )
-                    }
-                    ToolbarItem(placement: .principal) {
-                        Spacer(minLength: 0)
-                            .frame(maxWidth: .infinity)
-                            .accessibilityHidden(true)
-                    }
                     ToolbarItemGroup(placement: .primaryAction) {
-                        if state.currentSearchFolder == nil {
+                        Group {
                             searchScopeButton()
                             searchMergeControl(layout: toolbarLayout)
                             searchSortControl(layout: toolbarLayout)
@@ -80,34 +98,26 @@ struct SearchView: View {
 
     private var refreshToolbarControl: some View {
         BrowserRefreshToolbarControl(
-            isLoading: state.searchPageIsLoading,
-            error: state.searchPageError,
-            status: state.currentSearchFolder == nil ? state.searchPaginationFooter.statusText : nil,
-            title: state.searchRefreshTitle,
-            cancel: state.currentSearchFolder == nil ? { state.cancelSearch() } : nil,
-            restart: { Task { await state.refreshSearchPage(force: true) } },
+            isLoading: snapshot.isLoading,
+            error: snapshot.error,
+            status: snapshot.footer.statusText,
+            title: snapshot.refreshTitle,
+            cancel: actions.cancel,
+            restart: { imageRetryRevision &+= 1; Task { await actions.refresh(true) } },
             action: {
                 acceptLatestOrder()
-                Task { await state.refreshSearchPage() }
+                imageRetryRevision &+= 1
+                Task { await actions.refresh(false) }
             })
     }
 
-    @ViewBuilder
     private var searchContent: some View {
-        if let folder = state.currentSearchFolder {
-            SearchFolderBrowser(
-                page: folder,
-                path: state.searchFolderPath
-            )
-            .environmentObject(state)
-        } else {
+        VStack(spacing: 0) {
             searchResults
+            if snapshot.candidate != nil {
+                TMDBAttributionView().padding(.horizontal, 28).padding(.vertical, 8).frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
-    }
-
-    private var toolbarTitle: String {
-        state.currentSearchFolder?.folder.title
-            ?? L10n.string("search.results.title", fallback: "Search Results")
     }
 
     @ViewBuilder
@@ -121,7 +131,7 @@ struct SearchView: View {
         .help(L10n.string("search.scope.choose", fallback: "Choose providers for this search"))
         .accessibilityLabel(L10n.string("search.scope.value", fallback: "Search scope: %@", state.searchScopeSummary))
         .popover(isPresented: $showingSearchScope, arrowEdge: .bottom) {
-            SearchScopePopover()
+            SearchScopePopover(onSaved: actions.scopeChanged)
                 .environmentObject(state)
         }
     }
@@ -175,21 +185,21 @@ struct SearchView: View {
     }
 
     private func acceptLatestOrder() {
-        state.searchBrowseMemory.presentation(for: browserKey).acceptOrder()
+        snapshot.memory.presentation(for: browserKey).acceptOrder()
         acceptedOrderRevision &+= 1
     }
 
     private var browserKey: String {
-        let source = state.selectedSearchSiteKey.map { "source:\($0)" } ?? "all"
-        return "\(state.searchBrowseSessionID)/\(source)/\(sortOrder.rawValue)/\(mergesDuplicateTitles)"
+        let source = snapshot.selectedSiteKey.map { "source:\($0)" } ?? "all"
+        return "\(snapshot.id)/\(source)/\(sortOrder.rawValue)/\(mergesDuplicateTitles)"
     }
 
     private var searchResults: some View {
         let key = browserKey
-        let presentation = state.searchBrowseMemory.presentation(for: key)
+        let presentation = snapshot.memory.presentation(for: key)
         let clusters = presentation.update(presentedClusters)
-        let summaries = clusters.compactMap(\.primary)
-        let sourceOptions = state.searchBrowseMemory.orderedSources(state.searchSiteOptions)
+        let summaries = clusters.compactMap(\.primary).map { SearchArtworkPresentation.summary($0, candidate: snapshot.candidate) }
+        let sourceOptions = snapshot.memory.orderedSources(snapshot.sites)
         let navigation = [BrowseCategoryNavigationItem(id: "all",
             title: L10n.string("search.filters.all", fallback: "All Results"), categoryID: nil)] +
             sourceOptions.map { BrowseCategoryNavigationItem(id: "source:\($0.key)",
@@ -197,45 +207,45 @@ struct SearchView: View {
                 help: L10n.string("search.browse.provider-count", fallback: "%@: %d results", $0.name, $0.resultCount)) }
         let header = PosterNativeHeaderKey(categories: [], selectedCategoryID: nil,
             showsRecommendations: false, filterSelection: [:], navigationItems: navigation,
-            navigationSelectedID: state.selectedSearchSiteKey.map { "source:\($0)" } ?? "all")
-        var footer = state.searchPaginationFooter
+            navigationSelectedID: snapshot.selectedSiteKey.map { "source:\($0)" } ?? "all")
+        var footer = snapshot.footer
         if presentation.hasPendingOrder {
             footer.hasPendingUpdate = true
-            footer.statusText = nil
-            footer.actionTitle = nil
+            // New cards are already appended in stable reading order. A pending
+            // relevance reorder must not require a click before scroll loading.
         }
         return PosterNativePage(items: summaries, headerKey: header,
             headerHeight: HomeBrowseGridMetrics.headerHeight(hasFilters: false),
-            activeFilters: [], footerKey: footer, nextPage: state.searchPaging.revision,
-            initialAnchor: state.searchBrowseMemory.anchors[key],
+            activeFilters: [], footerKey: footer, nextPage: snapshot.pagingRevision,
+            initialAnchor: snapshot.memory.anchors[key],
             presentationRevision: acceptedOrderRevision,
-            onCategorySelect: state.selectSearchSite, onFilterReset: { _ in }, onClearFilters: {},
+            onCategorySelect: actions.selectSite, onFilterReset: { _ in }, onClearFilters: {},
             onAcceptUpdate: {
                 presentation.acceptOrder()
                 acceptedOrderRevision &+= 1
             },
             onBrowse: { anchor, atTop, _ in
-                state.searchBrowseMemory.anchors[key] = anchor
+                snapshot.memory.anchors[key] = anchor
                 presentation.atTop = atTop
             },
-            onLoad: { await state.loadMoreSearchResults() },
+            onLoad: { await actions.loadMore(false, false) },
             onSelect: { summary in
                 guard let cluster = clusters.first(where: { $0.primary?.id == summary.id }) else { return }
                 if SearchClusterOpenPolicy.requiresSourceSelection(cluster) {
                     sourceSelectionCluster = cluster
-                } else { state.openSearchResult(summary) }
+                } else if let original = cluster.primary { actions.open(original) }
             },
             cardPresentations: clusters.map {
                 PosterNativeCardPresentation(id: $0.id,
                     subtitle: [$0.year, $0.sources.count == 1 ? $0.primary?.siteName : L10n.string("search.browse.sources", fallback: "%d sources", $0.sources.count)]
                         .compactMap { $0 }.joined(separator: " · "), sources: $0.sources)
-            }, onSelectSource: state.openSearchResult,
-            onManualLoad: { await state.loadMoreSearchResults(retry: true) })
+            }, onSelectSource: actions.open,
+            onManualLoad: { await actions.loadMore(true, true) }, imageRetryRevision: imageRetryRevision)
         .id(key)
         .overlay {
             if summaries.isEmpty {
                 EmptyStateView(systemImage: "magnifyingglass", title: emptyStateTitle,
-                    message: state.selectedSearchSiteKey == nil ? emptyStateMessage :
+                    message: snapshot.selectedSiteKey == nil ? emptyStateMessage :
                         L10n.string("search.browse.source-empty", fallback: "This provider has no results yet. Check its search status or retry below."))
                     .padding(.top, HomeBrowseGridMetrics.headerHeight(hasFilters: false))
                     .allowsHitTesting(false)
@@ -245,56 +255,56 @@ struct SearchView: View {
     }
 
     private var visibleRawResults: [VideoSummary] {
-        guard let selectedSiteKey = state.selectedSearchSiteKey else {
-            return state.searchResults
+        guard let selectedSiteKey = snapshot.selectedSiteKey else {
+            return snapshot.results
         }
-        return state.searchResults.filter { $0.siteKey == selectedSiteKey }
+        return snapshot.results.filter { $0.siteKey == selectedSiteKey }
     }
 
     private var presentationInput: SearchPresentationInput {
         SearchPresentationInput(key: browserKey, items: visibleRawResults,
-            keyword: state.activeSearchKeyword, mergesDuplicates: mergesDuplicateTitles, sortOrder: sortOrder)
+            keyword: snapshot.keyword, mergesDuplicates: mergesDuplicateTitles, sortOrder: sortOrder)
     }
 
     private var presentedClusters: [SearchResultCluster] {
-        projectionKey == browserKey ? projection : state.searchBrowseMemory.presentation(for: browserKey).displayed
+        projectionKey == browserKey ? projection : snapshot.memory.presentation(for: browserKey).displayed
     }
 
     private func openSearchSource(_ summary: VideoSummary) {
         sourceSelectionCluster = nil
-        state.openSearchResult(summary)
+        actions.open(summary)
     }
 
     private var emptyStateTitle: String {
-        if state.activeSearchKeyword.isEmpty {
+        if snapshot.keyword.isEmpty {
             return L10n.string("search.empty.start.title", fallback: "Search Movies and Shows")
         }
-        return state.isSearching
+        return snapshot.isLoading
             ? L10n.string("search.searching.title", fallback: "Searching")
             : L10n.string("search.empty.no-results.title", fallback: "No Results")
     }
 
     private var emptyStateMessage: String {
-        if state.activeSearchKeyword.isEmpty {
+        if snapshot.keyword.isEmpty {
             return L10n.string("search.empty.start.message", fallback: "Enter a title to search the enabled providers in the current scope.")
         }
-        if state.isSearching {
+        if snapshot.isLoading {
             return L10n.string(
                 "search.progress.message",
                 fallback: "First pages: %d/%d providers. Finished: %d/%d. Results appear as they arrive.",
-                state.searchFirstPageCompletedSiteCount,
-                state.searchTotalSiteCount,
-                state.searchCompletedSiteCount,
-                state.searchTotalSiteCount
+                snapshot.completedSites,
+                snapshot.totalSites,
+                snapshot.completedSites,
+                snapshot.totalSites
             )
         }
-        return state.searchFailures.isEmpty
+        return snapshot.failures.isEmpty
             ? emptyCompletionMessage
-            : L10n.string("search.failures.no-results", fallback: "%d providers failed; the remaining providers returned no results.", state.searchFailures.count)
+            : L10n.string("search.failures.no-results", fallback: "%d providers failed; the remaining providers returned no results.", snapshot.failures.count)
     }
 
     private var emptyCompletionMessage: String {
-        switch state.searchTermination {
+        switch snapshot.termination {
         case .deadlineReached:
             return L10n.string("search.completion.deadline", fallback: "The initial search finished; background pagination reached its time limit.")
         case .cancelled:
@@ -903,7 +913,10 @@ private struct SearchScopePopover: View {
     @State private var filterText = ""
     @State private var isSaving = false
 
-    init(scope: SearchSiteScope = .all) {
+    var onSaved: (() -> Void)? = nil
+
+    init(scope: SearchSiteScope = .all, onSaved: (() -> Void)? = nil) {
+        self.onSaved = onSaved
         _mode = State(initialValue: scope.mode)
         _selectedKeys = State(initialValue: scope.selectedSiteKeys)
     }
@@ -947,7 +960,7 @@ private struct SearchScopePopover: View {
                         .foregroundColor(.red)
                 }
                 Button(
-                    state.isSearching
+                    (onSaved != nil || state.isSearching)
                         ? L10n.string("search.scope.save-and-restart", fallback: "Save and Search Again")
                         : L10n.string("common.save", fallback: "Save")
                 ) {
@@ -958,9 +971,8 @@ private struct SearchScopePopover: View {
                         isSaving = false
                         guard saved else { return }
                         dismiss()
-                        if shouldRestart {
-                            state.search(state.activeSearchKeyword)
-                        }
+                        if let onSaved { onSaved() }
+                        else if shouldRestart { state.search(state.activeSearchKeyword) }
                     }
                 }
                 .buttonStyle(.borderedProminent)
@@ -1036,7 +1048,8 @@ private struct SearchFolderBrowser: View {
                 headerHeight: HomeBrowseGridMetrics.contentPadding, activeFilters: [],
                 footerKey: PosterNativeFooterKey(hasMore: page.pagination?.hasMore == true,
                     isLoading: page.isLoading, isRefreshing: false, errorMessage: page.errorMessage,
-                    itemCount: page.items.count, hasPendingUpdate: false, issueKind: page.paginationIssueKind),
+                    itemCount: page.items.count, hasPendingUpdate: false, issueKind: page.paginationIssueKind,
+                    scrollDrivenLoading: true),
                 nextPage: (page.pagination?.page ?? 0) + 1,
                 initialAnchor: state.searchBrowseMemory.anchors[key], presentationRevision: 0,
                 onCategorySelect: { _ in }, onFilterReset: { _ in }, onClearFilters: {}, onAcceptUpdate: {},
@@ -1117,6 +1130,7 @@ enum SearchResultSortOrder: String, CaseIterable, Identifiable, Sendable {
 
 enum SearchDisplayPreferences {
     static let mergesDuplicateTitlesKey = "search.mergesDuplicateTitles"
+    static let sortOrderKey = "search.resultSortOrder"
 }
 
 final class SearchResultPresentationCache: ObservableObject {

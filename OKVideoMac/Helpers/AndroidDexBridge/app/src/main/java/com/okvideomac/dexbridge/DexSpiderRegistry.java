@@ -127,7 +127,13 @@ final class DexSpiderRegistry {
                 );
                 break;
             case "detail":
-                raw = spider.detailContent(stringList(arguments, 0));
+                List<String> detailIDs = stringList(arguments, 0);
+                raw = ProviderDetailRecovery.supports(payload.optString("api"), detailIDs)
+                        ? ProviderDetailRecovery.load(
+                                () -> spider.detailContent(detailIDs),
+                                () -> spider.homeContent(true))
+                        : spider.detailContent(detailIDs);
+                raw = OriginalResourceMetadata.annotate(payload.optString("api"), raw);
                 break;
             case "search":
                 if (arguments.length() > 2) {

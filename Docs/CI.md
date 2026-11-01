@@ -10,13 +10,13 @@ fixtures, not installation of the CI toolchain.
 
 ## Checks and scope
 
-| Check | What runs | Baseline after 0.9.0 |
+| Check | What runs | Current 0.9.1 validation |
 | --- | --- | --- |
-| Core (debug), Core (release) | Entire `OKVideoKit` Core/Persistence XCTest suite, separately built and discovered for each configuration | Each: 1,233 discovered, 1,204 passed, 29 declared skips |
-| Node | All five `*.test.js` suites selected by `run_node.py`, using the Node test runner | 55 passed, no skips |
-| Offline audits and static checks | SourceAudit synthetic tests, crash configuration tests, tiny Mach-O/dSYM symbol gates, CI validator tests, static checks | 51 audit tests (including 7 native launcher cases), 15 crash configuration tests, 7 symbol cases; no skips |
-| Android Release JVM and unsigned bridge | Existing locked Gradle Release build and JVM tests in a fresh source copy; verify APK is unsigned | 45 JVM tests, no skips; compile-only APK |
-| Main App Release compile (unsigned) | Existing project and dependency scripts, main App plus preview/relaunch helpers, arm64 Release | Three executables; validate version/build, empty service configuration and embedded APK hash |
+| Core (debug), Core (release) | Entire `OKVideoKit` Core/Persistence XCTest suite, separately built and discovered for each configuration | Each: 1,261 discovered, 1,232 passed, 29 declared skips |
+| Node | All six `*.test.js` suites selected by `run_node.py`, using the Node test runner | 72 passed, no skips |
+| Offline audits and static checks | SourceAudit synthetic tests, crash configuration tests, tiny Mach-O/dSYM symbol gates, CI validator tests, static checks | 52 audit tests (including 7 native launcher cases), 15 crash configuration tests, 7 symbol cases; no skips |
+| Android Release JVM and unsigned bridge | Existing locked Gradle Release build and JVM tests in a fresh source copy; verify APK is unsigned | 65 JVM tests, no skips; compile-only APK |
+| Main App Release compile and critical flows | Verify unsigned App/helpers, then build an isolated ad-hoc signed Release test host and execute the logical user-flow contract | Three executables plus exact test identities from `Tools/CI/critical-user-flows.json`; zero allowed skips |
 | CI required | Aggregate the five job groups, including both Core matrix results | Only exact `success` for every group is accepted |
 
 Counts describe the checked baseline, not a target used to suppress new tests.
@@ -25,7 +25,7 @@ test name and reason in [core-allowed-skips.json](../Tools/CI/core-allowed-skips
 They cover existing opt-in/live/resource/worker paths; they are not passed tests.
 Empty suites, unexplained skips, missing completions, duplicates, test process
 errors and contradictory totals fail the check. Other test suites allow no skips.
-The 28 CI validator tests exercise malformed reports, missing work, failure,
+The 44 CI validator tests exercise malformed reports, missing work, failure,
 cancellation, skipped jobs, and Python fixture errors.
 
 Static checks parse tracked Python, JavaScript, shell and JSON inputs, run actionlint,
@@ -49,9 +49,11 @@ branch-protection rule; repository protection settings were not changed.
   the checkout. Ignored local outputs, keys and configuration are not copied.
   Android uses a UTF-8 locale so non-ASCII checkout paths remain valid.
 - The App job accepts only the same commit's successful Android test manifest and
-  matching APK SHA-256. It does not run `package-app.sh`, launch the App, install it,
-  replace a Desktop app or publish a Release. Native audit fixtures use ad-hoc
-  signing (`codesign -s -`), which requires no signing identity or certificate.
+  matching APK SHA-256. After unsigned bundle inspection, it launches an isolated
+  test host with a separate bundle ID; XCTest startup uses isolated application
+  data. It does not run `package-app.sh`, install an App, replace a Desktop app
+  or publish a Release. Test hosts and native audit fixtures use ad-hoc signing
+  (`codesign -s -`), which requires no signing identity or certificate.
 
 Jobs and subprocesses have finite timeouts. A Core matrix failure does not cancel
 its other configuration. Caches are separated by OS/architecture, toolchain and
@@ -105,6 +107,78 @@ python3 Tools/CI/run_app.py --work-dir "$ci_work_dir/app-build" \
   --bridge-input "$ci_work_dir/bridge-input" --xcodegen "$ci_work_dir/tools/xcodegen"
 ```
 
+## Critical App user flows
+
+`Tools/CI/critical-user-flows.json` is the reviewed list of test identities. The
+`logic` group covers episode navigation (including decoded video with an audio
+suffix), history resource matching, refresh/cancel/source replacement, and
+playback close/reopen ownership. It runs in the App CI job without requiring a
+key window. Fixtures substitute network providers and media decoding.
+
+The `desktop` group drives real AppKit/SwiftUI events and renders production
+controls: outside-click dismissal, switching panels, hover/seek coordinates and
+preview bounds. Run it on an unlocked GUI session before accepting changes to
+these interactions. It is a separate automated local gate, not an assertion that
+a dedicated GUI CI runner has been configured. Focus failures are reported as
+`desktop-focus-unavailable`; they are never counted as a skip or a successful run.
+
+After preparing the existing Release dependencies/APK and generating the Xcode
+project, run from the repository root (use absolute output paths):
+
+```sh
+python3 Tools/CI/run_app_regressions.py \
+  --derived-data "$regression_work_dir/DerivedData" \
+  --output "$regression_work_dir/logic" --group logic \
+  --build-setting "OKVIDEOMAC_BUILD_ROOT=$OKVIDEOMAC_BUILD_ROOT" \
+  --build-setting "OKVIDEOMAC_SPARKLE_ROOT=$OKVIDEOMAC_BUILD_ROOT/Sparkle"
+python3 Tools/CI/run_app_regressions.py \
+  --derived-data "$regression_work_dir/DerivedData" \
+  --output "$regression_work_dir/desktop" --group desktop --skip-build
+```
+
+Use a dedicated DerivedData directory for this test host, separate from unsigned
+compile/package builds. Reusing a host with a different bundle identity is
+rejected before launch. `--skip-build` requires matching source, executable, test
+bundle and test-manifest fingerprints from the preceding build. Use a fresh
+report directory for each execution. The test host has a separate
+bundle ID, Release optimization, test-only fixture hooks and ad-hoc signing. It
+must never replace the Desktop app. The fixture host explicitly omits optional
+MPV/QuickJS runtime libraries, matching CI; these groups do not validate decoding
+or plugin execution. Complete runtime validation remains a separate Release gate.
+Every listed test must start and complete
+exactly once; missing tests, duplicates/retries, skips, timeouts, mismatched totals
+and nonzero process exits fail the gate. JSON, JUnit, raw logs and xcresult evidence
+are retained. To add or rename a critical assertion, update the contract in the
+same change; the runner does not silently lower a minimum test count.
+
+## Real media playback journeys
+
+`Tools/CI/media-user-flows.json` defines a separate native-media gate. It uses the
+production resolver, AppState, libmpv render surface, and isolated database,
+served by a loopback HTTP fixture with byte-range requests, a controlled 503
+failure/recovery, and an observed slow request. It covers play, seek, immediate
+pause/close, persisted resume, next episode despite a misleading audio suffix,
+retry/replacement, and ten native open/seek/close cycles. This is a short lifecycle
+regression, not a long-duration memory soak or a claim that external providers pass.
+
+After building the logical host above, run on an unlocked macOS GUI session:
+
+```sh
+python3 Tools/CI/run_media_journeys.py \
+  --derived-data "$regression_work_dir/DerivedData" \
+  --runtime-app "$verified_release_app" \
+  --output "$regression_work_dir/real-media"
+```
+
+The runner verifies source/test fingerprints and the runtime bundle signature,
+copies the test host and pinned native libraries into a fresh output directory,
+and signs that disposable host. It never launches or modifies the installed app.
+The original logical host stays suitable for CI. Fixture hashes, native-library
+hashes, HTTP activity, exact test results, JUnit, and xcresult are retained; focus
+failures are failures, never skips. This GUI gate is local until a dedicated
+unlocked runner is configured. Hosted CI and minimum-supported macOS validation
+remain independent publication gates.
+
 ## Reports and failure verification
 
 Each job retains raw command logs, machine-readable summaries and available JUnit
@@ -130,7 +204,8 @@ proof for later changes.
 
 ## Remaining limits and formal releases
 
-- This workflow does not run all macOS App XCTest/UI suites, AndroidRuntimeKit
+- This workflow runs the logical critical-user-flow contract, not all macOS App
+  XCTest/UI suites. It does not cover AndroidRuntimeKit
   installation tests, real Emulator/ADB/Bridge E2E, actual playback or private
   provider/account flows. It does not establish compatibility on every supported
   macOS version, including the historical macOS 12.5.1 crash path.
