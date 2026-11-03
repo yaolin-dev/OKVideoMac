@@ -1381,7 +1381,8 @@ final class BridgeServer {
             writeJSON(output, 200, MediaRangeAudit.run(session, forwarded, providerProxy == null));
             return;
         }
-        if (!dashChild && session.owner != null && LocalCloudFileReader.supports(requireSessionMediaURI(upstreamURL))) {
+        if (!dashChild && session.aliOriginalFileCompatibility && session.owner != null
+                && LocalCloudFileReader.supports(requireSessionMediaURI(upstreamURL))) {
             lifetime.checkConnected();
             final LocalCloudFileReader.Opened opened;
             try {

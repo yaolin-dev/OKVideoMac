@@ -61,6 +61,14 @@ final class BridgeMediaSessionRegistry {
             JSONObject requestHeaders,
             BridgeProviderOwnerRegistry.Binding owner
     ) {
+        return securePlaybackResult(decoded, refreshPerformed, requestHeaders, owner, "");
+    }
+
+    static Object securePlaybackResult(Object decoded, boolean refreshPerformed, JSONObject requestHeaders,
+            BridgeProviderOwnerRegistry.Binding owner, String playbackFlag) {
+        // Only the explicitly selected Ali original line opts into Build192's
+        // compatibility path. A matching port, filename or cloud is insufficient.
+        boolean aliOriginal = owner != null && "阿狸原".equals(playbackFlag);
         if (!(decoded instanceof JSONObject)) return decoded;
         JSONObject result = (JSONObject) decoded;
         if (result.optInt("parse", 0) != 0) return result;
@@ -73,7 +81,7 @@ final class BridgeMediaSessionRegistry {
         JSONArray metadata = new JSONArray();
         try {
             if (url instanceof String) {
-                SecuredURL secured = secureURL((String) url, headers, owner);
+                SecuredURL secured = secureURL((String) url, headers, owner, aliOriginal);
                 protectedAny = secured.protectedByBridge;
                 result.put("url", secured.url);
                 appendMetadata(metadata, secured);
@@ -81,7 +89,7 @@ final class BridgeMediaSessionRegistry {
                 JSONArray values = (JSONArray) url;
                 for (int index = 1; index < values.length(); index += 2) {
                     String original = values.optString(index, "");
-                    SecuredURL secured = secureURL(original, headers, owner);
+                    SecuredURL secured = secureURL(original, headers, owner, aliOriginal);
                     protectedAny = protectedAny || secured.protectedByBridge;
                     values.put(index, secured.url);
                     appendMetadata(metadata, secured);
@@ -96,7 +104,8 @@ final class BridgeMediaSessionRegistry {
                             SecuredURL secured = secureURL(
                                     original,
                                     headers,
-                                    owner
+                                    owner,
+                                    aliOriginal
                             );
                             protectedAny = protectedAny
                                     || secured.protectedByBridge;
@@ -163,7 +172,7 @@ final class BridgeMediaSessionRegistry {
         if (original == null) throw new java.io.IOException("Media session expired or missing");
         synchronized (original) {
             Session copy = new Session(UUID.randomUUID().toString(), original.upstreamURL,
-                    original.headerSnapshot(), original.owner, policy);
+                    original.headerSnapshot(), original.owner, policy, original.aliOriginalFileCompatibility);
             if (!original.isCurrent() || copy.providerEpoch != original.providerEpoch)
                 throw new java.io.IOException("Media context changed");
             SESSIONS.put(copy.id, copy);
@@ -184,7 +193,8 @@ final class BridgeMediaSessionRegistry {
     private static SecuredURL secureURL(
             String raw,
             Map<String, String> headers,
-            BridgeProviderOwnerRegistry.Binding owner
+            BridgeProviderOwnerRegistry.Binding owner,
+            boolean aliOriginal
     ) {
         String existingID = bridgeSessionID(raw);
         if (!existingID.isEmpty()) {
@@ -204,6 +214,9 @@ final class BridgeMediaSessionRegistry {
                         "Media session belongs to a different provider owner"
                 );
             }
+            if (existing.aliOriginalFileCompatibility && !aliOriginal) {
+                throw new StaleMediaSessionException("Media session belongs to a different playback line");
+            }
             existing.mergeHeaders(headers);
             return new SecuredURL(
                     raw,
@@ -212,7 +225,7 @@ final class BridgeMediaSessionRegistry {
                     true
             );
         }
-        URI upstream = httpURI(raw);
+        URI upstream = httpURI(raw, aliOriginal);
         if (upstream == null) {
             return new SecuredURL(raw, "", "", false);
         }
@@ -227,7 +240,9 @@ final class BridgeMediaSessionRegistry {
         }
         prune();
         String id = UUID.randomUUID().toString();
-        Session session = new Session(id, upstream.toASCIIString(), headers, owner);
+        boolean compatibility = aliOriginal && LocalCloudFileReader.supports(upstream);
+        Session session = new Session(id, compatibility ? upstream.toASCIIString() : raw.trim(), headers, owner,
+                MediaRequestNetworkPolicy.direct(), compatibility);
         SESSIONS.put(id, session);
         return new SecuredURL(
                 "http://127.0.0.1:" + BridgeServer.PORT
@@ -282,18 +297,18 @@ final class BridgeMediaSessionRegistry {
         }
     }
 
-    private static URI httpURI(String raw) {
+    private static URI httpURI(String raw, boolean aliOriginal) {
         if (raw == null || raw.trim().isEmpty()) return null;
-        if (raw.indexOf('\r') >= 0 || raw.indexOf('\n') >= 0 || raw.indexOf('\t') >= 0) return null;
         try {
             URI uri = URI.create(raw.trim());
             return isHTTP(uri) ? uri : null;
         } catch (Throwable ignored) {
-            // Cloud file names may contain literal spaces. They still need
+            if (!aliOriginal || raw.indexOf('\r') >= 0 || raw.indexOf('\n') >= 0 || raw.indexOf('\t') >= 0) return null;
+            // Ali original file names may contain literal spaces. They still need
             // an owner/epoch-bound capability before Swift encodes the URL.
             // Remote signed URLs are returned verbatim by secureURL above.
             HttpUrl parsed = HttpUrl.parse(raw.trim());
-            return parsed == null ? null : parsed.uri();
+            return parsed == null || !LocalCloudFileReader.supports(parsed.uri()) ? null : parsed.uri();
         }
     }
 
@@ -471,6 +486,7 @@ final class BridgeMediaSessionRegistry {
         final BridgeProviderOwnerRegistry.Binding owner;
         final long providerEpoch;
         final MediaRequestNetworkPolicy networkPolicy;
+        final boolean aliOriginalFileCompatibility;
         volatile boolean cancelOnDisconnect;
         final Map<String, String> headers;
         final Map<String, DashManifest.Resource> dashResources = new LinkedHashMap<>();
@@ -495,6 +511,13 @@ final class BridgeMediaSessionRegistry {
 
         Session(String id, String upstreamURL, Map<String, String> headers,
                 BridgeProviderOwnerRegistry.Binding owner, MediaRequestNetworkPolicy networkPolicy) {
+            this(id, upstreamURL, headers, owner, networkPolicy, false);
+        }
+
+        Session(String id, String upstreamURL, Map<String, String> headers,
+                BridgeProviderOwnerRegistry.Binding owner, MediaRequestNetworkPolicy networkPolicy,
+                boolean aliOriginalFileCompatibility) {
+            this.aliOriginalFileCompatibility = aliOriginalFileCompatibility;
             this.networkPolicy = networkPolicy;
             this.id = id;
             this.upstreamURL = upstreamURL;

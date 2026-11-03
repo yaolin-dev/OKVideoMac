@@ -261,7 +261,7 @@ final class DexSpiderRegistry {
                     ? null
                     : takeCompletedPlayback(playbackKey);
             if (cached != null) {
-                return decodeCurrentPlayback(cached.raw, false, siteHeaders, providerOwner, cached.epoch);
+                return decodeCurrentPlayback(cached.raw, false, siteHeaders, providerOwner, cached.epoch, arguments.optString(0, ""));
             }
 
             PlaybackLock lock = retainPlaybackLock(playbackKey);
@@ -280,7 +280,7 @@ final class DexSpiderRegistry {
                             ? null
                             : takeCompletedPlayback(playbackKey);
                     if (cached != null) {
-                        return decodeCurrentPlayback(cached.raw, false, siteHeaders, providerOwner, cached.epoch);
+                        return decodeCurrentPlayback(cached.raw, false, siteHeaders, providerOwner, cached.epoch, arguments.optString(0, ""));
                     }
                     return invokePlayerWithCompatibilityProxy(
                             spider, arguments, providerOwner, playbackKey,
@@ -343,7 +343,7 @@ final class DexSpiderRegistry {
                 // Secure a returned compatibility URL while its exact owner
                 // lease is still active. The resulting 9978 media capability
                 // permanently retains that owner after this lease closes.
-                return decodeCurrentPlayback(raw, refreshRequested, siteHeaders, providerOwner, resolutionEpoch);
+                return decodeCurrentPlayback(raw, refreshRequested, siteHeaders, providerOwner, resolutionEpoch, arguments.optString(0, ""));
             } catch (Throwable error) {
                 FongMiCompatProxyServer.Failure proxyFailure = lease == null
                         ? FongMiCompatProxyServer.Failure.NOT_READY
@@ -370,9 +370,9 @@ final class DexSpiderRegistry {
     }
 
     private Object decodeCurrentPlayback(String raw, boolean refreshRequested,
-            JSONObject siteHeaders, BridgeProviderOwnerRegistry.Binding owner, long expectedEpoch) throws Exception {
+            JSONObject siteHeaders, BridgeProviderOwnerRegistry.Binding owner, long expectedEpoch, String playbackFlag) throws Exception {
         ProviderMediaEpoch.requireCurrent(owner.jarKey, expectedEpoch);
-        Object decoded = decodePlaybackResult(raw, refreshRequested, siteHeaders, owner);
+        Object decoded = decodePlaybackResult(raw, refreshRequested, siteHeaders, owner, playbackFlag);
         // An authorization/config action may run while the provider is awaiting
         // user input. Never stamp its old result with that action's new epoch.
         ProviderMediaEpoch.requireCurrent(owner.jarKey, expectedEpoch);
@@ -427,13 +427,15 @@ final class DexSpiderRegistry {
             String raw,
             boolean refreshPerformed,
             JSONObject siteHeaders,
-            BridgeProviderOwnerRegistry.Binding providerOwner
+            BridgeProviderOwnerRegistry.Binding providerOwner,
+            String playbackFlag
     ) {
         return BridgeMediaSessionRegistry.securePlaybackResult(
                 decodeRawResult(raw),
                 refreshPerformed,
                 siteHeaders,
-                providerOwner
+                providerOwner,
+                playbackFlag
         );
     }
 

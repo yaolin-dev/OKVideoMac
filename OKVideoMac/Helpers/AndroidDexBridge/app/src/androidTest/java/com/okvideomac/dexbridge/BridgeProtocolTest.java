@@ -2140,18 +2140,19 @@ public final class BridgeProtocolTest extends TestCase {
         String raw = "http://127.0.0.1:6677/proxy/play/阿狸/4K  hdr 60FPS.mp4?part=a%2Bb";
         JSONObject secured = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
                 new JSONObject().put("parse", 0).put("url", raw).put("header", new JSONObject().put("Cookie", "private")),
-                false, null, owner);
+                false, null, owner, "阿狸原");
         assertTrue(secured.getString("url").startsWith("http://127.0.0.1:9978/proxy/media/"));
         assertFalse(secured.has("header"));
         BridgeMediaSessionRegistry.Session session = BridgeMediaSessionRegistry.get(secured.getString("mediaSessionID"));
-        assertNotNull(session); assertFalse(session.upstreamURL.contains(" "));
+        assertNotNull(session); assertTrue(session.aliOriginalFileCompatibility); assertFalse(session.upstreamURL.contains(" "));
         assertTrue(session.upstreamURL.contains("%20%20hdr%2060FPS.mp4?part=a%2Bb"));
         assertTrue(LocalCloudFileReader.supports(java.net.URI.create(session.upstreamURL)));
+        assertTrue(BridgeMediaSessionRegistry.withNetworkPolicy(session.id, MediaRequestNetworkPolicy.direct()).aliOriginalFileCompatibility);
         ProviderMediaEpoch.advance(jarKey);
         assertNull(BridgeMediaSessionRegistry.get(session.id));
         String remote = "https://cdn.invalid/a file.mp4?signature=a%2Bb";
         JSONObject direct = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
-                new JSONObject().put("parse", 0).put("url", remote), false, null, owner);
+                new JSONObject().put("parse", 0).put("url", remote), false, null, owner, "阿狸原");
         assertEquals(remote, direct.getString("url")); assertFalse(direct.has("mediaSessionID"));
     }
 
@@ -2184,7 +2185,7 @@ public final class BridgeProtocolTest extends TestCase {
             });
             new Thread(ranges, "local-file-range-fixture").start();
             JSONObject secured = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
-                    new JSONObject().put("parse", 0).put("url", "http://127.0.0.1:6677/proxy/play/原 片.mp4"), false, null, owner);
+                    new JSONObject().put("parse", 0).put("url", "http://127.0.0.1:6677/proxy/play/原 片.mp4"), false, null, owner, "阿狸原");
             for (int offset : new int[]{0, LocalCloudFileReader.BLOCK_BYTES + 31, 0}) {
                 HttpURLConnection connection = (HttpURLConnection) new URL(secured.getString("url")).openConnection();
                 connection.setConnectTimeout(2000); connection.setReadTimeout(5000); connection.setRequestProperty("Range", "bytes=" + offset + "-" + (offset + 16));
@@ -2201,6 +2202,99 @@ public final class BridgeProtocolTest extends TestCase {
             ProviderMediaEpoch.advance(jarKey);
             HttpURLConnection expired = (HttpURLConnection) new URL(secured.getString("url")).openConnection();
             try { assertEquals(410, expired.getResponseCode()); } finally { expired.disconnect(); }
+        }
+    }
+
+    public void testOtherTVBoxLinesPreservePre192URLHandling() throws Exception {
+        BridgeProviderOwnerRegistry.Binding owner = playbackOwner("line-scope", "scope-" + UUID.randomUUID());
+        String raw = "http://127.0.0.1:6677/proxy/play/阿狸/知否 25.mp4?part=a%2Bb";
+        String encoded = "http://127.0.0.1:6677/proxy/play/知否%2025.mp4?part=a%2Bb";
+        String remote = "https://cdn.invalid/file.mp4?signature=a%2Bb";
+        for (String flag : new String[]{"夸父原1", "夸父原2", "夸父智2", "阿狸智", "阿狸原2", "阿里原", "", null}) {
+            JSONObject untouched = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
+                    new JSONObject().put("url", raw).put("header", new JSONObject().put("Cookie", "private")), false, null, owner, flag);
+            assertEquals(raw, untouched.getString("url"));
+            assertTrue(untouched.has("header")); assertFalse(untouched.has("mediaSessionID"));
+            for (Object urls : new Object[]{encoded, new JSONArray().put("quality").put(encoded), new JSONObject().put("values", new JSONArray().put(new JSONObject().put("n", "quality").put("v", encoded)))}) {
+                JSONObject secured = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
+                        new JSONObject().put("url", urls), false, null, owner, flag);
+                BridgeMediaSessionRegistry.Session session = BridgeMediaSessionRegistry.get(secured.getString("mediaSessionID"));
+                assertNotNull(session); assertFalse(session.aliOriginalFileCompatibility);
+                assertEquals(encoded, session.upstreamURL);
+                assertFalse(BridgeMediaSessionRegistry.withNetworkPolicy(session.id, MediaRequestNetworkPolicy.direct()).aliOriginalFileCompatibility);
+            }
+            JSONObject direct = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
+                    new JSONObject().put("url", remote), false, null, owner, flag);
+            assertEquals(remote, direct.getString("url")); assertFalse(direct.has("mediaSessionID"));
+        }
+        JSONObject noOwner = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
+                new JSONObject().put("url", raw), false, null, null, "阿狸原");
+        assertEquals(raw, noOwner.getString("url")); assertFalse(noOwner.has("mediaSessionID"));
+        JSONObject ali = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
+                new JSONObject().put("url", raw), false, null, owner, "阿狸原");
+        try {
+            BridgeMediaSessionRegistry.securePlaybackResult(new JSONObject().put("url", ali.getString("url")), false, null, owner, "夸父原2");
+            fail("Ali compatibility capability must not cross playback lines");
+        } catch (IllegalStateException expected) { }
+    }
+
+    public void testOtherTVBoxLineForwardsOriginalRangeWithoutBoundedReader() throws Exception {
+        ensureBridgeServer();
+        BridgeProviderOwnerRegistry.Binding owner = playbackOwner("original-range", "range-" + UUID.randomUUID());
+        try (ServerSocket provider = new ServerSocket(6677, 4, InetAddress.getByName("127.0.0.1"))) {
+            provider.setSoTimeout(5000);
+            FutureTask<String> range = new FutureTask<>(() -> {
+                try (Socket socket = provider.accept()) {
+                    BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII));
+                    input.readLine(); String line, requested = "";
+                    while ((line = input.readLine()) != null && !line.isEmpty())
+                        if (line.toLowerCase(Locale.ROOT).startsWith("range:")) requested = line.substring(6).trim();
+                    socket.getOutputStream().write(("HTTP/1.1 206 Partial Content\r\nContent-Type: video/mp4\r\nContent-Range: bytes 37-52/1000\r\nContent-Length: 16\r\nConnection: close\r\n\r\n0123456789abcdef").getBytes(StandardCharsets.US_ASCII));
+                    socket.getOutputStream().flush(); return requested;
+                }
+            });
+            new Thread(range, "original-range-fixture").start();
+            JSONObject secured = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
+                    new JSONObject().put("url", "http://127.0.0.1:6677/proxy/play/25.mp4"), false, null, owner, "夸父原2");
+            HttpURLConnection connection = (HttpURLConnection) new URL(secured.getString("url")).openConnection();
+            connection.setConnectTimeout(2000); connection.setReadTimeout(5000); connection.setRequestProperty("Range", "bytes=37-52");
+            try {
+                assertEquals(206, connection.getResponseCode());
+                assertEquals("bytes 37-52/1000", connection.getHeaderField("Content-Range"));
+                try (InputStream body = connection.getInputStream()) {
+                    for (byte value : "0123456789abcdef".getBytes(StandardCharsets.US_ASCII)) assertEquals(value, body.read());
+                    assertEquals(-1, body.read());
+                }
+            } finally { connection.disconnect(); }
+            assertEquals("bytes=37-52", range.get(5, TimeUnit.SECONDS));
+        }
+    }
+
+    public void testDexPlayerFlagScopesCompatibilityOnFreshAndCachedPlayback() throws Exception {
+        DexSpiderRegistry registry = DexSpiderRegistry.get(InstrumentationRegistry.getInstrumentation().getTargetContext());
+        Method invoke = DexSpiderRegistry.class.getDeclaredMethod("invokePlayer", JSONObject.class, Spider.class, JSONArray.class, BridgeProviderOwnerRegistry.Binding.class);
+        invoke.setAccessible(true);
+        String suffix = UUID.randomUUID().toString();
+        JSONObject payload = new JSONObject().put("siteKey", "scope-" + suffix).put("configurationID", suffix)
+                .put("providerOwnerID", suffix).put("jarURL", "https://unit.invalid/" + suffix + ".jar").put("jarMD5", "");
+        BridgeProviderOwnerRegistry.Binding owner = BridgeProviderOwnerRegistry.bind(payload, payload.getString("jarURL"));
+        AtomicInteger calls = new AtomicInteger();
+        String raw = "http://127.0.0.1:6677/proxy/play/阿狸/原 片.mp4";
+        Spider spider = new Spider() {
+            @Override public String playerContent(String flag, String id, java.util.List<String> vipFlags) throws Exception {
+                calls.incrementAndGet(); return new JSONObject().put("parse", 0).put("url", raw).toString();
+            }
+        };
+        for (String flag : new String[]{"阿狸原", "夸父原2"}) {
+            JSONArray args = new JSONArray().put(flag).put("25").put(new JSONArray());
+            int before = calls.get();
+            for (int attempt = 0; attempt < 2; attempt++) {
+                JSONObject result = (JSONObject) invoke.invoke(registry, payload, spider, args, owner);
+                if (flag.equals("阿狸原")) {
+                    assertTrue(BridgeMediaSessionRegistry.get(result.getString("mediaSessionID")).aliOriginalFileCompatibility);
+                } else { assertEquals(raw, result.getString("url")); assertFalse(result.has("mediaSessionID")); }
+            }
+            assertEquals(before + 1, calls.get());
         }
     }
 
