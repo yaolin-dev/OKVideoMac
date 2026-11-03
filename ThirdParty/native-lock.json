@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "release": "OKVideoMac 0.9.1 (190)",
+  "release": "OKVideoMac 0.9.1 (191)",
   "target": {
     "architecture": "arm64",
     "deployment_target": "12.0",

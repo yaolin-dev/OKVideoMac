@@ -314,7 +314,7 @@ struct DetailView: View {
                 state.recordDetailFirstRender(detail)
             }
         }
-        .task(id: "\(state.detailRevision):\(selectedSource?.id ?? "")") {
+        .task(id: "\(state.detailRevision):\(selectedSource?.id ?? ""):\(usesTMDBLayout ? tmdb.season?.seasonNumber ?? -1 : -1)") {
             await prepareSelectedSourceEpisodes()
         }
         .onChange(of: state.detailRevision) { _ in
@@ -885,7 +885,8 @@ struct DetailView: View {
         let snapshot = await EpisodePresentationRepository.shared.snapshot(
             videoID: detail.summary.id,
             source: source,
-            categoryName: detail.summary.categoryName
+            categoryName: detail.summary.categoryName,
+            displaySeason: usesTMDBLayout ? tmdb.season?.seasonNumber : nil
         )
         guard !Task.isCancelled, selectedSource?.id == sourceID else { return }
         preparedPresentations = snapshot.values
@@ -1107,6 +1108,7 @@ private struct EpisodePresentationRepositoryKey: Hashable, Sendable {
     let rulesVersion: Int = PlaybackResourceAnalyzer.rulesVersion
     let localeIdentifier: String = L10n.locale.identifier
     let categoryName: String?
+    let displaySeason: Int?
     let videoID: String
     let sourceID: String
     let episodeCount: Int
@@ -1129,10 +1131,12 @@ actor EpisodePresentationRepository {
     func snapshot(
         videoID: String,
         source: PlaySource,
-        categoryName: String? = nil
+        categoryName: String? = nil,
+        displaySeason: Int? = nil
     ) -> EpisodePresentationSnapshot {
         let key = EpisodePresentationRepositoryKey(
             categoryName: categoryName,
+            displaySeason: displaySeason,
             videoID: videoID,
             sourceID: source.id,
             episodeCount: source.episodes.count,
@@ -1155,7 +1159,7 @@ actor EpisodePresentationRepository {
                 values.map { ($0.id, $0) },
                 uniquingKeysWith: { current, _ in current }
             ),
-            rangeOptions: EpisodeListPresentation.rangeOptions(from: values),
+            rangeOptions: EpisodeListPresentation.rangeOptions(from: values, verifiedSeason: displaySeason),
             playbackOrder: PlayerEpisodeAdvancePolicy.orderedEpisodes(in: source.episodes, categoryName: categoryName),
             versionOrders: PlayerEpisodeAdvancePolicy.versionOrders(in: source.episodes, categoryName: categoryName),
             navigation: PlayerEpisodeNavigationIndex(episodes: source.episodes, categoryName: categoryName)
@@ -1679,9 +1683,9 @@ enum EpisodeListPresentation {
     }
 
     static func rangeOptions(
-        from presentations: [EpisodePresentation]
+        from presentations: [EpisodePresentation], verifiedSeason: Int? = nil
     ) -> [EpisodeRangeOption] {
-        let inferredSeason = inferredFirstSeason(in: presentations)
+        let inferredSeason = verifiedSeason ?? inferredFirstSeason(in: presentations)
         let numbered = presentations
             .filter { $0.episodeNumber != nil }
             .sorted { compare($0, $1, ascending: true, inferredSeason: inferredSeason) }
@@ -1690,13 +1694,18 @@ enum EpisodeListPresentation {
         let seasons = Dictionary(grouping: numbered, by: { $0.seasonNumber ?? inferredSeason ?? -1 })
         return seasons.keys.sorted().flatMap { seasonKey in
             let items = seasons[seasonKey]!
-            return stride(from: 0, to: items.count, by: 20).map { start in
-                let chunk = Array(items[start..<min(start + 20, items.count)])
-                let first = chunk.first!.episodeNumber!, last = chunk.last!.episodeNumber!
+            // All encodes of a logical episode belong to the same range.
+            // A TMDB season affects only these display groups, never the queue.
+            let numbers = Set(items.compactMap(\.episodeNumber)).sorted()
+            return stride(from: 0, to: numbers.count, by: 20).map { start in
+                let chunk = Array(numbers[start..<min(start + 20, numbers.count)])
+                let included = Set(chunk)
+                let first = chunk.first!, last = chunk.last!
                 let title = seasonKey >= 0
                     ? L10n.string("episode.range.season", fallback: "Season %d · Episodes %d–%d", seasonKey, first, last)
                     : L10n.string("episode.range", fallback: "Episodes %d–%d", first, last)
-                return EpisodeRangeOption(id: "\(seasonKey)-\(start)", title: title, episodeIDs: Set(chunk.map(\.id)))
+                return EpisodeRangeOption(id: "\(seasonKey)-\(start)", title: title,
+                    episodeIDs: Set(items.filter { included.contains($0.episodeNumber!) }.map(\.id)))
             }
         }
     }

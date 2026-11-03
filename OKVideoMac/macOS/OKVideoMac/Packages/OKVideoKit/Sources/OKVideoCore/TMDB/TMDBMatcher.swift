@@ -363,10 +363,9 @@ public enum TMDBEpisodeMapper {
     public static func episodes(_ sources: [PlayEpisode], category: String?, season: TMDBSeason) -> [Int: TMDBEpisode] {
         let form = PlaybackContentForm.category(category)
         guard form != .movie && form != .programme else { return [:] }
-        // A verified season supplies context for the shared numeric parser.
-        // Broad filename-family inference is insufficient artwork evidence
-        // for a cut/part label; descriptive prefixes retain the guarded pass below.
-        let parsed = sources.map { PlaybackResourceAnalyzer.analyze($0, categoryName: "电视剧") }
+        // Use the same whole-line numbering evidence as display/navigation.
+        // The verified season adds artwork context, never playback identity.
+        let parsed = PlaybackResourceAnalyzer.analyzeList(sources, categoryName: "电视剧")
         let maximum = season.episodes.map(\.episodeNumber).max() ?? 0
         let ordinary = parsed.filter { $0.role == .main && $0.endEpisode == nil && ($0.season == nil || $0.season == season.seasonNumber) }.compactMap(\.episode)
         let outOfRange = ordinary.filter { $0 > maximum }.count
@@ -385,14 +384,18 @@ public enum TMDBEpisodeMapper {
             let value = parsed[index]
             guard value.role == .main, value.evidence != .conflict, value.endEpisode == nil, value.date == nil,
                   PlaybackResourceAnalyzer.explicitSeasons(in: item.name).allSatisfy({ $0 == season.seasonNumber }),
+                  !PlaybackResourceAnalyzer.isNonVideoResource(item),
                   !["番外", "花絮", "预告", "特别篇", "特辑", "彩蛋", "幕后"].contains(where: item.name.contains) else { continue }
-            let name = PlaybackResourceAnalyzer.compactName(item.name)
+            let name = PlaybackResourceAnalyzer.numberingName(PlaybackResourceAnalyzer.compactName(item.name).precomposedStringWithCompatibilityMapping)
             guard let match = regex.firstMatch(in: name, range: NSRange(name.startIndex..., in: name)),
                   let prefix = Range(match.range(at: 1), in: name), let digits = Range(match.range(at: 2), in: name),
                   let number = Int(name[digits]), number > 0 else { continue }
             groups[String(name[prefix]), default: []].append((index, number))
         }
         for values in groups.values where Set(values.map { $0.1 }).count >= 2 {
+            let numbers = Set(values.map { $0.1 })
+            let outside = numbers.filter { $0 > maximum }.count
+            guard outside < 2 || outside * 4 <= numbers.count else { continue }
             for (index, number) in values {
                 if var episode = season.episodes.first(where: { $0.episodeNumber == number }) { episode.seasonNumber = season.seasonNumber; result[index] = episode }
             }
@@ -409,7 +412,8 @@ public enum TMDBEpisodeMapper {
 
     private static func episode(_ source: PlayEpisode, value: PlaybackResourceSemantics,
                                 season: TMDBSeason, allowExplicitParent: Bool) -> TMDBEpisode? {
-        guard PlaybackResourceAnalyzer.explicitSeasons(in: source.name).allSatisfy({ $0 == season.seasonNumber }),
+        guard !PlaybackResourceAnalyzer.isNonVideoResource(source),
+              PlaybackResourceAnalyzer.explicitSeasons(in: source.name).allSatisfy({ $0 == season.seasonNumber }),
               !["番外", "花絮", "预告", "特别篇", "特辑", "彩蛋", "幕后"].contains(where: source.name.contains) || value.season == 0 else { return nil }
         guard value.evidence != .conflict, value.endEpisode == nil, value.issue == nil, value.date == nil,
               (value.role != .part || allowExplicitParent),

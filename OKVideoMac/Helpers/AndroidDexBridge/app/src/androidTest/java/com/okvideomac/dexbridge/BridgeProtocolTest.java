@@ -2134,6 +2134,25 @@ public final class BridgeProtocolTest extends TestCase {
         );
     }
 
+    public void testProxyOriginPortCheckDoesNotOpenUnscopedMedia() throws Exception {
+        ensureBridgeServer();
+        HttpURLConnection check = (HttpURLConnection) new URL(
+                "http://127.0.0.1:9978/proxy?do=ck").openConnection();
+        check.setConnectTimeout(2000); check.setReadTimeout(2000);
+        assertEquals(200, check.getResponseCode());
+        assertTrue(check.getContentType().startsWith("text/plain"));
+        try (InputStream input = check.getInputStream()) {
+            assertEquals('o', input.read()); assertEquals('k', input.read());
+            assertEquals(-1, input.read());
+        } finally { check.disconnect(); }
+        for (String target : new String[] {"/proxy?do=play", "/proxy?do=ck&url=anything",
+                "/proxy?do=play&do=ck", "/proxy?do=ck&mediaSessionID=missing"}) {
+            assertEquals(410, loopbackStatus(BridgeServer.PORT, "GET", target, null, null));
+        }
+        assertEquals(410, loopbackStatus(BridgeServer.PORT, "POST", "/proxy?do=ck", null, null));
+        assertEquals(410, loopbackStatus(BridgeServer.PORT, "HEAD", "/proxy?do=ck", null, null));
+    }
+
     public void testFongMiCompatibilityProxyUsesSeparateLoopbackPortAndLease()
             throws Exception {
         Context context = InstrumentationRegistry.getInstrumentation()

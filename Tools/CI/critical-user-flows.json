@@ -3,6 +3,8 @@
   "target": "OKVideoMacTests",
   "groups": {
     "logic": [
+      "TMDBNamedFilenameTests/testNamedFilesShareMetadataAcrossVersionsWithoutChangingResourcesOrNavigation",
+      "TMDBNamedFilenameTests/testVerifiedRangeSeasonKeepsExplicitOtherSeasonsSeparate",
       "PlayerEpisodeNavigationTests/testLaterDuplicateDoesNotBlockFourteenToFifteen",
       "PlayerEpisodeNavigationTests/testDuplicateTargetStillCannotBeChosenAutomatically",
       "PlayerEpisodeNavigationTests/testAdjacentGroupsLocalizeAmbiguityInBothDirections",
@@ -148,6 +150,7 @@
       "MixedSeasonProviderNavigationStateTests/testActual37ResourceLineEnablesBothButtonsIncludingEpisode11AndKeepsOriginalSource"
     ],
     "desktop": [
+      "TMDBNamedFilenameTests/testNamedFileDetailRendersMatchedArtSynopsisVersionsAndResourceCount",
       "PlayerPanelDismissalTests/testOutsideClickClosesEachPanelWithoutChangingPlayback",
       "PlayerPanelDismissalTests/testPresentingButtonTogglesAndOtherButtonsSwitchDirectly",
       "PlayerPanelDismissalTests/testInsidePanelNavigationAndCloseStillWork",

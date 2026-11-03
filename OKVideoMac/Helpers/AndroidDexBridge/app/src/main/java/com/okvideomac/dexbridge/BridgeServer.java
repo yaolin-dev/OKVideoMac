@@ -276,6 +276,15 @@ final class BridgeServer {
                 String method = request[0].toUpperCase(Locale.ROOT);
                 String target = request[1];
                 String path = requestPath(target);
+                // ProxyOrigin probes the historical host port before returning
+                // its local media URL. This is a literal, stateless liveness
+                // check only; every media/proxy route below still requires its
+                // exact session owner. Never dispatch this probe to a provider.
+                if (ProxyOriginPortCheck.accepts(method, target)) {
+                    writeBytes(output, 200, "text/plain; charset=utf-8",
+                            "ok".getBytes(StandardCharsets.UTF_8));
+                    return;
+                }
                 if ("GET".equals(method) && "/health".equals(path)) {
                     JSONObject health = new JSONObject();
                     health.put("ok", true);

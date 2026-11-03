@@ -1,6 +1,6 @@
 # OKVideoMac
 
-当前发布候选为 **0.9.1（Build 190）**：包含原始资源历史恢复、TMDB 匹配保留、20 并发搜索与下拉自动加载、EPG 回收及时间解析优化、轻量播放控制、媒体系统代理设置，以及夸克和已适配 CatPaw 源的旧请求取消。详见[发布说明](Docs/RELEASE_NOTES_0.9.1.md)；正式签名、公证与公开状态以发布验证记录为准。
+当前发布候选为 **0.9.1（Build 191）**：包含原始资源历史恢复、TMDB 匹配保留、20 并发搜索与下拉自动加载、EPG 回收及时间解析优化、轻量播放控制、媒体系统代理设置，以及夸克和已适配 CatPaw 源的旧请求取消。详见[发布说明](Docs/RELEASE_NOTES_0.9.1.md)；正式签名、公证与公开状态以发布验证记录为准。
 
 当前稳定版本为 **0.9.0（Build 155）**，包含设置重整、按条件启用 TMDB 详情、DASH、直播预览及播放与稳定性修复。Developer ID、Hardened Runtime、Apple Notarization **Accepted**、staple、Gatekeeper、安装和全部 16 项公开资产核验通过。见[发布说明](Docs/RELEASE_NOTES_0.9.0.md)和[正式验证](Docs/RELEASE_VALIDATION_0.9.0.md)。
 

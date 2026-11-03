@@ -634,3 +634,75 @@ final class UnifiedEpisodeArtworkTests: XCTestCase {
         }
     }
 }
+
+
+final class NamedFilenameArtworkTests: XCTestCase {
+    private func season() throws -> TMDBSeason {
+        let data = try JSONSerialization.data(withJSONObject: ["seasonNumber": 1, "episodes": (1...38).map {
+            ["id": 1000 + $0, "seasonNumber": 1, "episodeNumber": $0, "name": "剧情\($0)",
+             "stillPath": "/still-\($0).jpg", "overview": "本集简介\($0)"] as [String: Any]
+        }])
+        return try JSONDecoder().decode(TMDBSeason.self, from: data)
+    }
+    private func files(_ names: [String]) -> [PlayEpisode] {
+        names.enumerated().map { .init(name: $0.element, url: "opaque:resource:\($0.offset)", referenceIdentity: "file-\($0.offset)") }
+    }
+
+    func testScreenshotNamedQualityFilesMapWithOtherSeasonOneEncodesAndKeepOriginalIdentities() throws {
+        let names = (1...38).map { String(format: "[1.37GB] W我是XJ WSXJ %02d 4K.mkv", $0) }
+            + (1...31).map { String(format: "我是刑警 S01E%02d 1080p.mkv", $0) }
+        let entries = files(names)
+        let originalIDs = entries.map(\.stableIdentity)
+        let local = PlaybackResourceAnalyzer.analyzeList(entries, categoryName: "剧情 犯罪")
+        let mapped = TMDBEpisodeMapper.episodes(entries, category: "剧情 犯罪", season: try season())
+        XCTAssertEqual(mapped.count, 69)
+        for index in entries.indices {
+            XCTAssertEqual(mapped[index]?.episodeNumber, local[index].episode)
+            XCTAssertNotNil(mapped[index]?.stillPath)
+            XCTAssertNotNil(mapped[index]?.overview)
+        }
+        XCTAssertEqual(mapped[0], mapped[38], "Two encodes share metadata, never resource identity")
+        XCTAssertNotEqual(entries[0].stableIdentity, entries[38].stableIdentity)
+        XCTAssertEqual(entries.map(\.stableIdentity), originalIDs)
+        XCTAssertEqual(entries.map(\.name), names)
+        XCTAssertNil(PlaybackResourceAnalyzer.trustedEpisode(entries[0], categoryName: "剧情 犯罪"))
+        let reordered = Array(entries.reversed().filter { ![5, 18].contains(local[entries.firstIndex(of: $0)!].episode ?? 0) })
+        let again = TMDBEpisodeMapper.episodes(reordered, category: nil, season: try season())
+        for (index, item) in reordered.enumerated() {
+            XCTAssertEqual(again[index], mapped[entries.firstIndex(of: item)!])
+        }
+    }
+
+    func testSharedTechnicalCleanupHandlesCodecsChangingPrefixesAndRepeatedEncodes() throws {
+        for names in [
+            ["W我是XJ WSXJ 01 4K.mkv", "W我是XJ WSXJ 02 4K.mkv", "W我是XJ WSXJ 03 4K.mkv"],
+            ["A.2024.01.1080p.H265.mkv", "B.2024.02.1080p.H264.mkv", "C.2024.03.1080p.60fps.10bit.mp4"],
+            ["W我是XJ WSXJ 01 4K.mkv", "W我是XJ WSXJ 02 4K.mkv", "W我是XJ WSXJ 03 4K.mkv", "W我是XJ WSXJ 01 4K.mkv"]
+        ] {
+            let entries = files(names)
+            let mapped = TMDBEpisodeMapper.episodes(entries, category: nil, season: try season())
+            XCTAssertEqual(entries.indices.map { mapped[$0]?.episodeNumber }, names.count == 3 ? [1, 2, 3] : [1, 2, 3, 1], names.description)
+        }
+    }
+
+    func testNamedInferenceRejectsPartsNoiseWrongSeasonsAndAlternateNumbering() throws {
+        let safe = (1...3).map { String(format: "W我是XJ WSXJ %02d 4K.mkv", $0) }
+        for label in ["W我是XJ WSXJ 01 上.mkv", "W我是XJ WSXJ 01-02 4K.mkv", "W我是XJ WSXJ 01 5.1.mkv",
+                      "W我是XJ WSXJ 2024.mkv", "W我是XJ WSXJ 2024-01-01.mkv", "花絮 W我是XJ WSXJ 01 4K.mkv",
+                      "W我是XJ S02E01 4K.mkv", "W我是XJ WSXJ 01 4K.mp3", "W我是XJ E01.srt", "S01E01 S02E02.mkv"] {
+            let mapped = TMDBEpisodeMapper.episodes(files(safe + [label]), category: nil, season: try season())
+            XCTAssertNil(mapped[3], label)
+            XCTAssertEqual(mapped.count, 3, "One bad resource cannot hide healthy siblings: \(label)")
+        }
+        for suffix in [" 上.mkv", " 下.mkv", " 花絮.mkv", ".srt", ".mp3"] {
+            let entries = files((1...3).map { "W我是XJ WSXJ \($0)" + suffix })
+            XCTAssertTrue(TMDBEpisodeMapper.episodes(entries, category: nil, season: try season()).isEmpty)
+        }
+        let alternate = (1...76).map { "W我是XJ WSXJ \($0) 4K.mkv" }
+        XCTAssertTrue(TMDBEpisodeMapper.episodes(files(alternate), category: nil, season: try season()).isEmpty)
+        XCTAssertTrue(TMDBEpisodeMapper.episodes(files(alternate + alternate), category: nil, season: try season()).isEmpty)
+        for category in ["电影", "综艺"] {
+            XCTAssertTrue(TMDBEpisodeMapper.episodes(files(safe), category: category, season: try season()).isEmpty)
+        }
+    }
+}

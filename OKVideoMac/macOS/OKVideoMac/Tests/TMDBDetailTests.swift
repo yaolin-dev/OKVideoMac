@@ -2366,3 +2366,113 @@ extension TMDBDetailTests {
         XCTAssertEqual(model.binding?.manual, true)
     }
 }
+
+@MainActor final class TMDBNamedFilenameTests: XCTestCase {
+    private func fixture() async throws -> (TMDBDetailModel, VideoDetail) {
+        let names = (1...38).map { String(format: "[1.37GB] W我是XJ WSXJ %02d 4K.mkv", $0) }
+            + (1...31).map { String(format: "我是刑警 S01E%02d 1080p.mkv", $0) }
+        let source = PlaySource(name: "夸父原1", episodes: names.enumerated().map {
+            .init(name: $0.element, url: "opaque:file:\($0.offset)", referenceIdentity: "original-file-\($0.offset)")
+        })
+        let decoder = JSONDecoder()
+        let work = try decoder.decode(TMDBWork.self, from: JSONSerialization.data(withJSONObject: [
+            "id": 233971, "name": "我是刑警", "firstAirDate": "2024-11-27", "mediaType": "tv",
+            "numberOfSeasons": 1, "seasons": [["seasonNumber": 1, "episodeCount": 38]]
+        ]))
+        let season = try decoder.decode(TMDBSeason.self, from: JSONSerialization.data(withJSONObject: [
+            "seasonNumber": 1, "episodes": (1...38).map {
+                ["id": $0, "seasonNumber": 1, "episodeNumber": $0, "name": "分集标题\($0)", "runtime": 45,
+                 "overview": "第\($0)集的简介已按原始文件集号匹配。", "stillPath": "/s1e\($0).jpg"] as [String: Any]
+            }
+        ]))
+        let detail = VideoDetail(summary: .init(siteKey: "fixture", siteName: "Fixture", videoID: "named-files",
+            title: "我是刑警", year: "2024", categoryName: "电视剧"), playSources: [source])
+        let model = TMDBDetailModel()
+        await model.load(repository: TMDBRepository(client: TMDBRenderService(work: work, episodes: season)), key: "named-files", input: .init(detail: detail))
+        _ = try XCTUnwrap(model.selection)
+        await model.loadSeason(source: source, category: detail.summary.categoryName)
+        return (model, detail)
+    }
+
+    func testNamedFilesShareMetadataAcrossVersionsWithoutChangingResourcesOrNavigation() async throws {
+        let (model, detail) = try await fixture()
+        defer { model.cancel() }
+        let source = detail.playSources[0]
+        let repository = EpisodePresentationRepository()
+        let original = await repository.snapshot(videoID: "named", source: source, categoryName: detail.summary.categoryName)
+        let displayed = await repository.snapshot(videoID: "named", source: source, categoryName: detail.summary.categoryName, displaySeason: 1)
+        let mapped = model.episodeMapping(source: source, category: detail.summary.categoryName)
+        XCTAssertEqual(mapped.count, 69)
+        XCTAssertFalse(model.episodeMappingComputedOnMain)
+        for item in displayed.values {
+            XCTAssertEqual(mapped[item.sourceIndex]?.episodeNumber, item.episodeNumber)
+            let info = TMDBEpisodeInformation.make(detail: detail, work: model.selection?.work, season: model.season,
+                source: source, episode: item.episode, mapping: .prepared(mapped[item.sourceIndex]))
+            XCTAssertTrue(info.hasOverview)
+            XCTAssertTrue(info.title.contains("分集标题"))
+            XCTAssertTrue(info.facts.contains("45"))
+        }
+        let fourK = try XCTUnwrap(displayed.values.first { $0.sourceIndex == 0 })
+        let fullHD = try XCTUnwrap(displayed.values.first { $0.sourceIndex == 38 })
+        XCTAssertTrue(TMDBEpisodeCards.title(fourK, mapped: mapped[0]).contains("4K"))
+        XCTAssertTrue(TMDBEpisodeCards.title(fullHD, mapped: mapped[38]).contains("1080p"))
+        XCTAssertEqual(mapped[0], mapped[38])
+        XCTAssertNotEqual(fourK.id, fullHD.id)
+        XCTAssertEqual(original.values, displayed.values, "TMDB range context never modifies resource metadata")
+        XCTAssertEqual(original.playbackOrder, displayed.playbackOrder)
+        XCTAssertEqual(original.versionOrders, displayed.versionOrders)
+        XCTAssertEqual(displayed.rangeOptions.count, 2)
+        XCTAssertEqual(displayed.rangeOptions.map(\.episodeIDs.count), [40, 29])
+        XCTAssertTrue(displayed.rangeOptions[0].title.contains("1–20"))
+        XCTAssertTrue(displayed.rangeOptions[1].title.contains("21–38"))
+        XCTAssertEqual(displayed.rangeOptions.reduce(into: Set<String>()) { $0.formUnion($1.episodeIDs) }, Set(source.episodes.map(\.id)))
+        XCTAssertTrue(displayed.rangeOptions[0].episodeIDs.isDisjoint(with: displayed.rangeOptions[1].episodeIDs))
+        let restored = await repository.snapshot(videoID: "named", source: source, categoryName: detail.summary.categoryName)
+        XCTAssertEqual(restored.rangeOptions, original.rangeOptions, "Confirmed season is an explicit cache input")
+    }
+
+    func testVerifiedRangeSeasonKeepsExplicitOtherSeasonsSeparate() {
+        let files = (1...25).map { PlayEpisode(name: "第\($0)集", url: "unknown:\($0)") }
+            + (1...25).map { PlayEpisode(name: "S02E\($0)", url: "season-two:\($0)") }
+        let values = EpisodeListPresentation.presentations(from: files, query: "", sortOrder: .episodeAscending)
+        let ranges = EpisodeListPresentation.rangeOptions(from: values, verifiedSeason: 1)
+        XCTAssertEqual(ranges.count, 4)
+        for range in ranges {
+            let seasons = Set(values.filter { range.episodeIDs.contains($0.id) }.map { $0.seasonNumber ?? 1 })
+            XCTAssertEqual(seasons.count, 1)
+        }
+    }
+
+    func testNamedFileDetailRendersMatchedArtSynopsisVersionsAndResourceCount() async throws {
+        let (model, detail) = try await fixture()
+        defer { model.cancel() }
+        let output = URL(fileURLWithPath: "/private/tmp/OKVideoMac-TMDB191-Visuals")
+        try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 320, pixelsHigh: 180,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        for y in 0..<180 { for x in 0..<320 { bitmap.setColor(NSColor(deviceRed: 0.12 + Double(x)/1600,
+            green: 0.25 + Double(y)/900, blue: 0.42, alpha: 1), atX: x, y: y) } }
+        let probe = TMDBSeasonImageProbe(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])))
+        let images = ImageRepository(dataRepository: try ImageDataRepository(cacheDirectory: output.appendingPathComponent(UUID().uuidString), httpClient: probe))
+        for episode in try XCTUnwrap(model.season).episodes {
+            let url = try XCTUnwrap(model.imageURL(episode.stillPath, kind: .still))
+            _ = try await images.posterImage(for: .init(url: url, pixels: 320))
+        }
+        let paths = await probe.paths
+        XCTAssertTrue(paths.contains { $0.hasSuffix("/s1e1.jpg") })
+        let state = AppState(environment: nil)
+        let host = NSHostingView(rootView: DetailView(detail: detail, metadata: model).environmentObject(state).environment(\.imageRepository, images))
+        let window = NSWindow(contentRect: .init(x: 0, y: 0, width: 1200, height: 960), styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host
+        defer { window.close() }
+        for width in [1200.0, 760.0] {
+            window.setContentSize(.init(width: width, height: 960))
+            try await Task.sleep(nanoseconds: 350_000_000)
+            host.layoutSubtreeIfNeeded(); host.displayIfNeeded()
+            XCTAssertGreaterThan(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? TMDBEpisodeActivationControl }.count, 0)
+            let rendered = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+            host.cacheDisplay(in: host.bounds, to: rendered)
+            try XCTUnwrap(rendered.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent("named-files-\(Int(width)).png"))
+        }
+    }
+}

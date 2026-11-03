@@ -462,7 +462,9 @@ struct TMDBEpisodeCards: View {
             return TMDBEpisodeTitle.compose(original, episode: mapped)
         }
         let short = L10n.string("tmdb.episode.number", fallback: "Episode %d", number)
-        return TMDBEpisodeTitle.compose(short, episode: mapped)
+        let labels = PlaybackResourceAnalyzer.versions(item.originalName.precomposedStringWithCompatibilityMapping)
+        let prefix = ([short] + labels).joined(separator: " · ")
+        return TMDBEpisodeTitle.compose(prefix, episode: mapped)
     }
     static func sourceName(_ item: EpisodePresentation) -> String {
         let name = item.originalName.precomposedStringWithCompatibilityMapping
@@ -484,7 +486,7 @@ struct TMDBEpisodeCards: View {
     @StateObject private var keyboard = TMDBEpisodeKeyboardController()
     var body: some View {
         let mapping = metadata.episodeMapping(source: .init(name: sourceName, episodes: sourceEpisodes, referenceIdentity: sourceReferenceIdentity), category: category)
-        TMDBHorizontalShelf(count: episodes.count, cardWidth: 160, height: 170, identifier: "tmdb.episodes", contentInset: 8, revealIndex: episodes.firstIndex(where: { $0.id == selectedID }), heading: metadata.season.map { L10n.string("tmdb.season.number", fallback: "Season %d", $0.seasonNumber) } ?? (metadata.selection?.reference.type == .tv || PlaybackContentForm.category(category) == .series
+        TMDBHorizontalShelf(count: episodes.count, cardWidth: 160, height: 170, identifier: "tmdb.episodes", contentInset: 8, revealIndex: episodes.firstIndex(where: { $0.id == selectedID }), countLabel: L10n.string("tmdb.resources.count", fallback: "%d resources", episodes.count), heading: metadata.season.map { L10n.string("tmdb.season.number", fallback: "Season %d", $0.seasonNumber) } ?? (metadata.selection?.reference.type == .tv || PlaybackContentForm.category(category) == .series
             ? L10n.string("detail.episodes", fallback: "Episodes") : L10n.string("detail.playable-resources", fallback: "Playable Resources"))) { index in
             let item = episodes[index], mapped = mapping[item.sourceIndex]
             TMDBEpisodeCard(item: item, mapped: mapped, stillURL: metadata.imageURL(mapped?.stillPath, kind: .still),
@@ -698,6 +700,7 @@ struct TMDBHorizontalShelf<Content: View>: View {
     let identifier: String
     var contentInset: CGFloat = 4
     var revealIndex: Int? = nil
+    var countLabel: String? = nil
     var heading: String? = nil
     @ViewBuilder let content: (Int) -> Content
     @StateObject private var scrolling = TMDBShelfScrollController()
@@ -705,7 +708,7 @@ struct TMDBHorizontalShelf<Content: View>: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
-                if let heading { Text(heading).font(.system(size: 15, weight: .semibold)); Text(String(count)).font(.caption).foregroundStyle(.secondary) }
+                if let heading { Text(heading).font(.system(size: 15, weight: .semibold)); Text(countLabel ?? String(count)).font(.caption).foregroundStyle(.secondary) }
                 Spacer(minLength: 0)
                 pageButton(forward: false, disabled: !scrolling.canGoBack)
                 pageButton(forward: true, disabled: !scrolling.canGoForward)

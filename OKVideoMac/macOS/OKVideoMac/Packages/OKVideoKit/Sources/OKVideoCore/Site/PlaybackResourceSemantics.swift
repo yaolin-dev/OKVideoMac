@@ -56,7 +56,7 @@ public struct PlaybackResourceSemantics: Equatable, Sendable {
 /// Bare numbers do not establish identity. A verified numbered-file family
 /// may supply local queue context without changing persistent identities.
 public enum PlaybackResourceAnalyzer {
-    public static let rulesVersion = 4
+    public static let rulesVersion = 5
     private static let number = "[0-9零〇一二两三四五六七八九十百千万]+"
 
     /// Explicit season markers only; sequel numbers and bare episode numbers
@@ -95,7 +95,7 @@ public enum PlaybackResourceAnalyzer {
         let bonus = ["番外", "花絮", "预告", "特别篇", "特辑", "彩蛋", "幕后"].contains(where: name.contains)
             || match(#"(?i)(?:^|[^A-Z0-9])(?:SP|OVA)(?:[ ._-]*[0-9]+)?(?:[^A-Z0-9]|$)"#, name) != nil
         if bonus { result.role = .bonus }
-        else if match(#"(?i)(上[部篇集]|下[部篇集]|中[部篇集]|(?:^|[^A-Z])part[ ._-]*[0-9]+)"#, name) != nil { result.role = .part }
+        else if match(#"(?i)(上[部篇集]|下[部篇集]|中[部篇集]|(?:^|[ ._-])[上中下](?=$|[ ._-])|(?:^|[^A-Z])part[ ._-]*[0-9]+)"#, name) != nil { result.role = .part }
 
         // Provider metadata survives a descriptive title without episode tokens.
         if form == .series, let episode = metadata?.episode, valid(episode),
@@ -229,6 +229,21 @@ public enum PlaybackResourceAnalyzer {
     }
 
     private static func numberedFileNumber(_ name: String) -> Int? {
+        // A cut label with a bare number may number segments of an alternate
+        // edit. Only explicit/provider episode metadata can identify its parent.
+        guard !["导演版", "剪辑版", "加长版", "删减版"].contains(where: name.contains) else { return nil }
+        let text = numberingName(name)
+        // Exactly one remaining numeric token: no ranges, part numbers,
+        // channel counts, sizes or conflicting episode hints.
+        let tokens = captures(#"([0-9]+)"#, text)
+        guard tokens.count == 1, let token = tokens.first?[0], token.count <= 3,
+              let number = Int(token), valid(number) else { return nil }
+        return number
+    }
+
+    /// Shared technical-label cleanup for local list inference and the guarded
+    /// same-prefix TMDB fallback. This is never a persistent identity key.
+    static func numberingName(_ name: String) -> String {
         var text = removingTechnicalLabels(name)
         for pattern in [
             #"(?i)(?<![A-Z0-9])(?:[HX][ ._-]?26[45]|AV1|[0-9]+(?:\.[0-9]+)?FPS|[0-9]+BIT)(?![A-Z0-9])"#,
@@ -236,12 +251,8 @@ public enum PlaybackResourceAnalyzer {
         ] {
             text = text.replacingOccurrences(of: pattern, with: " ", options: .regularExpression)
         }
-        // Exactly one remaining numeric token: no ranges, part numbers,
-        // channel counts, sizes or conflicting episode hints.
-        let tokens = captures(#"([0-9]+)"#, text)
-        guard tokens.count == 1, let token = tokens.first?[0], token.count <= 3,
-              let number = Int(token), valid(number) else { return nil }
-        return number
+        return text.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
     }
 
     private static func removingTechnicalLabels(_ name: String) -> String {

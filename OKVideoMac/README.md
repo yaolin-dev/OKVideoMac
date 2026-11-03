@@ -1,6 +1,6 @@
 # OKVideoMac
 
-- 当前发布候选：0.9.1（Build 190），仅本地验收，尚未公开发布。
+- 当前发布候选：0.9.1（Build 191），仅本地验收，尚未公开发布。
 - 目标 tag：`v0.9.1`，尚未创建；正式源码与产物以干净 main 提交及 source release index 绑定。
 - 本地 source release index：`OKVideoMac-0.9.1-build190-SOURCE_RELEASE_INDEX.json`。
 - 本轮说明见[发布说明](../Docs/RELEASE_NOTES_0.9.1.md)和[验收记录](../Docs/RELEASE_READINESS_0.9.1.md)。
