@@ -6241,8 +6241,8 @@ actor AndroidRuntimeStartupSingleFlight {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.56"
-    static let bridgeVersionCode = 68
+    static let bridgeVersion = "0.3.57"
+    static let bridgeVersionCode = 69
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"

@@ -1381,6 +1381,27 @@ final class BridgeServer {
             writeJSON(output, 200, MediaRangeAudit.run(session, forwarded, providerProxy == null));
             return;
         }
+        if (!dashChild && session.owner != null && LocalCloudFileReader.supports(requireSessionMediaURI(upstreamURL))) {
+            lifetime.checkConnected();
+            final LocalCloudFileReader.Opened opened;
+            try {
+                opened = session.localFileReader(forwarded).open(range);
+            } catch (LocalCloudFileReader.Unsatisfiable invalid) {
+                writeBytes(output, 416, "text/plain", new byte[0]);
+                return;
+            }
+            Map<String, String> responseHeaders = new LinkedHashMap<>();
+            responseHeaders.put("Accept-Ranges", "bytes");
+            responseHeaders.put("Content-Range", "bytes " + opened.start + "-" + opened.end + "/" + opened.total);
+            Log.i(TAG, "LocalFileRange request=" + requestID + " session=" + shortHash(session.id)
+                    + " range=" + safeByteMetadata(range) + " blockBytes=" + LocalCloudFileReader.BLOCK_BYTES);
+            MEDIA_READ_REQUEST.set(requestID);
+            try {
+                writeProxy(output, new Object[]{range == null ? 200 : 206, opened.mime,
+                        session.guardStream(opened.body), responseHeaders}, headersOnly);
+            } finally { MEDIA_READ_REQUEST.remove(); }
+            return;
+        }
         if (providerProxy != null) {
             if (session.owner == null) {
                 writeJSON(

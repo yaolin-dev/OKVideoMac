@@ -2134,6 +2134,76 @@ public final class BridgeProtocolTest extends TestCase {
         );
     }
 
+    public void testUnescapedCloudFileNameGetsOwnedCapabilityAndRetiresOnSwitch() throws Exception {
+        String jarKey = "local-file-encoding-" + UUID.randomUUID();
+        BridgeProviderOwnerRegistry.Binding owner = playbackOwner("local-file", jarKey);
+        String raw = "http://127.0.0.1:6677/proxy/play/阿狸/4K  hdr 60FPS.mp4?part=a%2Bb";
+        JSONObject secured = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
+                new JSONObject().put("parse", 0).put("url", raw).put("header", new JSONObject().put("Cookie", "private")),
+                false, null, owner);
+        assertTrue(secured.getString("url").startsWith("http://127.0.0.1:9978/proxy/media/"));
+        assertFalse(secured.has("header"));
+        BridgeMediaSessionRegistry.Session session = BridgeMediaSessionRegistry.get(secured.getString("mediaSessionID"));
+        assertNotNull(session); assertFalse(session.upstreamURL.contains(" "));
+        assertTrue(session.upstreamURL.contains("%20%20hdr%2060FPS.mp4?part=a%2Bb"));
+        assertTrue(LocalCloudFileReader.supports(java.net.URI.create(session.upstreamURL)));
+        ProviderMediaEpoch.advance(jarKey);
+        assertNull(BridgeMediaSessionRegistry.get(session.id));
+        String remote = "https://cdn.invalid/a file.mp4?signature=a%2Bb";
+        JSONObject direct = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
+                new JSONObject().put("parse", 0).put("url", remote), false, null, owner);
+        assertEquals(remote, direct.getString("url")); assertFalse(direct.has("mediaSessionID"));
+    }
+
+    public void testOwnedLegacyFileBridgeReadsWholeRangesAndReusesCachedBytes() throws Exception {
+        ensureBridgeServer();
+        String jarKey = "local-file-http-" + UUID.randomUUID();
+        BridgeProviderOwnerRegistry.Binding owner = playbackOwner("local-file-http", jarKey);
+        byte[] file = new byte[LocalCloudFileReader.BLOCK_BYTES + 123];
+        for (int i = 0; i < file.length; i++) file[i] = (byte) ('a' + i % 23);
+        try (ServerSocket provider = new ServerSocket(6677, 4, InetAddress.getByName("127.0.0.1"))) {
+            provider.setSoTimeout(8000);
+            FutureTask<List<String>> ranges = new FutureTask<>(() -> {
+                List<String> requests = new ArrayList<>();
+                for (int n = 0; n < 2; n++) try (Socket socket = provider.accept()) {
+                    BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII));
+                    assertTrue(in.readLine().contains("%20"));
+                    String line, range = "";
+                    while ((line = in.readLine()) != null && !line.isEmpty()) if (line.toLowerCase(Locale.ROOT).startsWith("range:")) range = line.substring(6).trim();
+                    requests.add(range); String[] parts = range.substring(6).split("-", -1);
+                    int start = Integer.parseInt(parts[0]), end = Math.min(file.length - 1, Integer.parseInt(parts[1]));
+                    OutputStream out = socket.getOutputStream();
+                    String headers = "HTTP/1.1 " + (start == 0 ? "200 OK" : "206 Partial Content")
+                            + "\r\nContent-Type: application/oct-stream\r\nContent-Range: bytes " + start + "-" + end + "/" + file.length
+                            + "\r\nContent-Length: " + (file.length - start) + "\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+                    out.write(headers.getBytes(StandardCharsets.US_ASCII));
+                    out.write((Integer.toHexString(end - start + 1) + "\r\n").getBytes(StandardCharsets.US_ASCII));
+                    out.write(file, start, end - start + 1); out.write("\r\n0\r\n\r\n".getBytes(StandardCharsets.US_ASCII)); out.flush();
+                }
+                return requests;
+            });
+            new Thread(ranges, "local-file-range-fixture").start();
+            JSONObject secured = (JSONObject) BridgeMediaSessionRegistry.securePlaybackResult(
+                    new JSONObject().put("parse", 0).put("url", "http://127.0.0.1:6677/proxy/play/原 片.mp4"), false, null, owner);
+            for (int offset : new int[]{0, LocalCloudFileReader.BLOCK_BYTES + 31, 0}) {
+                HttpURLConnection connection = (HttpURLConnection) new URL(secured.getString("url")).openConnection();
+                connection.setConnectTimeout(2000); connection.setReadTimeout(5000); connection.setRequestProperty("Range", "bytes=" + offset + "-" + (offset + 16));
+                try {
+                    assertEquals(206, connection.getResponseCode());
+                    assertEquals("bytes " + offset + "-" + (offset + 16) + "/" + file.length, connection.getHeaderField("Content-Range"));
+                    try (InputStream body = connection.getInputStream()) {
+                        for (int j = 0; j < 17; j++) assertEquals(file[offset + j] & 255, body.read());
+                        assertEquals(-1, body.read());
+                    }
+                } finally { connection.disconnect(); }
+            }
+            assertEquals(2, ranges.get(8, TimeUnit.SECONDS).size());
+            ProviderMediaEpoch.advance(jarKey);
+            HttpURLConnection expired = (HttpURLConnection) new URL(secured.getString("url")).openConnection();
+            try { assertEquals(410, expired.getResponseCode()); } finally { expired.disconnect(); }
+        }
+    }
+
     public void testProxyOriginPortCheckDoesNotOpenUnscopedMedia() throws Exception {
         ensureBridgeServer();
         HttpURLConnection check = (HttpURLConnection) new URL(

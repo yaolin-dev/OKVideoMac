@@ -2,6 +2,7 @@ package com.okvideomac.dexbridge;
 
 import org.json.JSONArray;
 import org.json.JSONObject;
+import okhttp3.HttpUrl;
 
 import java.net.URI;
 import java.nio.charset.StandardCharsets;
@@ -226,7 +227,7 @@ final class BridgeMediaSessionRegistry {
         }
         prune();
         String id = UUID.randomUUID().toString();
-        Session session = new Session(id, raw.trim(), headers, owner);
+        Session session = new Session(id, upstream.toASCIIString(), headers, owner);
         SESSIONS.put(id, session);
         return new SecuredURL(
                 "http://127.0.0.1:" + BridgeServer.PORT
@@ -283,11 +284,16 @@ final class BridgeMediaSessionRegistry {
 
     private static URI httpURI(String raw) {
         if (raw == null || raw.trim().isEmpty()) return null;
+        if (raw.indexOf('\r') >= 0 || raw.indexOf('\n') >= 0 || raw.indexOf('\t') >= 0) return null;
         try {
             URI uri = URI.create(raw.trim());
             return isHTTP(uri) ? uri : null;
         } catch (Throwable ignored) {
-            return null;
+            // Cloud file names may contain literal spaces. They still need
+            // an owner/epoch-bound capability before Swift encodes the URL.
+            // Remote signed URLs are returned verbatim by secureURL above.
+            HttpUrl parsed = HttpUrl.parse(raw.trim());
+            return parsed == null ? null : parsed.uri();
         }
     }
 
@@ -474,6 +480,7 @@ final class BridgeMediaSessionRegistry {
         // header revision. It is neither a URL cache nor a permanent identity.
         VirtualMediaRange virtualRange;
         boolean virtualRangeProbeAttempted;
+        LocalCloudFileReader localCloudFileReader;
         final long createdAt = System.currentTimeMillis();
         volatile long expiresAt = createdAt + SESSION_TTL_MS;
 
@@ -526,11 +533,21 @@ final class BridgeMediaSessionRegistry {
                 dashResourceIDs.clear();
                 virtualRange = null;
                 virtualRangeProbeAttempted = false;
+                localCloudFileReader = null;
             }
         }
 
         synchronized Map<String, String> headerSnapshot() {
             return new LinkedHashMap<>(headers);
+        }
+
+        synchronized LocalCloudFileReader localFileReader(Map<String, String> requestHeaders) {
+            if (localCloudFileReader == null) {
+                String fingerprint = upstreamFingerprint;
+                localCloudFileReader = new LocalCloudFileReader(URI.create(upstreamURL), requestHeaders,
+                        () -> isCurrent() && fingerprint.equals(upstreamFingerprint));
+            }
+            return localCloudFileReader;
         }
 
         synchronized String registerDashResource(List<String> upstreams, String fingerprint) throws java.io.IOException {
