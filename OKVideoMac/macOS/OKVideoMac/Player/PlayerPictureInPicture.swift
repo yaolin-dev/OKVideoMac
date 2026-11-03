@@ -207,18 +207,22 @@ final class PlayerPictureInPictureCoordinator: ObservableObject {
 
 struct PlayerPictureInPictureButton: View {
     @ObservedObject var coordinator: PlayerPictureInPictureCoordinator
+    private var isDisabled: Bool {
+        coordinator.isTransitioning || (!coordinator.isPresented && !coordinator.canEnter)
+    }
     var body: some View {
         if coordinator.isAvailable {
             Button { coordinator.toggle() } label: {
                 Image(systemName: coordinator.isPresented ? "pip.exit" : "pip.enter")
                     .font(.system(size: 18, weight: .medium)).frame(width: 38, height: 38)
                     .contentShape(Rectangle())
+                    .modifier(PlayerControlHoverEffect(enabled: !isDisabled))
             }
             .buttonStyle(.plain)
-            .disabled(coordinator.isTransitioning || (!coordinator.isPresented && !coordinator.canEnter))
+            .disabled(isDisabled)
             .accessibilityIdentifier("player.picture-in-picture")
             .accessibilityLabel(coordinator.buttonTitle)
-            .help(coordinator.buttonTitle)
+            .playerControlHelp(coordinator.buttonTitle)
         }
     }
 }

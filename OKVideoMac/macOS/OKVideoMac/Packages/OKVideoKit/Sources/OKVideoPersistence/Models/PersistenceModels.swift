@@ -216,12 +216,13 @@ public struct HistoryNavigationEpisode: Codable, Equatable, Sendable {
 /// Runtime episode URLs, signed media URLs, Cookies, Authorization values and
 /// local proxy capabilities are never representable here.
 public struct HistoryNavigationRecipe: Codable, Equatable, Sendable {
-    public static let currentVersion = 4
+    public static let currentVersion = 5
 
     public var version: Int
     public var configurationID: UUID
     public var siteKey: String
     public var detailID: String
+    public var detailRequestID: String?
     public var source: HistoryNavigationSource
     public var episode: HistoryNavigationEpisode
     public var resumePosition: TimeInterval
@@ -231,6 +232,7 @@ public struct HistoryNavigationRecipe: Codable, Equatable, Sendable {
         configurationID: UUID,
         siteKey: String,
         detailID: String,
+        detailRequestID: String? = nil,
         source: HistoryNavigationSource,
         episode: HistoryNavigationEpisode,
         resumePosition: TimeInterval = 0
@@ -239,6 +241,7 @@ public struct HistoryNavigationRecipe: Codable, Equatable, Sendable {
         self.configurationID = configurationID
         self.siteKey = siteKey
         self.detailID = detailID
+        self.detailRequestID = detailRequestID
         self.source = source
         self.episode = episode
         self.resumePosition = max(0, resumePosition)
@@ -268,6 +271,7 @@ public extension HistoryNavigationRecipe {
             configurationID: configurationID,
             siteKey: siteKey,
             detailID: detailID,
+            detailRequestID: detailRequestID.flatMap { FavoritePersistencePolicy.isSafeLocator($0) ? $0 : nil },
             source: HistoryNavigationSource(
                 providerStableID: sourceStableID,
                 flag: sourceFlag,
@@ -377,6 +381,15 @@ public extension HistoryPlaybackReference {
 }
 
 public struct HistoryRecord: Codable, Equatable, Identifiable, Sendable {
+    /// Keep the history primary key stable; only the navigation locator changes.
+    /// Never borrow a locator from another configuration or site.
+    public var navigationDetailID: String {
+        guard let recipe = playbackReference?.navigationRecipe,
+              recipe.configurationID == configurationID, recipe.siteKey == siteKey else { return videoID }
+        if let locator = recipe.detailRequestID, FavoritePersistencePolicy.isSafeLocator(locator) { return locator }
+        return recipe.detailID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? videoID : recipe.detailID
+    }
+
     public var id: String {
         "\(configurationID?.uuidString.lowercased() ?? "legacy")::\(siteKey)::\(videoID)::\(sourceKey)"
     }

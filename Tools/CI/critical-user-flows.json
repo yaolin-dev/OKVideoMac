@@ -104,7 +104,20 @@
       "OKVideoMacTests/testAndroidBridgeContractMatchesBundledAPKGradleAndHealth",
       "OKVideoMacTests/testAndroidBridgeHealthRequiresCurrentGeneration",
       "OKVideoMacTests/testAndroidBridgeDeploymentNeverDowngradesNewerInstalledBuild",
-      "OKVideoMacTests/testAndroidBridgeEqualVersionRequiresExactBundledAPKIdentity"
+      "OKVideoMacTests/testAndroidBridgeEqualVersionRequiresExactBundledAPKIdentity",
+      "HistoryNavigationLocatorTests/testReturnedIdentityAndRequestLocatorSurvivePersistenceWithoutDuplicatingHistory",
+      "HistoryNavigationLocatorTests/testLegacyJSONAndUnsafeOrForeignLocatorFallBackWithoutChangingProgress",
+      "HistoryNavigationLocatorTests/testOnlyEmptyMediaDetailsAllowLegacyRecoveryAndSettingsStillWork",
+      "HistoryNavigationLocatorTests/testSameTitleDoesNotEstablishOriginalDetailOrFileIdentity",
+      "HistoryNavigationLocatorTests/testConfirmedYpanSoFileReopensAcrossTokenChangesWithoutSavingCredentials",
+      "HistoryNavigationLocatorTests/testPlaybackRefreshUsesRequestLocatorAfterLegacyChoiceAndOnLaterRetries",
+      "HistoryNavigationLocatorTests/testLegacyHistoryRecoversOriginalAfterStaleCardWithoutTouchingProgress",
+      "HistoryNavigationLocatorTests/testSavedLocatorReopensDirectlyAndOriginalDetailsUseSameLocator",
+      "HistoryNavigationLocatorTests/testNetworkFailureDoesNotSearchOrOverwriteSavedHistory",
+      "PlayerStatusPresentationTests/testPreparationSeekAndFailureShareTrackAnchorWithoutSpeedOverlay",
+      "PlayerStatusPresentationTests/testFastSeekAndReplacedSessionCancelDelayedStatus",
+      "PlayerStatusPresentationTests/testLiveBufferingReplacesModeLabelAndKeepsAnchorThroughAutoHide",
+      "PlayerStatusPresentationTests/testStatusAnchorsFitNarrowAndFullscreenSizedWindows"
     ],
     "desktop": [
       "PlayerPanelDismissalTests/testOutsideClickClosesEachPanelWithoutChangingPlayback",
@@ -120,7 +133,10 @@
       "PlayerProgressPreviewRenderTests/testTimestampIsFullyRenderedOutsideClippedControlsAtBothEdges",
       "LiveRefreshAllTests/testNativeDetailsFitInBothAppearancesWithoutStartingWork",
       "PlayerOverlayLayoutTests/testAdaptiveControlsAndPanelsFitLongDurationsAndSmallWindows",
-      "PlayerOverlayLayoutTests/testProductionControlsRenderAtMinimumAndWideViewports"
+      "PlayerOverlayLayoutTests/testProductionControlsRenderAtMinimumAndWideViewports",
+      "PlayerStatusInteractionTests/testHistoryChoiceRespondsToMouseAcrossCardAndWindowSizes",
+      "PlayerStatusInteractionTests/testCancelRecoveryRespondsToMouseAndLeavesTransportUsable",
+      "PlayerStatusInteractionTests/testFailureRetryOriginalDetailsAndReturnReceiveMouse"
     ]
   }
 }

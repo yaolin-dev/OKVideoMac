@@ -12132,7 +12132,7 @@ final class AppState: ObservableObject {
               record.configurationID == activeConfigurationRecord?.id else { return }
         let summary = VideoSummary(siteKey: record.siteKey,
             siteName: visibleSites.first { $0.key == record.siteKey }?.name ?? record.siteKey,
-            videoID: record.playbackReference?.navigationRecipe?.detailID ?? record.videoID,
+            videoID: record.navigationDetailID,
             title: record.title, posterURL: record.posterURL)
         await closePlayer()
         selectSection(.home)
@@ -12254,14 +12254,7 @@ final class AppState: ObservableObject {
         }
 
         var relinkCandidates: [HistoryPlaybackChoice] = []
-        let recipeDetailID = item.playbackReference?.navigationRecipe.flatMap {
-            recipe in
-            recipe.configurationID == owningConfigurationID
-                && recipe.siteKey == item.siteKey
-                ? recipe.detailID.nonEmpty
-                : nil
-        }
-        let storedDetailID = recipeDetailID ?? item.videoID
+        let storedDetailID = item.navigationDetailID
         if provider is NodeHTTPSpiderSiteProvider,
            NodePlaybackReplayReference.isPersistedOpaqueIdentity(
                storedDetailID
@@ -12397,10 +12390,32 @@ final class AppState: ObservableObject {
             var ambiguousOriginal = false
             for summary in candidates.prefix(12) {
                 try Task.checkCancellation()
-                let detail = try await Self.historyPlaybackDetail(provider: provider, summary: summary)
+                let detail: VideoDetail
+                do {
+                    detail = try await Self.historyPlaybackDetail(provider: provider, summary: summary)
+                } catch {
+                    // One stale search card must not hide later valid results.
+                    guard HistoryDetailFailurePolicy.permitsTitleRecovery(error) else { throw error }
+                    continue
+                }
                 guard isCurrentHistoryPreparation(preparationID) else { return }
                 let resolution = Self.historyPlaybackResolution(in: detail, record: item,
                     requiresFileIdentity: provider.capability == .javaDexSpider)
+                if Self.isOriginalHistoryDetail(detail, record: item) {
+                    // Search rediscovered the original provider row. Discard
+                    // same-title alternatives, retaining strict file matching.
+                    resolved = []
+                    relinkCandidates = []
+                    ambiguousOriginal = false
+                    switch resolution {
+                    case .original(let choices):
+                        resolved = choices
+                        ambiguousOriginal = choices.count > 1
+                    case .requiresRelink(let choices): relinkCandidates = choices
+                    case .unavailable: break
+                    }
+                    break
+                }
                 switch resolution {
                 case .original(let choices):
                     resolved += choices
@@ -14997,6 +15012,25 @@ final class AppState: ObservableObject {
         playbackResolutionState = .playing
         preparePlayerEpisodePresentations(detail: detail, source: source, sessionID: request)
         if waitForPreparation { await playerEpisodePreparationTask?.value }
+    }
+
+    func seedPlaybackStatusForTesting(live: Bool, snapshot: PlayerSnapshot,
+        resolution: PlaybackResolutionState = .playing, hasStarted: Bool = true,
+        newSession: Bool = false, choices: [HistoryPlaybackChoice] = [], failure: String? = nil,
+        historyRecord: HistoryRecord? = nil) {
+        if let historyRecord {
+            historyPlaybackRequestedItem = historyRecord
+            historyPlaybackPreparationID = UUID()
+            activePlayerRequestID = historyPlaybackPreparationID
+            isPlayerPresented = true
+        }
+        historyPlaybackChoices = choices
+        playbackFailureSummary = failure
+        if newSession { playbackSessionID = UUID(); playerSnapshotState.resetSeek() }
+        livePlaybackChannel = live ? LiveChannel(groupName: "Fixture", name: "CCTV-1", streams: []) : nil
+        hasCurrentPlaybackStarted = hasStarted
+        playbackResolutionState = resolution
+        playerSnapshot = snapshot
     }
 
     func seedFavoriteConfigurationsForTesting(_ records: [StoredConfiguration]) { configurations = records }
@@ -18403,7 +18437,7 @@ final class AppState: ObservableObject {
                     self.playerEpisodeListRestoreTask = nil
                 }
             }
-            let detailID = record.playbackReference?.navigationRecipe?.detailID ?? record.videoID
+            let detailID = record.navigationDetailID
             let summary = VideoSummary(siteKey: record.siteKey, siteName: playback.detail.summary.siteName,
                 videoID: detailID, title: record.title, posterURL: record.posterURL)
             guard let detail = try? await Self.historyPlaybackDetail(provider: provider, summary: summary),
@@ -19456,6 +19490,10 @@ final class AppState: ObservableObject {
         return configuredName
     }
 
+    static func isOriginalHistoryDetail(_ detail: VideoDetail, record: HistoryRecord) -> Bool {
+        detail.summary.videoID == record.videoID && historyContentMatches(detail, record: record)
+    }
+
     static func historyContentMatches(_ detail: VideoDetail, record: HistoryRecord) -> Bool {
         guard detail.summary.siteKey == record.siteKey,
               let expected = historySearchQuery(for: record.title),
@@ -19669,7 +19707,7 @@ final class AppState: ObservableObject {
                                               providerReference: PlaybackResourceReference?, origin: PlaybackRequestOrigin) -> PlaybackRefreshRequest {
         let history = origin.isRelink || episode.originalResource != nil ? nil : origin.historyRecord
         let reference = history?.playbackReference
-        return PlaybackRefreshRequest(videoID: detail.summary.videoID, title: history?.title ?? detail.summary.title,
+        return PlaybackRefreshRequest(videoID: detail.detailRequestID ?? detail.summary.videoID, title: history?.title ?? detail.summary.title,
             sourceIdentity: providerReference?.sourceIdentity ?? reference?.sourceIdentity ?? source.stableIdentity,
             resourceIdentity: providerReference?.episodeIdentity ?? reference?.resourceIdentity ?? episode.stableIdentity,
             sourceName: history?.sourceName ?? source.name, episodeName: history?.episodeName ?? episode.name,
@@ -19716,7 +19754,10 @@ final class AppState: ObservableObject {
             let saved = PlaybackResourceAnalyzer.analyze(PlayEpisode(name: name, url: "history-candidate", metadata: record.playbackReference?.navigationRecipe?.episode.metadata), categoryName: detail.summary.categoryName)
             let candidates = detail.playSources.flatMap { source in
                 source.episodes.compactMap { episode -> HistoryPlaybackChoice? in
-                    let candidateName = episode.originalResource?.originalFilename ?? episode.name
+                    // Legacy rows saved the decorated playlist label. Compare
+                    // that same field until a file identity has been confirmed.
+                    let candidateName = record.playbackReference?.originalResource == nil
+                        ? episode.name : (episode.originalResource?.originalFilename ?? episode.name)
                     let semantics = PlaybackResourceAnalyzer.analyze(PlayEpisode(name: candidateName, url: "candidate", metadata: episode.metadata), categoryName: detail.summary.categoryName)
                     let sameName = !name.isEmpty && historyRelinkFilename(name) == historyRelinkFilename(candidateName)
                     let compatibleSeason = saved.season == nil || semantics.season == nil || saved.season == semantics.season
@@ -20001,6 +20042,7 @@ final class AppState: ObservableObject {
             configurationID: configurationID,
             siteKey: detail.summary.siteKey,
             detailID: persistedDetailID ?? detail.summary.videoID,
+            detailRequestID: detail.detailRequestID.flatMap { FavoritePersistencePolicy.isSafeLocator($0) ? $0 : nil },
             source: HistoryNavigationSource(
                 providerStableID: source.referenceIdentity.flatMap {
                     PlaybackPersistencePolicy.sanitizedPlaybackIdentity($0)

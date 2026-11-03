@@ -43,7 +43,7 @@ public struct OriginalMediaResource: Codable, Equatable, Hashable, Sendable {
               text(originalFilename, limit: 2048), text(providerPath, limit: 8192),
               text(shareRelativePath, limit: 8192),
               byteSize.map({ $0 >= 0 }) ?? true,
-              ["wogg-baidu-detail", "wogg-quark-detail", "provider-metadata"].contains(provenance),
+              ["wogg-baidu-detail", "wogg-quark-detail", "ypanso-quark-detail", "provider-metadata"].contains(provenance),
               provider != "baidu" || ownerID != nil else { return nil }
         return self
     }

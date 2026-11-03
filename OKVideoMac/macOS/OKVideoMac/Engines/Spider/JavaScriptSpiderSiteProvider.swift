@@ -1313,11 +1313,11 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
     }
 
     func select(id: String) async throws -> SiteSelectionResult {
-        try SpiderResponseMapper.selection(
+        Self.preservingDetailRequest(try SpiderResponseMapper.selection(
             await invoke(method: "detail", arguments: [.array([.string(id)])]),
             site: site,
             baseURL: baseURL
-        )
+        ), id: id, api: site.api)
     }
 
     func select(summary: VideoSummary) async throws -> SiteSelectionResult {
@@ -1348,8 +1348,48 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
         if isPanConfigurationAPI(site.api) {
             return selectionAfterInteraction(value, site: site, baseURL: baseURL, summary: summary)
         }
-        return try SpiderResponseMapper.selection(value, site: site, baseURL: baseURL,
-            fallbackSummary: summary, allowsPlaceholderAction: summary.resolvedContentKind == .action)
+        // A successful but empty media detail means this locator is unavailable.
+        // Keep settings acknowledgements and real transport/auth errors distinct.
+        if summary.resolvedContentKind != .action,
+           value == .null || value.stringValue?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == true {
+            throw AppError.contentUnavailable("The provider returned no details for this locator")
+        }
+        return preservingDetailRequest(try SpiderResponseMapper.selection(value, site: site, baseURL: baseURL,
+            fallbackSummary: summary, allowsPlaceholderAction: summary.resolvedContentKind == .action), id: summary.videoID, api: site.api)
+    }
+
+    private static func preservingDetailRequest(_ result: SiteSelectionResult, id: String, api: String) -> SiteSelectionResult {
+        guard case .detail(var detail) = result else { return result }
+        detail.detailRequestID = id
+        for sourceIndex in detail.playSources.indices {
+            for episodeIndex in detail.playSources[sourceIndex].episodes.indices {
+                let episode = detail.playSources[sourceIndex].episodes[episodeIndex]
+                if episode.originalResource == nil {
+                    detail.playSources[sourceIndex].episodes[episodeIndex].originalResource =
+                        originalFileResource(api: api, token: episode.url)
+                }
+            }
+        }
+        return .detail(detail)
+    }
+
+    /// Verified YpanSo detail tokens expose Quark share/file IDs separately from
+    /// short-lived authorization. Copy only that identity, never the token.
+    static func originalFileResource(api: String, token: String) -> OriginalMediaResource? {
+        guard ["csp_YpanSoGuard", "csp_YpanSo"].contains(api), token.utf8.count <= 32768,
+              let data = token.data(using: .utf8),
+              let object = try? JSONDecoder().decode(JSONValue.self, from: data).objectValue,
+              object["flag"]?.stringValue == "夸父盘",
+              let shareID = object["sId"]?.stringValue, let fileID = object["fid"]?.stringValue else { return nil }
+        let size: Int64?
+        switch object["size"] {
+        case .integer(let value): size = value
+        case .string(let value): size = Int64(value)
+        default: size = nil
+        }
+        return OriginalMediaResource(provider: "quark", shareID: shareID, fileID: fileID,
+            originalFilename: object["file_name"]?.stringValue, byteSize: size,
+            provenance: "ypanso-quark-detail").validated
     }
 
     /// Consume the original detail worker after a real Android UI interaction.
@@ -1366,7 +1406,7 @@ final class AndroidDexSpiderSiteProvider: SiteProvider {
                 baseURL: baseURL, fallbackSummary: summary),
            case .detail(let detail) = mapped,
            detail.playSources.contains(where: { !$0.episodes.isEmpty }) {
-            return .detail(detail)
+            return preservingDetailRequest(.detail(detail), id: summary.videoID, api: site.api)
         }
         return .action(value)
     }

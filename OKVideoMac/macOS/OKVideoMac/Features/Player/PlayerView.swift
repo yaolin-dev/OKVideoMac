@@ -12,6 +12,7 @@ struct PlayerView: View {
     @State private var scrubPosition: Double?
     @State private var scrubRevision = UUID()
     @State private var controlsVisible = true
+    @State private var playbackStatusActionsHeight: CGFloat = 44
     @StateObject private var controlTooltip = PlayerControlTooltipState()
     @State private var controlsHovering = false
     @State private var hideControlsTask: Task<Void, Never>?
@@ -50,7 +51,7 @@ struct PlayerView: View {
         GeometryReader { geometry in
             let layout = PlayerOverlayLayout(
                 viewportSize: viewportState.frozenSize ?? geometry.size,
-                timeLabelWidth: controlsVisible ? playbackTimeWidth : 0,
+                timeLabelWidth: playbackTimeWidth,
                 showsQuality: state.hasPlaybackQualityChoices,
                 showsTransportControls: !state.isLivePlayback
             )
@@ -84,35 +85,14 @@ struct PlayerView: View {
             PlayerPictureInPicturePlaceholder(coordinator: state.pictureInPicture)
                 .zIndex(44)
 
-            playbackStatusOverlay
-                .allowsHitTesting(isFailed || liveLoadingSlow || state.hasHistoryPlaybackChoices)
-
-            if state.isLivePlayback,
-               let notice = state.livePlaybackNotice {
-                VStack {
-                    Spacer()
-                    Text(notice)
-                        .font(.callout.weight(.semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
-                        .padding(.bottom, controlsVisible ? 92 : 28)
-                }
-                .transition(.opacity)
-                .allowsHitTesting(false)
-                .zIndex(45)
-            }
-
             if !state.isLivePlayback,
                let prompt = state.playbackEndingSkipPrompt {
                 endingSkipPromptOverlay(prompt)
                     .zIndex(46)
             }
 
-            if controlsVisible {
             VStack(spacing: 0) {
-                if !state.isLivePlayback { floatingHeader }
+                if controlsVisible && !state.isLivePlayback { floatingHeader }
                 Spacer(minLength: 24)
                 floatingControls(layout: layout)
             }
@@ -123,7 +103,7 @@ struct PlayerView: View {
             // to the whole viewport, not the narrower adaptive control row.
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .overlay(alignment: .topTrailing) {
-                if state.isLivePlayback, activeUtilityPanel == nil,
+                if controlsVisible, state.isLivePlayback, activeUtilityPanel == nil,
                    !isFullScreenTransitioning,
                    let channel = state.livePlaybackChannel,
                    let source = state.livePlaybackSourceID {
@@ -135,10 +115,18 @@ struct PlayerView: View {
                         .allowsHitTesting(false)
                 }
             }
-            .transition(.opacity)
-            .allowsHitTesting(!isFullScreenTransitioning)
-            .environment(\.colorScheme, .dark)
+            // Recovery buttons need real bounds in the full viewport. Drawing
+            // them above the toolbar's contentShape makes them visible but
+            // unreachable to mouse events (AX actions still work).
+            .overlayPreferenceValue(PlayerStatusOverlayAnchorKey.self) { anchor in
+                GeometryReader { overlayGeometry in
+                    if let anchor, shouldShowStatusOverlay, scrubPosition == nil {
+                        playbackStatusPresentation(layout: layout, anchor: overlayGeometry[anchor])
+                    }
+                }
             }
+            .allowsHitTesting(!isFullScreenTransitioning && (controlsVisible || hasPlaybackStatusActions))
+            .environment(\.colorScheme, .dark)
 
             if controlsVisible,
                let activeUtilityPanel {
@@ -193,6 +181,8 @@ struct PlayerView: View {
         }
         .onChange(of: state.playbackPresentationID) { _ in
             dismissProgressPreview(); scrubRevision = UUID(); scrubPosition = nil; controlTooltip.dismiss()
+            updatePlaybackActivityOverlay(isActive: false)
+            updatePlaybackActivityOverlay(isActive: hasTransientPlaybackActivity)
         }
         .onChange(of: state.isPlayerWindowKey) { if !$0 { dismissProgressPreview(); controlTooltip.dismiss() } }
         .onChange(of: scrubPosition != nil) { _ in updateTooltipAvailability() }
@@ -415,76 +405,90 @@ struct PlayerView: View {
         }
     }
 
-    @ViewBuilder
-    private var playbackStatusOverlay: some View {
-        if shouldShowStatusOverlay {
-            VStack(spacing: 10) {
-                if !isFailed && !state.hasHistoryPlaybackChoices {
-                    AppActivityIndicator(size: .small, tint: .white)
-                }
-                Text(isFailed ? L10n.string("player.stage.failed", fallback: "Playback Failed")
-                    : state.isLivePlayback
-                        ? (liveLoadingSlow ? L10n.string("live.loading-slow", fallback: "Connection is taking longer than usual")
-                           : L10n.string("live.loading-channel", fallback: "Loading %@…", state.livePlaybackChannel?.name ?? ""))
-                        : state.playbackStageDescription)
-                    .font(.headline)
-                if !isFailed {
-                    Text(state.playerNetworkSpeedDescription)
-                        .font(.caption.monospacedDigit())
-                        .foregroundColor(.white.opacity(0.78))
-                }
+    private var hasPlaybackStatusActions: Bool {
+        shouldShowStatusOverlay && (isFailed || liveLoadingSlow || state.hasHistoryPlaybackChoices)
+    }
 
+    private var playbackStatusLine: some View {
+        PlayerPlaybackStatusLine(title: playbackStatusTitle,
+            kind: isFailed ? .failure : state.hasHistoryPlaybackChoices ? .choice : .waiting)
+    }
+
+    private var playbackStatusTitle: String {
+        if isFailed { return L10n.string("player.stage.failed", fallback: "Playback Failed") }
+        if state.hasHistoryPlaybackChoices {
+            return L10n.string("player.status.choose-history", fallback: "Choose the original file")
+        }
+        if state.isLivePlayback {
+            if let notice = state.livePlaybackNotice, !isLiveWaiting { return notice }
+            if liveLoadingSlow { return L10n.string("player.status.slow", fallback: "Connection is slow") }
+            return L10n.string(state.hasCurrentPlaybackStarted && !state.isRecoveringLivePlayback
+                ? "player.status.buffering" : "player.status.connecting",
+                fallback: state.hasCurrentPlaybackStarted && !state.isRecoveringLivePlayback ? "Buffering" : "Connecting")
+        }
+        if let target = playerSnapshotState.pendingSeekTarget ?? state.playerSnapshot.seekTarget,
+           hasSeekActivity {
+            return L10n.string("player.status.seeking-to", fallback: "Seeking to %@", formatTime(target))
+        }
+        return state.playbackStageDescription
+    }
+
+    /// Keep the status baseline fixed; recovery controls grow upward from it.
+    @ViewBuilder private func playbackStatusActions(maximumHeight: CGFloat) -> some View {
+        if hasPlaybackStatusActions {
+            ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
                 if isFailed, let message = state.playbackFailureSummary {
                     Text(message)
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.66))
-                        .multilineTextAlignment(.center)
+                        .multilineTextAlignment(.leading)
                         .lineLimit(5)
-                        .frame(maxWidth: 560)
+                        .frame(maxWidth: 560, alignment: .leading)
+                        .playerPresentationProbe("failure-description")
                 }
 
                 if state.hasHistoryPlaybackChoices {
                     Text(state.playbackFailureSummary ?? L10n.string("player.history.choose-recovery", fallback: "Choose the stream and episode to restore"))
                         .font(.caption)
                         .foregroundColor(.white.opacity(0.72))
-                        .multilineTextAlignment(.center)
-                        .frame(maxWidth: 620)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: 620, alignment: .leading)
 
-                    ScrollView {
-                        VStack(spacing: 8) {
-                            ForEach(state.historyPlaybackChoices) { choice in
-                                Button {
-                                    state.chooseHistoryPlayback(choice.id)
-                                } label: {
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(choice.title)
+                    VStack(spacing: 8) {
+                        ForEach(state.historyPlaybackChoices) { choice in
+                            Button {
+                                state.chooseHistoryPlayback(choice.id)
+                            } label: {
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(choice.title)
+                                        .font(.callout.weight(.semibold))
+                                        .lineLimit(1)
+                                    Text(choice.subtitle)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(4)
+                                    if let action = state.historyPlaybackChoiceAction(choice) {
+                                        Text(action)
                                             .font(.callout.weight(.semibold))
-                                            .lineLimit(1)
-                                        Text(choice.subtitle)
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
-                                            .lineLimit(4)
-                                        if let action = state.historyPlaybackChoiceAction(choice) {
-                                            Text(action)
-                                                .font(.callout.weight(.semibold))
-                                                .foregroundStyle(Color.white)
-                                                .padding(.top, 4)
-                                        }
+                                            .foregroundStyle(Color.white)
+                                            .padding(.top, 4)
                                     }
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.horizontal, 12)
-                                    .padding(.vertical, 8)
                                 }
-                                .buttonStyle(.bordered)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 12)
+                                .padding(.vertical, 8)
                             }
+                            .buttonStyle(.bordered)
+                            .playerPresentationProbe("history-recovery-choice")
                         }
                     }
-                    .frame(maxWidth: 620, maxHeight: 230)
 
                     Button(L10n.string("player.history.cancel-recovery", fallback: "Cancel Restore")) {
                         state.cancelHistoryPlaybackChoices()
                     }
                     .buttonStyle(.bordered)
+                    .playerPresentationProbe("history-recovery-cancel")
                 }
 
                 if isFailed, state.canRestartHistoryRelinkFromBeginning {
@@ -511,21 +515,24 @@ struct PlayerView: View {
                 }
 
                 if isFailed, state.canRetryHistoryPlayback {
-                    HStack(spacing: 10) {
+                    VStack(alignment: .leading, spacing: 8) {
                         Button(L10n.string("common.retry", fallback: "Try Again")) {
                             state.retryHistoryPlayback()
                         }
                         .buttonStyle(.borderedProminent)
+                        .playerPresentationProbe("history-recovery-retry")
 
                         Button(L10n.string("history.restore.open-original", fallback: "Open Original Details")) {
                             Task { await state.openOriginalHistoryDetail() }
                         }
                         .buttonStyle(.bordered)
+                        .playerPresentationProbe("history-recovery-original")
 
                         Button(L10n.string("player.return-history", fallback: "Return to History")) {
                             state.returnToHistoryAfterPlaybackFailure()
                         }
                         .buttonStyle(.bordered)
+                        .playerPresentationProbe("history-recovery-return")
                     }
                     .controlSize(.regular)
                     .padding(.top, 2)
@@ -548,17 +555,63 @@ struct PlayerView: View {
                 }
             }
             .foregroundColor(.white)
-            .multilineTextAlignment(.center)
-            .frame(maxWidth: state.hasHistoryPlaybackChoices ? 560 : 420)
-            .padding(24)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: state.hasHistoryPlaybackChoices ? 560 : 420, alignment: .leading)
             .shadow(color: .black.opacity(0.65), radius: 2, y: 1)
-            .transition(.opacity)
+            .accessibilityIdentifier("player.status.actions")
+            .background(GeometryReader { geometry in
+                Color.clear.preference(key: PlayerStatusActionsHeightKey.self, value: geometry.size.height)
+            })
+            }
+            .frame(height: statusActionsVisibleHeight(maximumHeight: maximumHeight))
+            .onPreferenceChange(PlayerStatusActionsHeightKey.self) { height in
+                if abs(playbackStatusActionsHeight - height) > 0.5 { playbackStatusActionsHeight = height }
+            }
+        }
+    }
+
+    private func statusActionsVisibleHeight(maximumHeight: CGFloat) -> CGFloat {
+        min(max(1, playbackStatusActionsHeight), max(44, min(340, maximumHeight)))
+    }
+
+    /// Preserve the existing track/live-row anchor while keeping every action
+    /// inside its actual layout and mouse-hit bounds, above the video surface.
+    @ViewBuilder private func playbackStatusPresentation(layout: PlayerOverlayLayout, anchor: CGRect) -> some View {
+        let live = state.isLivePlayback
+        let maximumHeight = live
+            ? layout.viewportSize.height - layout.bottomInset - 90
+            : layout.viewportSize.height - layout.panelBottomInset - 55
+        let width = live
+            ? max(1, min(420, layout.innerWidth - (layout.mode == .expanded ? 179 : 96)))
+            : max(1, min(layout.innerWidth - 12, state.hasHistoryPlaybackChoices ? 560 : 420))
+        let actionsHeight = hasPlaybackStatusActions ? statusActionsVisibleHeight(maximumHeight: maximumHeight) : 0
+        let height = live ? actionsHeight : 20 + (hasPlaybackStatusActions ? actionsHeight + 10 : 0)
+        if !live || hasPlaybackStatusActions {
+            VStack(alignment: .leading, spacing: 10) {
+                if hasPlaybackStatusActions { playbackStatusActions(maximumHeight: maximumHeight) }
+                if !live { playbackStatusLine }
+            }
+            .frame(width: width, height: height, alignment: .bottomLeading)
+            .contentShape(Rectangle())
+            .allowsHitTesting(hasPlaybackStatusActions && !isFullScreenTransitioning)
+            .onHover { inside in
+                controlsHovering = inside
+                inside ? keepControlsVisible() : scheduleControlsHide()
+            }
+            // Position expands the layout to the viewport; keep hover and
+            // hit testing on the tight panel bounds before positioning it.
+            .position(x: anchor.minX + (live ? 0 : 6) + width / 2,
+                      y: anchor.minY - 8 - height / 2)
         }
     }
 
     private func floatingControls(layout: PlayerOverlayLayout) -> some View {
         VStack(spacing: 8) {
-            if !state.isLivePlayback { progressControls }
+            if !state.isLivePlayback {
+                progressControls
+                    .modifier(PlayerControlsVisibility(visible: controlsVisible))
+                    .anchorPreference(key: PlayerStatusOverlayAnchorKey.self, value: .bounds) { $0 }
+            }
             if state.isLivePlayback {
                 HStack(spacing: 10) {
                     NativeLivePlaybackButton(paused: isPaused) {
@@ -566,9 +619,11 @@ struct PlayerView: View {
                         Task { await state.togglePlayPause() }
                     }
                     .frame(width: 38, height: 38)
+                    .modifier(PlayerControlsVisibility(visible: controlsVisible))
                     controlLeading(layout: layout)
                     Spacer(minLength: 12)
                     controlTrailing(layout: layout)
+                        .modifier(PlayerControlsVisibility(visible: controlsVisible))
                 }
             } else {
                 PlayerControlRow(layout: layout) {
@@ -578,6 +633,7 @@ struct PlayerView: View {
                 } trailing: {
                     controlTrailing(layout: layout)
                 }
+                .modifier(PlayerControlsVisibility(visible: controlsVisible))
             }
         }
         .foregroundColor(.white)
@@ -595,14 +651,25 @@ struct PlayerView: View {
 
     private func controlLeading(layout: PlayerOverlayLayout) -> some View {
         HStack(spacing: 10) {
-            if layout.mode == .expanded { volumeControls }
-            else { compactVolumeButton }
+            Group {
+                if layout.mode == .expanded { volumeControls }
+                else { compactVolumeButton }
+            }
+            .modifier(PlayerControlsVisibility(visible: controlsVisible))
             if state.isLivePlayback {
-                Label(isPaused ? L10n.string("player.live.paused", fallback: "Paused") : L10n.string("player.live", fallback: "Live"),
-                    systemImage: "dot.radiowaves.left.and.right")
-                    .font(.system(size: 12, weight: .medium))
-                    .lineLimit(1)
-                    .fixedSize(horizontal: true, vertical: false)
+                Group {
+                    if shouldShowStatusOverlay { playbackStatusLine }
+                    else {
+                        Label(isPaused ? L10n.string("player.live.paused", fallback: "Paused") : L10n.string("player.live", fallback: "Live"),
+                            systemImage: "dot.radiowaves.left.and.right")
+                            .font(.system(size: 12, weight: .medium))
+                            .lineLimit(1)
+                            .playerPresentationProbe(L10n.string("player.live", fallback: "Live"))
+                            .modifier(PlayerControlsVisibility(visible: controlsVisible))
+                    }
+                }
+                .frame(width: layout.mode == .expanded ? 144 : 120, height: 38, alignment: .leading)
+                .anchorPreference(key: PlayerStatusOverlayAnchorKey.self, value: .bounds) { $0 }
             } else { playbackTimeLabel }
         }
     }
@@ -689,7 +756,7 @@ struct PlayerView: View {
         if let scrubPosition {
             return PlayerTimelinePolicy.fraction(value: scrubPosition, total: state.playerSnapshot.duration)
         }
-        return progressHoverFraction
+        return shouldShowStatusOverlay ? nil : progressHoverFraction
     }
 
     private func dismissProgressPreview() {
@@ -718,6 +785,7 @@ struct PlayerView: View {
         )
         .disabled(!state.canSeekPlayback)
         .frame(height: 24)
+        .playerPresentationProbe("timeline")
         .shadow(
             color: playerAccentColor.opacity(isProgressHovering ? 0.18 : 0),
             radius: isProgressHovering ? 5 : 0
@@ -995,7 +1063,8 @@ struct PlayerView: View {
                     originalName: state.playerSnapshot.mediaInfo == nil ? nil : state.currentPlayerEpisodePresentation?.originalName,
                     duration: state.playerSnapshot.duration,
                     selectedAudioTrack: state.playerSnapshot.tracks.first { $0.type == .audio && $0.isSelected },
-                    networkRoute: state.playerSnapshot.mediaNetworkRoute)
+                    networkRoute: state.playerSnapshot.mediaNetworkRoute,
+                    networkSpeed: state.playerNetworkSpeedDescription)
             }
         case .settings:
             playbackSettingsPanel(maximumSize: maximumSize)
@@ -1938,10 +2007,12 @@ struct PlayerView: View {
     }
 
     private var shouldShowStatusOverlay: Bool {
-        if isFailed {
-            return true
-        }
-        if state.isLivePlayback { return liveLoadingVisible && isLiveWaiting }
+        if isFailed || state.hasHistoryPlaybackChoices { return true }
+        if state.isLivePlayback { return (liveLoadingVisible && isLiveWaiting) || state.livePlaybackNotice != nil }
+        // History seeks and refreshes may still be in a loading resolution phase.
+        // A short seek must not bypass the presentation delay through that phase.
+        if hasSeekActivity { return playbackActivityOverlayVisible }
+
         switch state.playbackResolutionState {
         case .restoringHistory, .resolving, .validating, .loading, .retrying:
             return true
@@ -1964,6 +2035,10 @@ struct PlayerView: View {
 
     private var liveLoadingTaskID: String {
         "\(state.playbackPresentationID)-\(isLiveWaiting)"
+    }
+
+    private var hasSeekActivity: Bool {
+        playerSnapshotState.pendingSeekTarget != nil || state.playerSnapshot.isSeeking
     }
 
     private var hasTransientPlaybackActivity: Bool {
@@ -2959,7 +3034,7 @@ enum PlayerControlVisibilityPolicy {
 enum PlayerActivityOverlayPolicy {
     /// Avoid flashing an indicator for seeks that complete within one or two
     /// rendered frames, while still acknowledging a real network/decoder wait.
-    static let presentationDelayNanoseconds: UInt64 = 200_000_000
+    static let presentationDelayNanoseconds: UInt64 = 350_000_000
 
     static func isActive(snapshot: PlayerSnapshot) -> Bool {
         if snapshot.isSeeking || snapshot.isPausedForCache {
@@ -4203,7 +4278,7 @@ struct PlayerControlTooltip: ViewModifier {
     }
 }
 
-private extension View {
+extension View {
     func playerControlHelp(_ title: String) -> some View {
         modifier(PlayerControlTooltip(title: title))
     }
@@ -4254,7 +4329,7 @@ private struct PlayerTransportButtonStyle: ButtonStyle {
     }
 }
 
-private struct PlayerControlHoverEffect: ViewModifier {
+struct PlayerControlHoverEffect: ViewModifier {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var isHovering = false
     let enabled: Bool

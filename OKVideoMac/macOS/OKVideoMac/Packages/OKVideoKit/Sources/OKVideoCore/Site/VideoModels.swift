@@ -212,6 +212,8 @@ public struct SiteActionItem: Codable, Equatable, Hashable, Identifiable, Sendab
 }
 
 public struct VideoDetail: Codable, Equatable, Sendable {
+    /// The provider request locator can differ from the returned row identity.
+    public var detailRequestID: String?
     public var summary: VideoSummary
     public var area: String?
     public var director: String?
@@ -225,8 +227,10 @@ public struct VideoDetail: Codable, Equatable, Sendable {
         director: String? = nil,
         actors: String? = nil,
         synopsis: String? = nil,
-        playSources: [PlaySource] = []
+        playSources: [PlaySource] = [],
+        detailRequestID: String? = nil
     ) {
+        self.detailRequestID = detailRequestID
         self.summary = summary
         self.area = area
         self.director = director

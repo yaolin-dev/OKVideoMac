@@ -72,8 +72,18 @@
     "search.browse.budget": {
       "extractionState": "manual",
       "localizations": {
-        "en": { "stringUnit": { "state": "translated", "value": "Scroll down to load more results" } },
-        "zh-Hans": { "stringUnit": { "state": "translated", "value": "滚动到底部自动加载更多" } }
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scroll down to load more results"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "滚动到底部自动加载更多"
+          }
+        }
       }
     },
     "player.quality.unavailable-after-refresh": {
@@ -2701,13 +2711,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Picture in Picture"
+            "value": "Enter Picture in Picture"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "画中画"
+            "value": "进入画中画"
           }
         }
       }
@@ -2735,13 +2745,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Return to Player"
+            "value": "Exit Picture in Picture"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "返回播放器"
+            "value": "退出画中画"
           }
         }
       }
@@ -15747,7 +15757,13 @@
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "缓冲中"
+            "value": "正在缓冲"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在緩衝"
           }
         }
       }
@@ -36223,6 +36239,98 @@
           "stringUnit": {
             "state": "translated",
             "value": "上次更新：%@"
+          }
+        }
+      }
+    },
+    "player.status.choose-history": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose the original file"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请选择原文件"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "請選擇原檔案"
+          }
+        }
+      }
+    },
+    "player.status.slow": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connection is slow"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接较慢"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "連線較慢"
+          }
+        }
+      }
+    },
+    "player.status.connecting": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connecting"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在连接"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在連線"
+          }
+        }
+      }
+    },
+    "player.status.seeking-to": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Seeking to %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跳转至 %@"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跳轉至 %@"
           }
         }
       }
