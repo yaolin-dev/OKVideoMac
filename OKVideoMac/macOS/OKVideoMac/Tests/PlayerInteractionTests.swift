@@ -200,26 +200,22 @@ final class PlayerOverlayLayoutTests: XCTestCase {
                 let layout = PlayerOverlayLayout(viewportSize: .init(width: width, height: 360),
                                                  timeLabelWidth: PlayerOverlayLayout.timeWidth(time))
                 modes.insert(String(describing: layout.mode))
-                let leading = (layout.mode == .expanded ? 121.0 : 38.0) + 10 + layout.timeLabelWidth
-                let trailing = layout.showsAllTools ? 213.0 : 120.0
-                if layout.mode == .stacked {
-                    XCTAssertLessThanOrEqual(leading + trailing + 24, layout.innerWidth)
-                } else {
-                    XCTAssertLessThanOrEqual(leading, layout.sideWidth)
-                    XCTAssertLessThanOrEqual(trailing, layout.sideWidth)
-                    XCTAssertEqual(layout.sideWidth * 2 + PlayerOverlayLayout.transportWidth + 24, layout.innerWidth)
-                }
+                XCTAssertLessThanOrEqual(layout.leadingWidth + layout.trailingWidth + 36, layout.innerWidth)
+                XCTAssertEqual(layout.bottomInset + layout.controlHeight, 68)
                 XCTAssertLessThanOrEqual(layout.controlWidth + 36, width)
                 XCTAssertLessThanOrEqual(layout.panelMaximumSize.width + layout.panelTrailingInset, width)
                 XCTAssertLessThanOrEqual(layout.panelMaximumSize.height + layout.panelBottomInset + 24, 360)
             }
         }
-        // Extremely long media durations retain the transport in a second row.
-        let long = PlayerOverlayLayout(viewportSize: .init(width: 640, height: 360), timeLabelWidth: 180)
-        XCTAssertEqual(long.mode, .stacked)
-        let middle = PlayerOverlayLayout(viewportSize: .init(width: 800, height: 450), timeLabelWidth: 190)
-        XCTAssertEqual(middle.mode, .stacked)
-        XCTAssertTrue(modes.contains("expanded")); XCTAssertTrue(modes.contains("compactTools"))
+        // Narrow rows collapse tools, never add a second transport row.
+        let narrow = PlayerOverlayLayout(viewportSize: .init(width: 480, height: 270))
+        XCTAssertEqual(narrow.mode, .compactTools)
+        XCTAssertLessThanOrEqual(narrow.leadingWidth + narrow.trailingWidth + 36, narrow.innerWidth)
+        let long = PlayerOverlayLayout(viewportSize: .init(width: 640, height: 360), timeLabelWidth: 250)
+        XCTAssertEqual(long.mode, .compactTools)
+        XCTAssertLessThanOrEqual(long.leadingWidth + long.trailingWidth + 36, long.innerWidth)
+        XCTAssertTrue(modes.contains("expanded"))
+
     }
 
     func testSupersededCompletionCannotRevealOverlayDuringNextTransition() async {
@@ -267,7 +263,7 @@ final class PlayerOverlayLayoutTests: XCTestCase {
             let track = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? ProgressHoverTrackingNSView }.first)
             let trackRect = host.convert(track.bounds, from: track)
             XCTAssertTrue(host.bounds.contains(trackRect), "Timeline must remain entirely within viewport")
-            XCTAssertGreaterThanOrEqual(track.bounds.height, 24)
+            XCTAssertGreaterThanOrEqual(track.bounds.height, 16)
         }
     }
 }
@@ -519,7 +515,7 @@ final class PlayerOverlayLayoutTests: XCTestCase {
         for width: CGFloat in [640, 1200, 2240, 3440] {
             let layout = PlayerOverlayLayout(viewportSize: .init(width: width, height: 1260))
             XCTAssertGreaterThanOrEqual(layout.controlWidth / width, 0.85)
-            XCTAssertLessThanOrEqual(layout.controlWidth / width, 0.95)
+            XCTAssertEqual(width - layout.controlWidth, 40, accuracy: 0.01)
             for fraction in [0.0, 0.5, 1.0] {
                 let rect = PlayerProgressPreviewOverlay.rect(track: .init(x: layout.horizontalInset, y: 1140, width: layout.controlWidth, height: 24), viewport: layout.viewportSize, fraction: fraction, text: "999:59:59")
                 XCTAssertTrue(CGRect(origin: .zero, size: layout.viewportSize).contains(rect))

@@ -156,6 +156,7 @@ def main():
         config = manifest['OKVideoMacTests']
         config.setdefault('EnvironmentVariables', {})['OKVIDEO_JOURNEY_HTTP'] = f'http://127.0.0.1:{server.server_port}'
         config['EnvironmentVariables']['OKVIDEO_JOURNEY_FIXTURES'] = str(fixtures)
+        config['EnvironmentVariables']['OKVIDEO_PIP_FIXTURE'] = str(fixtures / 'seek/manifest.mpd')
         test_run = output_products / manifests[0].name
         test_run.write_bytes(plistlib.dumps(manifest))
         argv = ['xcodebuild', 'test-without-building', '-xctestrun', test_run,

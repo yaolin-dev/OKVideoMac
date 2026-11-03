@@ -9,6 +9,9 @@
     "PlaybackMediaJourneyTests/testRapidExactSeeksAtTwoTimesSpeedAndCloseDoNotRestoreOldTargets",
     "XtreamFileNetworkTests/testMediaProxyToggleControlsRealRequestsAndKeepsCurrentLoadPinned",
     "XtreamFileNetworkTests/testProxyRedirectAndReplacementRestoreOptionsOnSamePlayer",
-    "XtreamFileNetworkTests/testRejectedLoadRestoresProxyBeforeFollowingPlayback"
+    "XtreamFileNetworkTests/testRejectedLoadRestoresProxyBeforeFollowingPlayback",
+    "PlaybackMediaJourneyTests/testCompactPlayerActualRenderPreviews",
+    "FullscreenPlaybackTests/testLiveUsesNativeFullscreenWithContinuousPlayback",
+    "FullscreenPlaybackTests/testOnDemandKeepsCustomFullscreenWithContinuousPlayback"
   ]
 }

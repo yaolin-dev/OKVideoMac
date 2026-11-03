@@ -1,5 +1,7 @@
 # Changelog
 
+- Build 188: Compact VOD/live controls, anchored recovery/status panels, hover volume, and native interaction/fullscreen regression coverage.
+
 ## [Unreleased]
 
 - Local build 187: retain request ownership and failure categories on Java/Dex errors; isolate provider instance caches by initialization inputs; recover a broken WoGG entry once without destroying shared login or media state. History and resume safeguards remain in force.

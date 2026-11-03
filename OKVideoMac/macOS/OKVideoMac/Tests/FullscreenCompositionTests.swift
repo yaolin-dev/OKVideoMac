@@ -318,7 +318,7 @@ import OKVideoPersistence
                             "Programme card must align with the inset control content")
                         XCTAssertEqual(card.minY, layout.programmeTopInset + (entering ? (window.screen?.safeAreaInsets.top ?? 0) : 0), accuracy: 2)
                         if !entering {
-                            XCTAssertEqual(host.bounds.width - card.maxX, 40, accuracy: 2)
+                            XCTAssertEqual(host.bounds.width - card.maxX, 20, accuracy: 2)
                             XCTAssertEqual(card.minY, 44, accuracy: 2)
                         }
                         XCTAssertEqual(card.width, 310, accuracy: 2, "Original programme card width must be retained")

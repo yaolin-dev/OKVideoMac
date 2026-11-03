@@ -86,6 +86,65 @@ import OKVideoPersistence
         await state.closePlayer(); await state.shutdown()
         window.contentView = nil; window.close()
     }
+
+    func testCompactPlayerActualRenderPreviews() async throws {
+        let (state, environment, window, base) = try await fixture()
+        let directory = URL(fileURLWithPath: "/private/tmp/OKVideoMac-Compact188-Visuals")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        do {
+            let source = PlaySource(name: "演示线路", episodes: (1...3).map {
+                PlayEpisode(name: "第 \($0) 集.mp4", url: base + "/seek/manifest.mpd?episode=\($0)")
+            })
+            let detail = VideoDetail(summary: .init(siteKey: "media-journey", siteName: "Fixture",
+                videoID: "compact-preview", title: "播放界面预览", categoryName: "电视剧"), playSources: [source])
+            await state.startPlayback(detail: detail, source: source, episode: source.episodes[1])
+            try await wait("Preview decodes real video") { state.hasCurrentPlaybackStarted && state.playerSnapshot.position > 0.2 }
+            await state.togglePlayPause()
+            try await wait("Preview pauses") { state.playerSnapshot.status == .paused }
+            let host = try XCTUnwrap(window.contentView)
+            func capture(_ name: String) throws {
+                host.layoutSubtreeIfNeeded()
+                let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                try data.write(to: directory.appendingPathComponent(name + ".png"))
+                let height = min(CGFloat(320), host.bounds.height)
+                let lower = CGRect(x: 0, y: host.isFlipped ? host.bounds.height - height : 0,
+                    width: host.bounds.width, height: height)
+                let detail = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: lower))
+                host.cacheDisplay(in: lower, to: detail)
+                try XCTUnwrap(detail.representation(using: .png, properties: [:]))
+                    .write(to: directory.appendingPathComponent(name + "-controls.png"))
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.png")
+                attachment.name = name; attachment.lifetime = .keepAlways; add(attachment)
+            }
+            for width in [1200.0, 2240.0] {
+                window.setContentSize(.init(width: width, height: width * 9 / 16))
+                state.seedPlaybackStatusForTesting(live: false,
+                    snapshot: .init(status: .paused, position: 15, duration: 45))
+                try await Task.sleep(nanoseconds: 200_000_000)
+                try capture("vod-\(Int(width))-normal")
+                state.seedPlaybackStatusForTesting(live: false, snapshot: .init(status: .loading),
+                    resolution: .restoringHistory, hasStarted: false,
+                    choices: [.init(detail: detail, source: source, episode: source.episodes[1], requiresRelink: true)],
+                    failure: "请选择原文件；播放及进度恢复成功前，原观看进度会一直保留。")
+                try await Task.sleep(nanoseconds: 200_000_000)
+                try capture("vod-\(Int(width))-recovery")
+                state.seedPlaybackStatusForTesting(live: true, snapshot: .init(status: .playing, position: 15))
+                try await Task.sleep(nanoseconds: 200_000_000)
+                try capture("live-\(Int(width))-normal")
+                state.seedPlaybackStatusForTesting(live: true,
+                    snapshot: .init(status: .playing, position: 15, isPausedForCache: true))
+                try await Task.sleep(nanoseconds: 700_000_000)
+                try capture("live-\(Int(width))-buffering")
+                state.seedPlaybackStatusForTesting(live: true, snapshot: .init(status: .failed("Preview failure")),
+                    resolution: .failed, failure: "当前线路连接失败，可以重试或切换频道。")
+                try await Task.sleep(nanoseconds: 200_000_000)
+                try capture("live-\(Int(width))-failure")
+            }
+            await cleanup(state, environment, window)
+        } catch { await cleanup(state, environment, window); throw error }
+    }
     func testPlaySeekPauseCloseResumeAndNextEpisode() async throws {
         let (state, environment, window, base) = try await fixture()
         do {
@@ -95,9 +154,9 @@ import OKVideoPersistence
             await state.seek(to: 30)
             try await wait("Seek reaches requested position") { !state.playerSnapshot.isSeeking && state.playerSnapshot.position >= 29 }
             // Exercise the production floating button with a real pointer event.
-            // At this viewport the transport is centered on the single control row.
+            // Compact transport remains at the left edge at every viewport size.
             let layout = PlayerOverlayLayout(viewportSize: window.contentView!.bounds.size)
-            let point = NSPoint(x: window.contentView!.bounds.midX, y: layout.bottomInset + 9 + 30)
+            let point = NSPoint(x: layout.horizontalInset + 18, y: layout.bottomInset + 18)
             for (type, offset) in [(NSEvent.EventType.mouseMoved, 0.0), (.leftMouseDown, 0.01), (.leftMouseUp, 0.06)] {
                 let event = try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
                     timestamp: ProcessInfo.processInfo.systemUptime + offset, windowNumber: window.windowNumber,

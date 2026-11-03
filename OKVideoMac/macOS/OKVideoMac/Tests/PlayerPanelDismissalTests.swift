@@ -165,11 +165,11 @@ import OKVideoPersistence
         defer { cleanup(window) }
         try await click("subtitles", in: window)
         let wasMuted = state.playerAudioPreference.muted
-        let slider = try XCTUnwrap(BrowserKeyboardView.descendants(of: try XCTUnwrap(window.contentView))
-            .compactMap { $0 as? NSSlider }.first { $0.bounds.width < 100 })
-        let sliderRect = slider.convert(slider.bounds, to: nil)
-        // The mute button sits immediately before the native volume slider.
-        try await click(at: .init(x: sliderRect.minX - 7 - 19, y: sliderRect.midY), in: window)
+        let volume = try XCTUnwrap(BrowserKeyboardView.descendants(of: try XCTUnwrap(window.contentView))
+            .compactMap { $0 as? PlayerPresentationProbeView }.first { $0.title == "volume-button" })
+        let volumeRect = volume.convert(volume.bounds, to: nil)
+        // The collapsed mute button must receive the same outside click.
+        try await click(at: .init(x: volumeRect.midX, y: volumeRect.midY), in: window)
         XCTAssertTrue(panels(window).isEmpty)
         XCTAssertEqual(state.playerAudioPreference.muted, !wasMuted, "Outside click also activates the chosen control once")
         await state.closePlayer()

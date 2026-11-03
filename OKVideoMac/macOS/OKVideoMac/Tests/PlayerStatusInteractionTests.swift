@@ -109,15 +109,11 @@ import OKVideoPersistence
             try await click(.init(x: cancel.midX, y: cancel.midY), in: window)
             XCTAssertFalse(state.hasHistoryPlaybackChoices, "Cancel must receive the mouse at \(size)")
             // The larger recovery layer must not swallow ordinary transport input.
-            let host = try XCTUnwrap(window.contentView)
-            if let slider = BrowserKeyboardView.descendants(of: host).compactMap({ $0 as? NSSlider })
-                .first(where: { $0.bounds.width < 100 }) {
-                let rect = slider.convert(slider.bounds, to: nil)
-                let wasMuted = state.playerAudioPreference.muted
-                try await click(.init(x: rect.minX - 26, y: rect.midY), in: window)
-                XCTAssertEqual(state.playerAudioPreference.muted, !wasMuted,
-                    "Recovery overlay must leave transport clickable at \(size)")
-            }
+            let volume = try frame("volume-button", in: window)
+            let wasMuted = state.playerAudioPreference.muted
+            try await click(.init(x: volume.midX, y: volume.midY), in: window)
+            XCTAssertEqual(state.playerAudioPreference.muted, !wasMuted,
+                "Recovery overlay must leave transport clickable at \(size)")
             await state.closePlayer()
         }
     }
@@ -146,5 +142,74 @@ import OKVideoPersistence
             }
             await state.closePlayer()
         }
+    }
+
+    func testCompactVolumeHoverDoesNotMoveTimeAndMuteRemainsClickable() async throws {
+        let (state, window) = try await fixture(size: .init(width: 960, height: 540))
+        defer { window.contentView = nil; window.close() }
+        seedChoice(state)
+        state.seedPlaybackStatusForTesting(live: false,
+            snapshot: .init(status: .paused, position: 62, duration: 600))
+        try await settle()
+        let before = try frame("playback-time", in: window)
+        let volume = try frame("volume-button", in: window)
+        XCTAssertEqual(volume.width, 36, accuracy: 1)
+        XCTAssertEqual(volume.height, 36, accuracy: 1)
+        XCTAssertFalse(BrowserKeyboardView.descendants(of: window.contentView!).contains { $0 is NSSlider })
+        let muted = state.playerAudioPreference.muted
+        try await click(.init(x: volume.midX, y: volume.midY), in: window)
+        XCTAssertEqual(state.playerAudioPreference.muted, !muted)
+        let tracking = try XCTUnwrap(BrowserKeyboardView.descendants(of: window.contentView!)
+            .compactMap { $0 as? PlayerVolumeHoverNSView }.first)
+        let event = try XCTUnwrap(NSEvent.enterExitEvent(with: .mouseEntered,
+            location: .init(x: volume.midX, y: volume.midY), modifierFlags: [],
+            timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 1, trackingNumber: 0, userData: nil))
+        tracking.mouseEntered(with: event)
+        try await settle()
+        XCTAssertEqual(try frame("playback-time", in: window), before,
+            "Floating volume must never push the time or toolbar")
+        func volumeIsVisible() -> Bool {
+            BrowserKeyboardView.descendants(of: window.contentView!).contains {
+                ($0 as? PlayerPresentationProbeView)?.title == "volume-popover"
+            }
+        }
+        XCTAssertTrue(volumeIsVisible())
+        let slider = try XCTUnwrap(BrowserKeyboardView.descendants(of: window.contentView!)
+            .compactMap { $0 as? NSSlider }.first)
+        let popupTracking = try XCTUnwrap(BrowserKeyboardView.descendants(of: window.contentView!)
+            .compactMap { $0 as? PlayerVolumeHoverNSView }.first { $0.role == "popover" })
+        popupTracking.mouseEntered(with: event)
+        tracking.mouseExited(with: event)
+        try await Task.sleep(nanoseconds: 400_000_000)
+        XCTAssertTrue(volumeIsVisible(), "Moving from the button into the slider must keep it open")
+        let sliderFrame = slider.convert(slider.bounds, to: nil)
+        let previous = state.playerAudioPreference.volume
+        let panelFrame = try frame("volume-popover", in: window)
+        XCTAssertTrue(panelFrame.contains(sliderFrame), "Slider must be inside its panel's interactive bounds")
+        XCTAssertTrue(window.contentView?.superview?.hitTest(.init(x: sliderFrame.minX + 8, y: sliderFrame.midY)) === slider,
+            "Decorative volume panel layers must not intercept the native slider")
+        try await click(.init(x: sliderFrame.minX + 8, y: sliderFrame.midY), in: window)
+        XCTAssertTrue(volumeIsVisible(), "Clicking the slider must not dismiss its panel")
+        XCTAssertNotEqual(state.playerAudioPreference.volume, previous)
+        tracking.mouseExited(with: event)
+        popupTracking.mouseExited(with: event)
+        for _ in 0..<40 where volumeIsVisible() { try await Task.sleep(nanoseconds: 30_000_000) }
+        XCTAssertFalse(volumeIsVisible())
+        XCTAssertEqual(try frame("playback-time", in: window), before)
+        // A real user hovers before clicking. The volume panel must not
+        // consume that first mute click while it dismisses itself.
+        tracking.mouseEntered(with: event)
+        try await settle()
+        let mutedWhileOpen = state.playerAudioPreference.muted
+        try await click(.init(x: volume.midX, y: volume.midY), in: window)
+        XCTAssertEqual(state.playerAudioPreference.muted, !mutedWhileOpen,
+            "Mute must work on the first click with the volume popover open")
+        tracking.mouseEntered(with: event)
+        try await settle()
+        state.requestPlayerEscapeHandling()
+        try await settle()
+        XCTAssertFalse(volumeIsVisible(), "Escape dismisses the volume panel first")
+        await state.closePlayer()
     }
 }

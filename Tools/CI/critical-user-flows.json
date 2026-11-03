@@ -128,7 +128,10 @@
       "OKVideoMacTests/testAndroidBridgeCompletedPlaybackRequiresActualResult",
       "OKVideoMacTests/testAndroidBridgeStrictTerminalResponseRejectsMissingInteractionID",
       "OKVideoMacTests/testAndroidBridgeStrictEmptyActionAcknowledgementRemainsPending",
-      "OKVideoMacTests/testAndroidBridgeRejectsTerminalResponseFromDifferentInteraction"
+      "OKVideoMacTests/testAndroidBridgeRejectsTerminalResponseFromDifferentInteraction",
+      "BilibiliPlaybackFixTests/testResponsiveControlsReserveSpaceOnlyWhenQualityIsVisible",
+      "OKVideoMacTests/testLiveImmersiveControlsScaleWithPlayerViewport",
+      "OKVideoMacTests/testPlayerPanelsRemainInsideMinimumViewportAndAboveControls"
     ],
     "desktop": [
       "PlayerPanelDismissalTests/testOutsideClickClosesEachPanelWithoutChangingPlayback",
@@ -147,7 +150,9 @@
       "PlayerOverlayLayoutTests/testProductionControlsRenderAtMinimumAndWideViewports",
       "PlayerStatusInteractionTests/testHistoryChoiceRespondsToMouseAcrossCardAndWindowSizes",
       "PlayerStatusInteractionTests/testCancelRecoveryRespondsToMouseAndLeavesTransportUsable",
-      "PlayerStatusInteractionTests/testFailureRetryOriginalDetailsAndReturnReceiveMouse"
+      "PlayerStatusInteractionTests/testFailureRetryOriginalDetailsAndReturnReceiveMouse",
+      "PlayerStatusPresentationTests/testCompactRowsKeepAnchorsAndHitAreasStable",
+      "PlayerStatusInteractionTests/testCompactVolumeHoverDoesNotMoveTimeAndMuteRemainsClickable"
     ]
   }
 }

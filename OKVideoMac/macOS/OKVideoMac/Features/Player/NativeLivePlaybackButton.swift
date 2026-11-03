@@ -23,7 +23,7 @@ struct NativeLivePlaybackButton: NSViewRepresentable {
         context.coordinator.action = action
         let title = paused ? L10n.string("common.play", fallback: "Play") : L10n.string("common.pause", fallback: "Pause")
         button.image = NSImage(systemSymbolName: paused ? "play.fill" : "pause.fill", accessibilityDescription: title)?
-            .withSymbolConfiguration(.init(pointSize: 18, weight: .medium))
+            .withSymbolConfiguration(.init(pointSize: 22, weight: .medium))
         button.toolTip = title
         button.setAccessibilityLabel(title)
     }
@@ -37,5 +37,39 @@ struct NativeLivePlaybackButton: NSViewRepresentable {
 /// Keep the actual AppKit hit area as large as the SwiftUI layout slot.
 /// Drawing, tracking and keyboard activation remain owned by NSButton.
 private final class LivePlaybackNSButton: NSButton {
-    override var intrinsicContentSize: NSSize { NSSize(width: 38, height: 38) }
+    override var intrinsicContentSize: NSSize { NSSize(width: 36, height: 36) }
+}
+
+/// Observe hover without intercepting the mute button's pointer events.
+struct PlayerVolumeOverlayAnchorKey: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>?
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = nextValue() ?? value
+    }
+}
+
+struct PlayerVolumeHoverTracking: NSViewRepresentable {
+    var role = "button"
+    let onHover: (Bool) -> Void
+    func makeNSView(context: Context) -> PlayerVolumeHoverNSView { PlayerVolumeHoverNSView() }
+    func updateNSView(_ view: PlayerVolumeHoverNSView, context: Context) {
+        view.role = role; view.onHover = onHover
+    }
+}
+
+final class PlayerVolumeHoverNSView: NSView {
+    var role = "button"
+    var onHover: (Bool) -> Void = { _ in }
+    private var area: NSTrackingArea?
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let area { removeTrackingArea(area) }
+        let next = NSTrackingArea(rect: bounds,
+            options: [.inVisibleRect, .activeInKeyWindow, .mouseEnteredAndExited],
+            owner: self, userInfo: nil)
+        addTrackingArea(next); area = next
+    }
+    override func mouseEntered(with event: NSEvent) { onHover(true) }
+    override func mouseExited(with event: NSEvent) { onHover(false) }
 }

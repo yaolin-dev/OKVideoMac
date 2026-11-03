@@ -1,6 +1,6 @@
 # OKVideoMac
 
-The current release candidate is **0.9.1 (Build 187)**. Resource-based history recovery; stable TMDB matching; 20-way search with local source ordering and automatic scroll loading; EPG cleanup and timestamp caching; lighter playback controls; scoped media proxy settings; and request-scoped Quark/CatPaw seek recovery. See [release notes](Docs/RELEASE_NOTES_0.9.1.md). Formal signing, notarization and publication are tracked in the release readiness record.
+The current release candidate is **0.9.1 (Build 188)**. Resource-based history recovery; stable TMDB matching; 20-way search with local source ordering and automatic scroll loading; EPG cleanup and timestamp caching; lighter playback controls; scoped media proxy settings; and request-scoped Quark/CatPaw seek recovery. See [release notes](Docs/RELEASE_NOTES_0.9.1.md). Formal signing, notarization and publication are tracked in the release readiness record.
 
 The latest stable release is **0.9.0 (Build 155)** with reorganized Settings, conditional TMDB details, DASH, live previews and playback/stability repairs. Developer ID, Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks passed. See [release notes](Docs/RELEASE_NOTES_0.9.0.md) and [formal verification](Docs/RELEASE_VALIDATION_0.9.0.md).
 

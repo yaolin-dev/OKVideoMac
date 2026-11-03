@@ -139,9 +139,9 @@ final class BilibiliPlaybackFixTests: XCTestCase {
     func testResponsiveControlsReserveSpaceOnlyWhenQualityIsVisible() {
         let ordinary = PlayerOverlayLayout(viewportSize: CGSize(width: 900, height: 600))
         let choices = PlayerOverlayLayout(viewportSize: CGSize(width: 900, height: 600), showsQuality: true)
-        XCTAssertGreaterThan(choices.expandedToolsWidth, ordinary.expandedToolsWidth)
+        XCTAssertEqual(choices.expandedToolsWidth, ordinary.expandedToolsWidth)
         XCTAssertTrue(ordinary.showsAllTools)
-        XCTAssertFalse(choices.showsAllTools)
+        XCTAssertTrue(choices.showsAllTools)
         XCTAssertTrue(PlayerOverlayLayout(viewportSize: CGSize(width: 1400, height: 900), showsQuality: true).showsAllTools)
     }
 
@@ -19458,23 +19458,13 @@ final class OKVideoMacTests: XCTestCase {
             viewportSize: CGSize(width: 1_920, height: 1_080)
         )
 
-        XCTAssertEqual(compact.scale, 0.80, accuracy: 0.0001)
-        XCTAssertEqual(standard.scale, 1, accuracy: 0.0001)
-        XCTAssertEqual(large.scale, 1.10, accuracy: 0.0001)
-        XCTAssertEqual(compact.controlDiameter, 34, accuracy: 0.001)
-        XCTAssertEqual(standard.controlDiameter, 40, accuracy: 0.001)
-        XCTAssertEqual(large.controlDiameter, 44, accuracy: 0.001)
-        XCTAssertEqual(compact.volumeSliderWidth, 76, accuracy: 0.001)
-        XCTAssertEqual(standard.volumeSliderWidth, 92, accuracy: 0.001)
-        XCTAssertEqual(large.volumeSliderWidth, 101.2, accuracy: 0.001)
-        XCTAssertLessThan(
-            compact.outerHorizontalPadding,
-            standard.outerHorizontalPadding
-        )
-        XCTAssertLessThan(
-            standard.outerHorizontalPadding,
-            large.outerHorizontalPadding
-        )
+        XCTAssertEqual(compact, standard)
+        XCTAssertEqual(standard, large)
+        XCTAssertEqual(standard.controlDiameter, 36)
+        XCTAssertEqual(standard.primaryIconSize, 22)
+        XCTAssertEqual(standard.volumeSliderWidth, 76)
+        XCTAssertEqual(standard.outerBottomPadding, 12)
+
     }
 
     func testOnDemandWindowUsesOverrideOrDetectedVideoRatio() {
@@ -19565,8 +19555,8 @@ final class OKVideoMacTests: XCTestCase {
             XCTAssertLessThanOrEqual(layout.panelMaximumSize.height + layout.panelBottomInset + 24, size.height)
             XCTAssertGreaterThan(layout.panelMaximumSize.height, 200)
         }
-        XCTAssertTrue(PlayerOverlayLayout(viewportSize: CGSize(width: 640, height: 360)).isCompact)
-        XCTAssertTrue(PlayerOverlayLayout(viewportSize: CGSize(width: 759, height: 450)).isCompact)
+        XCTAssertFalse(PlayerOverlayLayout(viewportSize: CGSize(width: 640, height: 360)).isCompact)
+        XCTAssertFalse(PlayerOverlayLayout(viewportSize: CGSize(width: 759, height: 450)).isCompact)
         XCTAssertFalse(PlayerOverlayLayout(viewportSize: CGSize(width: 900, height: 450)).isCompact)
         XCTAssertFalse(PlayerOverlayLayout(viewportSize: CGSize(width: 1024, height: 576)).isCompact)
     }

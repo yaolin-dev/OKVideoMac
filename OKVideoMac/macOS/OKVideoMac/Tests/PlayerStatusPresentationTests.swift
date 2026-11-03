@@ -187,4 +187,42 @@ import OKVideoCore
             try capture(host, "live-\(Int(size.width))-failed")
         }
     }
+
+    func testCompactRowsKeepAnchorsAndHitAreasStable() async throws {
+        for size in [CGSize(width: 640, height: 360), .init(width: 1200, height: 675), .init(width: 2240, height: 1260)] {
+            let (state, window, _) = fixture(size: size)
+            defer { cleanup(window) }
+            for live in [false, true] {
+                state.seedPlaybackStatusForTesting(live: live,
+                    snapshot: .init(status: .paused, position: 62, duration: live ? 0 : 600))
+                try await settle()
+                let bar = try status(window, title: "control-bar")
+                let play = try status(window, title: "transport-playPause")
+                let volume = try status(window, title: "volume-button")
+                let settings = try status(window, title: "utility-settings")
+                let fullscreen = try status(window, title: "fullscreen-button")
+                XCTAssertEqual(bar.minY, 12, accuracy: 1)
+                XCTAssertEqual(bar.height, live ? 36 : 56, accuracy: 1)
+                XCTAssertEqual(play.minX, 20, accuracy: 1)
+                for control in [play, volume, settings, fullscreen] {
+                    XCTAssertEqual(control.width, 36, accuracy: 1)
+                    XCTAssertEqual(control.height, 36, accuracy: 1)
+                    XCTAssertEqual(control.minY, bar.minY, accuracy: 1)
+                    XCTAssertTrue(CGRect(origin: .zero, size: size).contains(control))
+                }
+                XCTAssertLessThan(play.maxX, volume.minX)
+                XCTAssertEqual(size.width - fullscreen.maxX, 20, accuracy: 1)
+                if live {
+                    XCTAssertFalse(labels(window).contains("timeline"))
+                } else {
+                    let timeline = try status(window, title: "timeline")
+                    let time = try status(window, title: "playback-time")
+                    XCTAssertEqual(timeline.height, 16, accuracy: 1)
+                    XCTAssertEqual(timeline.minY - play.maxY, 4, accuracy: 1)
+                    XCTAssertLessThan(volume.maxX, time.minX)
+                    XCTAssertLessThan(time.maxX, settings.minX)
+                }
+            }
+        }
+    }
 }

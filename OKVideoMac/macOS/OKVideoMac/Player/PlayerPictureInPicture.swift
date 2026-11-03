@@ -214,13 +214,14 @@ struct PlayerPictureInPictureButton: View {
         if coordinator.isAvailable {
             Button { coordinator.toggle() } label: {
                 Image(systemName: coordinator.isPresented ? "pip.exit" : "pip.enter")
-                    .font(.system(size: 18, weight: .medium)).frame(width: 38, height: 38)
+                    .font(.system(size: 18, weight: .medium)).frame(width: 36, height: 36)
                     .contentShape(Rectangle())
                     .modifier(PlayerControlHoverEffect(enabled: !isDisabled))
             }
             .buttonStyle(.plain)
             .disabled(isDisabled)
             .accessibilityIdentifier("player.picture-in-picture")
+            .playerPresentationProbe("picture-in-picture-button")
             .accessibilityLabel(coordinator.buttonTitle)
             .playerControlHelp(coordinator.buttonTitle)
         }
