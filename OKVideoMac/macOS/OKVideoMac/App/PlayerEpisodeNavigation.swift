@@ -1,6 +1,19 @@
 import Foundation
 import OKVideoCore
 
+/// Shared local ordering context for the picker and transport. It is never
+/// written into provider metadata, resource identities, or history records.
+enum EpisodeListSeasonContext {
+    static func inferredFirstSeason(in positions: [(season: Int?, episode: Int)]) -> Int? {
+        let seasons = Set(positions.compactMap(\.season))
+        let unmarked = Set(positions.filter { $0.season == nil }.map(\.episode))
+        let marked = Set(positions.filter { $0.season != nil }.map(\.episode))
+        let numbers = unmarked.union(marked)
+        return seasons == [1] && unmarked.count >= 3 && unmarked.isDisjoint(with: marked) &&
+            numbers.min() == 1 && numbers.max() == numbers.count ? 1 : nil
+    }
+}
+
 enum PlayerEpisodeNavigationConfirmation: Equatable, Sendable {
     case gap(expected: Int, available: Int)
     case seasonChange(season: Int, episode: Int)
@@ -76,15 +89,25 @@ struct PlayerEpisodeNavigationIndex: Sendable {
         let semantics = PlaybackResourceAnalyzer.analyzeList(episodes, categoryName: categoryName)
         let videoOverrides = PlayerEpisodeVideoEvidence.eligibleIDs(in: episodes,
             categoryName: categoryName, confirmedVideoEpisodeID: confirmedVideoEpisodeID)
-        for (episode, value) in zip(episodes, semantics) {
-            guard !PlaybackResourceAnalyzer.isNonVideoResource(episode) || videoOverrides.contains(episode.id),
-                  value.hasLocalEpisode, let number = value.episode else { continue }
-            let position = Position(season: value.season, episode: number)
+        let eligible = zip(episodes, semantics).filter { episode, value in
+            (!PlaybackResourceAnalyzer.isNonVideoResource(episode) || videoOverrides.contains(episode.id)) && value.hasLocalEpisode
+        }
+        // Some providers mix "09.mp4" and "S01E22.mkv" in one season.
+        // Infer first-season membership only for a complete, non-overlapping
+        // numbered run starting at 1, supported by several unmarked episodes.
+        // This is a navigation-only interpretation: never rewrite file IDs,
+        // source indices, metadata, or saved history with an inferred season.
+        let inferredSeason = EpisodeListSeasonContext.inferredFirstSeason(in: eligible.compactMap { _, value in
+            value.episode.map { (season: value.season, episode: $0) }
+        })
+        for (episode, value) in eligible {
+            guard let number = value.episode else { continue }
+            let position = Position(season: value.season ?? inferredSeason, episode: number)
             positions[position, default: []].append(Candidate(episode: episode, version: value.versionLabels))
             positionsByID[episode.id] = position
         }
-        // An unnumbered season must never be borrowed from a numbered season.
-        guard !(positions.keys.contains { $0.season == nil } && positions.keys.contains { $0.season != nil }) else { return }
+        // Ambiguous season evidence is local to a boundary. It must not disable
+        // valid neighbours elsewhere in this source.
         groups = positions.keys.sorted().map { Group(position: $0, candidates: positions[$0]!) }
     }
 
@@ -101,7 +124,8 @@ struct PlayerEpisodeNavigationIndex: Sendable {
         let candidates = !sameVersion.isEmpty ? sameVersion : !sameEdition.isEmpty ? sameEdition : group.candidates
         let episodes = candidates.map(\.episode)
         if group.position.season != position.season {
-            return .confirmation(episodes, .seasonChange(season: group.position.season!, episode: group.position.episode))
+            guard position.season != nil, let targetSeason = group.position.season else { return .unavailable }
+            return .confirmation(episodes, .seasonChange(season: targetSeason, episode: group.position.episode))
         }
         if group.position.episode != position.episode + offset {
             return .confirmation(episodes, .gap(expected: position.episode + offset, available: group.position.episode))

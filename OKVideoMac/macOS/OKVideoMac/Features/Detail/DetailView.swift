@@ -1641,6 +1641,9 @@ enum EpisodeListPresentation {
         query: String,
         sortOrder: EpisodeSortOrder
     ) -> [EpisodePresentation] {
+        // Resolve against the full list, before search filtering, so a query
+        // cannot change the relative ordering of the same resources.
+        let inferredSeason = inferredFirstSeason(in: presentations)
         let keyword = query.trimmingCharacters(in: .whitespacesAndNewlines)
         let values: [EpisodePresentation]
         if keyword.isEmpty {
@@ -1656,21 +1659,22 @@ enum EpisodeListPresentation {
         case .sourceOrder:
             return values.sorted { $0.sourceIndex < $1.sourceIndex }
         case .episodeAscending:
-            return values.sorted { compare($0, $1, ascending: true) }
+            return values.sorted { compare($0, $1, ascending: true, inferredSeason: inferredSeason) }
         case .episodeDescending:
-            return values.sorted { compare($0, $1, ascending: false) }
+            return values.sorted { compare($0, $1, ascending: false, inferredSeason: inferredSeason) }
         }
     }
 
     static func rangeOptions(
         from presentations: [EpisodePresentation]
     ) -> [EpisodeRangeOption] {
+        let inferredSeason = inferredFirstSeason(in: presentations)
         let numbered = presentations
             .filter { $0.episodeNumber != nil }
-            .sorted { compare($0, $1, ascending: true) }
+            .sorted { compare($0, $1, ascending: true, inferredSeason: inferredSeason) }
         guard numbered.count > 40 else { return [] }
 
-        let seasons = Dictionary(grouping: numbered, by: { $0.seasonNumber ?? -1 })
+        let seasons = Dictionary(grouping: numbered, by: { $0.seasonNumber ?? inferredSeason ?? -1 })
         return seasons.keys.sorted().flatMap { seasonKey in
             let items = seasons[seasonKey]!
             return stride(from: 0, to: items.count, by: 20).map { start in
@@ -1684,17 +1688,25 @@ enum EpisodeListPresentation {
         }
     }
 
+    private static func inferredFirstSeason(in presentations: [EpisodePresentation]) -> Int? {
+        EpisodeListSeasonContext.inferredFirstSeason(in: presentations.compactMap { value in
+            guard !value.isSpecial, let number = value.episodeNumber else { return nil }
+            return (season: value.seasonNumber, episode: number)
+        })
+    }
+
     private static func compare(
         _ lhs: EpisodePresentation,
         _ rhs: EpisodePresentation,
-        ascending: Bool
+        ascending: Bool,
+        inferredSeason: Int?
     ) -> Bool {
         guard let lhsEpisode = lhs.episodeNumber else {
             return rhs.episodeNumber == nil && lhs.sourceIndex < rhs.sourceIndex
         }
         guard let rhsEpisode = rhs.episodeNumber else { return true }
-        let lhsKey = (lhs.seasonNumber ?? 0, lhsEpisode)
-        let rhsKey = (rhs.seasonNumber ?? 0, rhsEpisode)
+        let lhsKey = (lhs.seasonNumber ?? inferredSeason ?? 0, lhsEpisode)
+        let rhsKey = (rhs.seasonNumber ?? inferredSeason ?? 0, rhsEpisode)
         if lhsKey == rhsKey {
             return lhs.sourceIndex < rhs.sourceIndex
         }

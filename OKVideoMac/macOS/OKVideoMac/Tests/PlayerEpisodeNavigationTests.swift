@@ -401,3 +401,136 @@ final class UnifiedEpisodeNavigationTests: XCTestCase {
         XCTAssertNil(app.playerEpisodeNavigationChoice)
     }
 }
+
+// Complete provider response captured 2026-11-03; all URLs and persistent IDs are synthetic.
+enum MixedSeasonProviderFixture {
+    static let order = [15, 26, 27, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 13, 14, 16, 17, 18, 19, 20, 21, 24, 25, 28, 29, 32, 33, 34, 35, 36, 37, 22, 23, 30, 31]
+    static var episodes: [PlayEpisode] {
+        let names = [
+            "[1.07GB]15_4K.mp4",
+            "[1.33GB]S01E26_4K.mkv",
+            "[1.38GB]S01E27_4K.mkv",
+            "[775.74MB]09.mp4",
+            "[747.88MB]10.mp4",
+            "[439.25MB]11.mp4",
+            "[416.17MB]12.mp4",
+            "[1.12GB]01-4K.高码率.mkv",
+            "[1.05GB]02-4K.高码率.mkv",
+            "[1.09GB]03-4K.高码率.mkv",
+            "[904.10MB]04-4K.高码率.mkv",
+            "[1.60GB]05-4K.高码率.mkv",
+            "[1.55GB]06-4K.高码率.mkv",
+            "[1.18GB]07-4K.高码率.mkv",
+            "[1.08GB]08-4K.高码率.mkv",
+            "[913.97MB]13-4K.高码率.mp4",
+            "[929.28MB]14-4K.高码率.mp4",
+            "[894.38MB]16-4K.高码率.mp4",
+            "[767.40MB]17-4K.高码率.mp4",
+            "[769.69MB]18-4K.高码率.mp4",
+            "[938.70MB]19-4K.高码率.mp4",
+            "[1.01GB]20-4K.高码率.mp4",
+            "[1.01GB]21-4K.高码率.mp4",
+            "[985.96MB]24_4K.高码率.mp4",
+            "[881.81MB]25_4K.高码率.mp4",
+            "[1.02GB]28_4K.高码率.mp4",
+            "[996.79MB]29_4K.高码率.mp4",
+            "[848.57MB]32_4K.高码率.mp4",
+            "[986.22MB]33_4K.高码率.mp4",
+            "[1.01GB]34_4K.高码率.mp4",
+            "[1005.72MB]35_4K.高码率.mp4",
+            "[1.44GB]36_4K.高码率.mp4",
+            "[1.31GB]37_4K.高码率.mp4",
+            "[1.45GB]S01E22_4K_HDR_60fps.mkv",
+            "[1.61GB]S01E23_4K_HDR_60fps.mkv",
+            "[1.68GB]S01E30_4K_HDR_60fps.mkv",
+            "[1.65GB]S01E31_4K_HDR_60fps.mkv"
+        ]
+        return zip(order, names).map { number, name in
+            PlayEpisode(name: name, url: "fixture:provider-\(number)", referenceIdentity: "provider-file-\(number)")
+        }
+    }
+}
+
+final class MixedSeasonProviderNavigationTests: XCTestCase {
+    func testCompleteActual37ResourceLineNavigatesEveryNeighbourWithoutRewritingIdentity() async throws {
+        let values = MixedSeasonProviderFixture.episodes
+        let byNumber = Dictionary(uniqueKeysWithValues: zip(MixedSeasonProviderFixture.order, values))
+        let encoder = JSONEncoder(); encoder.outputFormatting = .sortedKeys
+        let encoded = try encoder.encode(values)
+        for source in [values, Array(values.reversed())] {
+            let index = PlayerEpisodeNavigationIndex(episodes: source, categoryName: "嘟嘟")
+            for number in 1...37 {
+                for offset in [-1, 1] {
+                    let target: PlayerEpisodeNavigationResult = byNumber[number + offset].map { .available($0) } ?? .boundary
+                    XCTAssertEqual(index.adjacent(to: byNumber[number]!.id, offset: offset), target,
+                        "Actual provider E\(number), offset \(offset)")
+                }
+                XCTAssertEqual(PlayerEpisodeAdvancePolicy.nextEpisode(in: source,
+                    currentEpisodeID: byNumber[number]!.id, enabled: true, categoryName: "嘟嘟"), byNumber[number + 1])
+            }
+        }
+        let snapshot = await EpisodePresentationRepository().snapshot(videoID: "actual-provider",
+            source: .init(name: "嘟嘟无限", episodes: values), categoryName: "嘟嘟")
+        XCTAssertEqual(snapshot.values.compactMap(\.episodeNumber), Array(1...37))
+        XCTAssertEqual(EpisodeListPresentation.filterAndSort(snapshot.values, query: "", sortOrder: .episodeDescending)
+            .compactMap(\.episodeNumber), Array((1...37).reversed()))
+        XCTAssertEqual(EpisodeListPresentation.filterAndSort(snapshot.values, query: "", sortOrder: .sourceOrder)
+            .map(\.episode), values)
+        let filteredNumbers = EpisodeListPresentation.filterAndSort(snapshot.values, query: "4K", sortOrder: .episodeAscending)
+            .compactMap(\.episodeNumber)
+        XCTAssertEqual(filteredNumbers, Array(1...37).filter { !(9...12).contains($0) })
+        let extended = values + (38...61).map { PlayEpisode(name: "E\($0).mp4", url: "fixture:extra-\($0)") }
+        let extendedValues = EpisodeListPresentation.presentations(from: extended, query: "", sortOrder: .episodeAscending)
+        XCTAssertEqual(extendedValues.compactMap(\.episodeNumber), Array(1...61))
+        let ranges = EpisodeListPresentation.rangeOptions(from: extendedValues)
+        XCTAssertEqual(ranges.map { $0.episodeIDs.count }, [20, 20, 20, 1])
+        XCTAssertEqual(ranges.first?.episodeIDs, Set(extendedValues.prefix(20).map(\.id)))
+        for presentation in snapshot.values {
+            XCTAssertEqual(presentation.episode, values[presentation.sourceIndex])
+        }
+        XCTAssertEqual(try encoder.encode(values), encoded)
+        XCTAssertEqual(PlaybackResourceAnalyzer.analyze(byNumber[11]!).season, nil)
+        XCTAssertEqual(PlaybackResourceAnalyzer.analyze(byNumber[26]!).season, 1)
+    }
+
+    func testAmbiguousSeasonEvidenceCannotDisableUnrelatedNeighboursOrCrossUnknownSeason() {
+        for names in [
+            ["E1.mp4", "E2.mp4", "E3.mp4", "S02E4.mp4", "S02E5.mp4"],
+            ["E1.mp4", "E2.mp4", "E3.mp4", "S01E2.mp4", "S01E3.mp4"],
+            ["E1.mp4", "E2.mp4", "E3.mp4", "S01E5.mp4", "S01E6.mp4"]
+        ] {
+            let values = names.map { PlayEpisode(name: $0, url: "fixture:" + $0) }
+            let index = PlayerEpisodeNavigationIndex(episodes: values)
+            XCTAssertEqual(index.adjacent(to: values[1].id, offset: -1), .available(values[0]))
+            XCTAssertEqual(index.adjacent(to: values[1].id, offset: 1), .available(values[2]))
+            XCTAssertEqual(index.adjacent(to: values[2].id, offset: 1), .unavailable)
+            XCTAssertEqual(index.adjacent(to: values[3].id, offset: -1), .unavailable)
+            XCTAssertEqual(index.adjacent(to: values[3].id, offset: 1), .available(values[4]))
+            XCTAssertNil(PlayerEpisodeAdvancePolicy.nextEpisode(in: values, currentEpisodeID: values[2].id, enabled: true))
+        }
+        // First-season proof need not come from the final file or the source's order.
+        let values = ["S01E1.mp4", "E2.mp4", "E3.mp4", "E4.mp4"].map { PlayEpisode(name: $0, url: $0) }
+        XCTAssertEqual(PlayerEpisodeNavigationIndex(episodes: values).adjacent(to: values[1].id, offset: -1), .available(values[0]))
+    }
+}
+
+@MainActor final class MixedSeasonProviderNavigationStateTests: XCTestCase {
+    func testActual37ResourceLineEnablesBothButtonsIncludingEpisode11AndKeepsOriginalSource() async {
+        let values = MixedSeasonProviderFixture.episodes
+        let byNumber = Dictionary(uniqueKeysWithValues: zip(MixedSeasonProviderFixture.order, values))
+        let source = PlaySource(name: "嘟嘟无限", episodes: values)
+        let app = AppState(environment: nil)
+        for number in 1...37 {
+            await app.seedEpisodeNavigationForTesting(source: source, current: byNumber[number]!, category: "嘟嘟")
+            XCTAssertEqual(app.hasPreviousEpisode, number > 1, "E\(number)")
+            XCTAssertEqual(app.hasNextEpisode, number < 37, "E\(number)")
+            for offset in [-1, 1] {
+                XCTAssertEqual(app.playerEpisodeNavigation(offset: offset).uniqueEpisode, byNumber[number + offset])
+            }
+            XCTAssertEqual(app.playerEpisodeNavigation(offset: 1, automatic: true).uniqueEpisode, byNumber[number + 1])
+            XCTAssertEqual(app.playerPanelEpisodePresentations.compactMap(\.episodeNumber), Array(1...37))
+            XCTAssertEqual(app.playerEpisodes, values)
+        }
+        await app.closePlayer()
+    }
+}

@@ -142,7 +142,10 @@
       "TMDBDetailPerformanceTests/testRepeatedDisplayReadsReuseOffMainMappingAndPreserveResourceOrder",
       "TMDBDetailPerformanceTests/testSameNamedSourceReplacementAndCategoryCannotReuseStaleMapping",
       "TMDBDetailPerformanceTests/testSeasonSelectionInvalidatesAndCancellationRejectsLateMapping",
-      "TMDBDetailPerformanceTests/testMemoryTrimPreservesVisiblePixelsAndRestoresFromDiskWithoutNetwork"
+      "TMDBDetailPerformanceTests/testMemoryTrimPreservesVisiblePixelsAndRestoresFromDiskWithoutNetwork",
+      "MixedSeasonProviderNavigationTests/testCompleteActual37ResourceLineNavigatesEveryNeighbourWithoutRewritingIdentity",
+      "MixedSeasonProviderNavigationTests/testAmbiguousSeasonEvidenceCannotDisableUnrelatedNeighboursOrCrossUnknownSeason",
+      "MixedSeasonProviderNavigationStateTests/testActual37ResourceLineEnablesBothButtonsIncludingEpisode11AndKeepsOriginalSource"
     ],
     "desktop": [
       "PlayerPanelDismissalTests/testOutsideClickClosesEachPanelWithoutChangingPlayback",

@@ -197,15 +197,15 @@ import OKVideoPersistence
     func testMixedQualityEightNineAndTwelveThirteenDecodeViaButtonsAutoplayAndResume() async throws {
         let (state, environment, window, base) = try await fixture()
         do {
-            let values = MixedQualityEpisodeFixture.episodes.enumerated().map { index, item -> PlayEpisode in
+            let values = MixedSeasonProviderFixture.episodes.enumerated().map { index, item -> PlayEpisode in
                 var value = item
-                value.url = base + "/seek/manifest.mpd?episode=\(MixedQualityEpisodeFixture.order[index])"
+                value.url = base + "/seek/manifest.mpd?episode=\(MixedSeasonProviderFixture.order[index])"
                 return value
             }
             let source = PlaySource(name: "混合画质验证", episodes: values)
             let detail = VideoDetail(summary: .init(siteKey: "media-journey", siteName: "Fixture",
                 videoID: "mixed-quality", title: "混合画质分集验证", categoryName: "嘟嘟"), playSources: [source])
-            let byNumber = Dictionary(uniqueKeysWithValues: zip(MixedQualityEpisodeFixture.order, values))
+            let byNumber = Dictionary(uniqueKeysWithValues: zip(MixedSeasonProviderFixture.order, values))
             let host = try XCTUnwrap(window.contentView)
             func click(_ name: String) async throws {
                 let probe = try XCTUnwrap(BrowserKeyboardView.descendants(of: host)
@@ -220,10 +220,10 @@ import OKVideoPersistence
                     try await Task.sleep(nanoseconds: 70_000_000)
                 }
             }
-            for number in [8, 12] {
+            for number in [8, 11, 12, 21, 23, 25, 27, 29, 31] {
                 await state.startPlayback(detail: detail, source: source, episode: byNumber[number]!)
                 try await wait("E\(number) decodes") { state.hasCurrentPlaybackStarted && state.playerSnapshot.position > 0.2 && !state.isPlayerEpisodeListPreparing }
-                XCTAssertEqual(state.playerPanelEpisodePresentations.compactMap(\.episodeNumber), Array(1...20))
+                XCTAssertEqual(state.playerPanelEpisodePresentations.compactMap(\.episodeNumber), Array(1...37))
                 XCTAssertTrue(state.hasNextEpisode)
                 await state.seek(to: 12)
                 try await wait("Progress established") { !state.playerSnapshot.isSeeking && state.playerSnapshot.position >= 11 }
@@ -236,7 +236,7 @@ import OKVideoPersistence
                 try await wait("Native next reaches E\(number + 1)") {
                     state.currentPlayerEpisodeID == byNumber[number + 1]!.id && state.hasCurrentPlaybackStarted
                 }
-                XCTAssertNotNil(state.playerEpisodeTransitionNotice)
+                if [8, 12].contains(number) { XCTAssertNotNil(state.playerEpisodeTransitionNotice) }
                 try await click("transport-previous")
                 try await wait("Native previous returns to E\(number)") {
                     state.currentPlayerEpisodeID == byNumber[number]!.id && state.hasCurrentPlaybackStarted
@@ -254,7 +254,7 @@ import OKVideoPersistence
                 let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
                 host.cacheDisplay(in: host.bounds, to: bitmap)
                 let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-                let output = URL(fileURLWithPath: "/private/tmp/OKVideoMac-Episode189-Visuals")
+                let output = URL(fileURLWithPath: "/private/tmp/OKVideoMac-Episode190-Visuals")
                 try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
                 try data.write(to: output.appendingPathComponent("episode-\(number + 1)-sorted.png"))
                 let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.png")
