@@ -18,6 +18,7 @@ public final class LocalCloudFileReaderTest {
                 assertArrayEquals(backend.slice(offset, 400), read(reader.open("bytes=" + offset + "-" + (offset + 399)).body));
             }
             assertEquals(3, backend.requests.get());
+            assertEquals(backend.requests.get(), backend.closeRequests.get());
             assertEquals(1, backend.peak.get());
         }
     }
@@ -99,6 +100,7 @@ public final class LocalCloudFileReaderTest {
         final ServerSocket server = new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"));
         final ExecutorService clients = Executors.newCachedThreadPool();
         final AtomicInteger requests = new AtomicInteger(), active = new AtomicInteger(), peak = new AtomicInteger();
+        final AtomicInteger closeRequests = new AtomicInteger();
         volatile String fault = "";
         Backend(int length) throws IOException {
             bytes = new byte[length]; for (int i = 0; i < length; i++) bytes[i] = (byte)(i * 31 + i / 113);
@@ -118,7 +120,10 @@ public final class LocalCloudFileReaderTest {
             try (Socket socket = connection) {
                 BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.US_ASCII));
                 String line, range = "";
-                while ((line = input.readLine()) != null && !line.isEmpty()) if (line.toLowerCase(Locale.ROOT).startsWith("range:")) range = line.substring(6).trim();
+                while ((line = input.readLine()) != null && !line.isEmpty()) {
+                    if (line.toLowerCase(Locale.ROOT).startsWith("range:")) range = line.substring(6).trim();
+                    if (line.equalsIgnoreCase("Connection: close")) closeRequests.incrementAndGet();
+                }
                 String[] parts = range.substring(6).split("-", -1); int start = Integer.parseInt(parts[0]), end = Math.min(bytes.length - 1, Integer.parseInt(parts[1]));
                 int length = end - start + 1, bodyLength = length;
                 if (fault.equals("short")) bodyLength /= 2;

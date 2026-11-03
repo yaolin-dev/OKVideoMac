@@ -42,6 +42,7 @@ final class LocalCloudFileReader {
     private String mime = "application/octet-stream";
     private String validator;
     private volatile boolean failed;
+    private volatile String failureDescription = "Local media context failed";
 
     static boolean supports(URI uri) {
         String host = uri.getHost(), path = uri.getPath();
@@ -89,7 +90,8 @@ final class LocalCloudFileReader {
     }
 
     private void check() throws IOException {
-        if (failed || !current.getAsBoolean() || Thread.currentThread().isInterrupted())
+        if (failed) throw new IOException(failureDescription);
+        if (!current.getAsBoolean() || Thread.currentThread().isInterrupted())
             throw new IOException("Local media context expired or failed");
     }
 
@@ -110,12 +112,18 @@ final class LocalCloudFileReader {
                 if (!h.getKey().equalsIgnoreCase("Range") && !h.getKey().equalsIgnoreCase("Accept-Encoding"))
                     request.header(h.getKey(), h.getValue());
             }
-            request.header("Range", "bytes=" + start + "-" + end).header("Accept-Encoding", "identity");
+            // Its keep-alive connection can close between two completed
+            // ranges. Each bounded transfer must own a fresh connection.
+            request.header("Range", "bytes=" + start + "-" + end).header("Accept-Encoding", "identity")
+                    .header("Connection", "close");
             Call call = CLIENT.newCall(request.build());
             byte[] bytes;
             long provenTotal;
             String provenMime, provenValidator;
+            String stage = "headers";
+            int expected = -1, received = 0;
             try (Response response = call.execute()) {
+                stage = "identity";
                 if (!(response.code() == 206 || (start == 0 && response.code() == 200)) || response.body() == null)
                     throw new IOException("Local media range rejected");
                 Matcher match = CONTENT_RANGE.matcher(response.header("Content-Range", ""));
@@ -129,7 +137,8 @@ final class LocalCloudFileReader {
                 provenValidator = response.header("ETag");
                 if (total >= 0 && validator != null && !validator.equals(provenValidator))
                     throw new IOException("Local media validator changed");
-                int expected = (int) (returnedEnd - start + 1);
+                expected = (int) (returnedEnd - start + 1);
+                stage = "body";
                 ByteArrayOutputStream buffer = new ByteArrayOutputStream(expected);
                 InputStream input = response.body().byteStream();
                 byte[] scratch = new byte[16 * 1024];
@@ -137,15 +146,18 @@ final class LocalCloudFileReader {
                     int count = input.read(scratch, 0, Math.min(scratch.length, expected + 1 - buffer.size()));
                     if (count < 0) break;
                     if (count > 0) buffer.write(scratch, 0, count);
+                    received = buffer.size();
                 }
                 if (buffer.size() != expected) throw new IOException("Incomplete or oversized local media range");
                 bytes = buffer.toByteArray();
                 provenMime = response.header("Content-Type", "application/octet-stream");
                 if (provenMime.indexOf('\r') >= 0 || provenMime.indexOf('\n') >= 0) provenMime = "application/octet-stream";
             } catch (Exception error) {
+                failureDescription = "Local media bounded read failed: offset=" + start + " stage=" + stage
+                        + " received=" + received + " expected=" + expected + " type=" + error.getClass().getSimpleName();
                 failed = true;
                 // Do not retain URL-bearing OkHttp exceptions in logcat.
-                throw new IOException("Local media bounded read failed");
+                throw new IOException(failureDescription);
             }
             check();
             total = provenTotal; mime = provenMime; validator = provenValidator;
