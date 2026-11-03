@@ -1078,6 +1078,8 @@ struct EpisodePresentation: Identifiable, Equatable, Sendable {
     let episode: PlayEpisode
     let displayName: String
     let originalName: String
+    /// Local display/grouping context; the original provider metadata remains
+    /// unchanged on `episode` and must be used for persistent identity.
     let seasonNumber: Int?
     let episodeNumber: Int?
     let isSpecial: Bool
@@ -1611,6 +1613,17 @@ enum EpisodeListPresentation {
                 title = labels.isEmpty ? parsed.displayName : labels
             }
             return renaming(parsed, title)
+        }
+        // Resolve once on the complete source, before filtering or pagination.
+        // Every display consumer must see the same season membership, including
+        // the player's 50-item page policy. Keep the original episode untouched.
+        if let season = inferredFirstSeason(in: values) {
+            values = values.map { value in
+                guard !value.isSpecial, value.episodeNumber != nil else { return value }
+                return EpisodePresentation(episode: value.episode, displayName: value.displayName,
+                    originalName: value.originalName, seasonNumber: value.seasonNumber ?? season,
+                    episodeNumber: value.episodeNumber, isSpecial: value.isSpecial, sourceIndex: value.sourceIndex)
+            }
         }
         // Two versions of the same episode must remain distinguishable in every UI.
         let counts = Dictionary(values.map { ($0.displayName, 1) }, uniquingKeysWith: +)

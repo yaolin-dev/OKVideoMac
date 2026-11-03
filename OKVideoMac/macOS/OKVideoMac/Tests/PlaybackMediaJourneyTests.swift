@@ -220,10 +220,11 @@ import OKVideoPersistence
                     try await Task.sleep(nanoseconds: 70_000_000)
                 }
             }
-            for number in [8, 11, 12, 21, 23, 25, 27, 29, 31] {
+            for number in [8, 10, 11, 12, 21, 23, 25, 27, 29, 31] {
                 await state.startPlayback(detail: detail, source: source, episode: byNumber[number]!)
                 try await wait("E\(number) decodes") { state.hasCurrentPlaybackStarted && state.playerSnapshot.position > 0.2 && !state.isPlayerEpisodeListPreparing }
                 XCTAssertEqual(state.playerPanelEpisodePresentations.compactMap(\.episodeNumber), Array(1...37))
+                XCTAssertEqual(PlayerEpisodePagePolicy.pages(state.playerPanelEpisodePresentations).count, 1)
                 XCTAssertTrue(state.hasNextEpisode)
                 await state.seek(to: 12)
                 try await wait("Progress established") { !state.playerSnapshot.isSeeking && state.playerSnapshot.position >= 11 }

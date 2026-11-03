@@ -472,6 +472,8 @@ final class MixedSeasonProviderNavigationTests: XCTestCase {
         let snapshot = await EpisodePresentationRepository().snapshot(videoID: "actual-provider",
             source: .init(name: "嘟嘟无限", episodes: values), categoryName: "嘟嘟")
         XCTAssertEqual(snapshot.values.compactMap(\.episodeNumber), Array(1...37))
+        XCTAssertEqual(PlayerEpisodePagePolicy.pages(snapshot.values).count, 1,
+            "The actual player's page policy must not split S01 and unmarked files")
         XCTAssertEqual(EpisodeListPresentation.filterAndSort(snapshot.values, query: "", sortOrder: .episodeDescending)
             .compactMap(\.episodeNumber), Array((1...37).reversed()))
         XCTAssertEqual(EpisodeListPresentation.filterAndSort(snapshot.values, query: "", sortOrder: .sourceOrder)
@@ -479,9 +481,12 @@ final class MixedSeasonProviderNavigationTests: XCTestCase {
         let filteredNumbers = EpisodeListPresentation.filterAndSort(snapshot.values, query: "4K", sortOrder: .episodeAscending)
             .compactMap(\.episodeNumber)
         XCTAssertEqual(filteredNumbers, Array(1...37).filter { !(9...12).contains($0) })
+        XCTAssertEqual(PlayerEpisodePagePolicy.pages(EpisodeListPresentation.filterAndSort(snapshot.values,
+            query: "4K", sortOrder: .episodeAscending)).count, 1, "Search keeps full-source grouping context")
         let extended = values + (38...61).map { PlayEpisode(name: "E\($0).mp4", url: "fixture:extra-\($0)") }
         let extendedValues = EpisodeListPresentation.presentations(from: extended, query: "", sortOrder: .episodeAscending)
         XCTAssertEqual(extendedValues.compactMap(\.episodeNumber), Array(1...61))
+        XCTAssertEqual(PlayerEpisodePagePolicy.pages(extendedValues).map(\.count), [50, 11])
         let ranges = EpisodeListPresentation.rangeOptions(from: extendedValues)
         XCTAssertEqual(ranges.map { $0.episodeIDs.count }, [20, 20, 20, 1])
         XCTAssertEqual(ranges.first?.episodeIDs, Set(extendedValues.prefix(20).map(\.id)))
