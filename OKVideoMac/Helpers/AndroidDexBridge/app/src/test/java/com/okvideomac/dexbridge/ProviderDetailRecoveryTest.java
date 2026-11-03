@@ -55,4 +55,40 @@ public class ProviderDetailRecoveryTest {
         } catch (InterruptedException expected) { }
         finally { Thread.interrupted(); }
     }
+
+    @Test public void brokenEntryRecreatesOnlyOnceAndNeverInventsMissingMovie() throws Exception {
+        AtomicInteger details = new AtomicInteger(), homes = new AtomicInteger(), recreates = new AtomicInteger();
+        assertEquals(DETAIL, ProviderDetailRecovery.load(() -> { details.incrementAndGet(); return ""; },
+                () -> { homes.incrementAndGet(); return ""; }, () -> { recreates.incrementAndGet(); return DETAIL; }));
+        assertEquals(2, details.get()); assertEquals(1, homes.get()); assertEquals(1, recreates.get());
+        try {
+            ProviderDetailRecovery.load(() -> "", () -> "", () -> { throw new SocketException("reset"); });
+            fail("Must surface exhausted recovery");
+        } catch (ProviderDetailRecovery.Unavailable expected) {
+            assertEquals("sourceUnavailable", BridgeInvocationFailure.kind(expected));
+            assertTrue(expected.getCause() instanceof SocketException);
+        }
+    }
+
+    @Test public void healthyHomepageNeverRecreatesForMissingDetail() throws Exception {
+        try {
+            ProviderDetailRecovery.load(() -> "", () -> "{\"class\":[{\"type_id\":\"1\"}],\"list\":[]}",
+                    () -> { fail("Healthy entry must not be reset"); return DETAIL; });
+            fail("Ambiguous empty detail is not a deleted-movie result");
+        } catch (ProviderDetailRecovery.Unavailable expected) { }
+    }
+
+    @Test public void cancellationAfterHomeOrRecreationCannotReturnOrReplay() throws Exception {
+        try {
+            ProviderDetailRecovery.load(() -> "", () -> { Thread.currentThread().interrupt(); return ""; },
+                    () -> { fail("No recreation after cancellation"); return DETAIL; });
+            fail("Expected cancellation");
+        } catch (InterruptedException expected) { } finally { Thread.interrupted(); }
+        try {
+            ProviderDetailRecovery.load(() -> "", () -> "", () -> {
+                Thread.currentThread().interrupt(); return DETAIL;
+            });
+            fail("A late successful detail may not escape cancellation");
+        } catch (InterruptedException expected) { } finally { Thread.interrupted(); }
+    }
 }

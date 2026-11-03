@@ -129,9 +129,7 @@ final class DexSpiderRegistry {
             case "detail":
                 List<String> detailIDs = stringList(arguments, 0);
                 raw = ProviderDetailRecovery.supports(payload.optString("api"), detailIDs)
-                        ? ProviderDetailRecovery.load(
-                                () -> spider.detailContent(detailIDs),
-                                () -> spider.homeContent(true))
+                        ? recoverNavigationDetail(payload, detailIDs)
                         : spider.detailContent(detailIDs);
                 raw = OriginalResourceMetadata.annotate(payload.optString("api"), raw);
                 break;
@@ -579,32 +577,61 @@ final class DexSpiderRegistry {
             if (existing != null) {
                 return existing;
             }
-            String api = requireString(payload, "api");
-            if (!api.startsWith("csp_")) {
-                throw new IllegalArgumentException("Only csp_ Java/Dex APIs are allowed");
-            }
-            String jarKey = jarKey(payload);
-            DexClassLoader loader = loader(payload, jarKey);
-            Spider created;
-            try {
-                Class<?> type = loader.loadClass(
-                        "com.github.catvod.spider." + api.substring("csp_".length())
-                );
-                Object value = type.getDeclaredConstructor().newInstance();
-                if (!(value instanceof Spider)) {
-                    throw new IllegalStateException("DEX class is not a CatVod Spider");
-                }
-                created = (Spider) value;
-            } catch (ClassNotFoundException error) {
-                // Match FongMi's JarLoader: a missing optional spider is an
-                // empty provider, not a failure that poisons multi-site search.
-                created = new SpiderNull();
-            }
-            created.siteKey = siteKey;
-            created.init(hostContext(), payload.optString("ext", ""));
+            Spider created = createSpider(payload, siteKey);
             spiders.put(key, created);
             return created;
         }
+    }
+
+    private final ConcurrentHashMap<String, ReentrantLock> detailRecoveryLocks = new ConcurrentHashMap<>();
+
+    private String recoverNavigationDetail(JSONObject payload, List<String> ids) throws Exception {
+        String site = requireString(payload, "siteKey");
+        String key = spiderKey(payload, site);
+        ReentrantLock lock = detailRecoveryLocks.computeIfAbsent(key, ignored -> new ReentrantLock());
+        lock.lockInterruptibly();
+        try {
+            // Read AFTER acquiring the gate: a preceding request may already
+            // have repaired this source. Waiters must not reset its new instance.
+            Spider current = spider(payload);
+            return ProviderDetailRecovery.load(() -> current.detailContent(ids),
+                    () -> current.homeContent(true), () -> {
+                        if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+                        Spider replacement = createSpider(payload, site);
+                        if (Thread.currentThread().isInterrupted()) throw new InterruptedException();
+                        spiders.replace(key, current, replacement);
+                        // Do not call destroy(), reload the JAR or advance the
+                        // media epoch: these providers share login/proxy state.
+                        return replacement.detailContent(ids);
+                    });
+        } finally { lock.unlock(); }
+    }
+
+    private Spider createSpider(JSONObject payload, String siteKey) throws Exception {
+        String api = requireString(payload, "api");
+        if (!api.startsWith("csp_")) {
+            throw new IllegalArgumentException("Only csp_ Java/Dex APIs are allowed");
+        }
+        String jarKey = jarKey(payload);
+        DexClassLoader loader = loader(payload, jarKey);
+        Spider created;
+        try {
+            Class<?> type = loader.loadClass(
+                    "com.github.catvod.spider." + api.substring("csp_".length())
+            );
+            Object value = type.getDeclaredConstructor().newInstance();
+            if (!(value instanceof Spider)) {
+                throw new IllegalStateException("DEX class is not a CatVod Spider");
+            }
+            created = (Spider) value;
+        } catch (ClassNotFoundException error) {
+            // Match FongMi's JarLoader: a missing optional spider is an
+            // empty provider, not a failure that poisons multi-site search.
+            created = new SpiderNull();
+        }
+        created.siteKey = siteKey;
+        created.init(hostContext(), payload.optString("ext", ""));
+        return created;
     }
 
     private DexClassLoader loader(JSONObject payload, String key) throws Exception {
@@ -712,8 +739,12 @@ final class DexSpiderRegistry {
                 : md5.toLowerCase(Locale.ROOT);
     }
 
-    private static String spiderKey(JSONObject payload, String siteKey) {
-        return jarKey(payload) + ":" + siteKey;
+    static String spiderKey(JSONObject payload, String siteKey) {
+        return ProviderInstanceIdentity.key(
+                payload.optString("configurationID", "").trim(), siteKey,
+                payload.optString("api", ""), payload.optString("ext", ""),
+                payload.optString("jarURL", ""), jarKey(payload),
+                payload.optJSONArray("hosts") == null ? "[]" : payload.optJSONArray("hosts").toString());
     }
 
     private static String requireString(JSONObject object, String key) {

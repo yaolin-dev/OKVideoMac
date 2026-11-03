@@ -22,6 +22,22 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 /** Deterministic local providers: no accounts or external TVBox server needed. */
 public final class TVBoxConfigurationTest extends TestCase {
+    public void testThrownProviderFailureRetainsOwningInteractionOverRealHTTP() throws Exception {
+        for (Exception failure : new Exception[]{new java.net.SocketException("Connection reset"),
+                new ProviderDetailRecovery.Unavailable(), new IllegalArgumentException("Expected URL scheme")}) {
+            JSONObject result = invokeFixture(new Spider() {
+                @Override public String detailContent(List<String> ids) throws Exception { throw failure; }
+            }, "configuration", "detail");
+            assertFalse(result.toString(), result.getBoolean("ok"));
+            String id = result.getString("interactionID");
+            assertEquals(id, result.getJSONObject("interaction").getString("interactionID"));
+            assertEquals("failed", result.getJSONObject("interaction").getString("outcome"));
+            assertEquals(BridgeInvocationFailure.kind(failure), result.getString("failureKind"));
+            assertTrue(result.getString("error").contains(failure.getMessage()));
+            assertFalse(result.has("result"));
+        }
+    }
+
     public void testOptionalUIIsLimitedToForegroundDetailsAndActions() throws Exception {
         JSONObject payload = new JSONObject().put("monitorsAuthorization", true)
                 .put("observesOptionalUI", true).put("interactionKind", "immediate");
@@ -444,7 +460,10 @@ public final class TVBoxConfigurationTest extends TestCase {
         DexSpiderRegistry registry = DexSpiderRegistry.get(context);
         Field field = DexSpiderRegistry.class.getDeclaredField("spiders"); field.setAccessible(true);
         Map<String, Spider> spiders = (Map<String, Spider>) field.get(registry);
-        spiders.put(jar + ":fixture", spider);
+        JSONObject identity = new JSONObject().put("configurationID", id).put("jarURL", jar).put("api", "csp_Fixture");
+        String fixtureKey = DexSpiderRegistry.spiderKey(identity, "fixture");
+        String settingsKey = DexSpiderRegistry.spiderKey(new JSONObject(identity.toString()).put("api", "csp_PanConfigGuard"), "settings");
+        spiders.put(fixtureKey, spider);
         Field proxyField = DexSpiderRegistry.class.getDeclaredField("proxyMethods"); proxyField.setAccessible(true);
         Map<String, java.lang.reflect.Method> proxies = (Map<String, java.lang.reflect.Method>) proxyField.get(registry);
         if (spider instanceof AuthorizationPageSpider) proxies.put(jar, AuthorizationPageProxy.class.getMethod("proxy", Map.class));
@@ -452,7 +471,7 @@ public final class TVBoxConfigurationTest extends TestCase {
         if (spider instanceof NativeLoginSpider) {
             NativeLoginSpider playback = (NativeLoginSpider) spider;
             candidates.put(new JSONObject().put("siteKey", "settings").put("api", "csp_PanConfigGuard"));
-            spiders.put(jar + ":settings", new Spider() {
+            spiders.put(settingsKey, new Spider() {
                 @Override public String categoryContent(String realm, String page, boolean filter, java.util.HashMap<String,String> ext) {
                     assertEquals("quark", realm);
                     return "{\"list\":[{\"vod_id\":\"qkregister\"},{\"vod_id\":\"quark\"},{\"vod_id\":\"quarkmanual\"},{\"vod_id\":\"quarkclear\"}]}";
@@ -483,7 +502,7 @@ public final class TVBoxConfigurationTest extends TestCase {
                             : new JSONArray().put(new JSONArray().put("id")))
                     .put("monitorsAuthorization", true).put("observesOptionalUI", true)
                     .put("interactionID", id).put("interactionKind", kind));
-        } finally { spiders.remove(jar + ":fixture"); spiders.remove(jar + ":settings"); proxies.remove(jar); }
+        } finally { spiders.remove(fixtureKey); spiders.remove(settingsKey); proxies.remove(jar); }
     }
 
     private JSONObject request(String path, JSONObject body) throws Exception {

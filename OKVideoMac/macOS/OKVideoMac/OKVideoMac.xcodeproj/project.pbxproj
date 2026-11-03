@@ -160,6 +160,7 @@
 		F2FF7DC4F68E713783B3D764 /* CrashSparkleDriver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 589C3DDFE98C3D2DC30D5704 /* CrashSparkleDriver.swift */; };
 		F4DEEAC19BFEDE7C89FBF225 /* AppStartupContext.swift in Sources */ = {isa = PBXBuildFile; fileRef = FFD36178CCCB7B5463EEC346 /* AppStartupContext.swift */; };
 		F63AD70FD38EE59E2BE0D5D7 /* AndroidRuntimeMaintenance.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C6055A4D0EC00D86134284B /* AndroidRuntimeMaintenance.swift */; };
+		F70097405A68665AB51C0BA0 /* HistoryBridgeReliabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B515DA6049DE7499240C50B9 /* HistoryBridgeReliabilityTests.swift */; };
 		F86D749293AD7BF25695BA65 /* PlayerPanelDismissalTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 28348EC64725ED7F0C350E6A /* PlayerPanelDismissalTests.swift */; };
 		F9A62BFE4EEF88BE1259A1EB /* CrashUploadController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 12113115D88C58163B704D7D /* CrashUploadController.swift */; };
 		F9FF431B06B6D4B13A435C8A /* AppParseExecutor.swift in Sources */ = {isa = PBXBuildFile; fileRef = D6CD897F3EA6681258B14A99 /* AppParseExecutor.swift */; };
@@ -322,6 +323,7 @@
 		AE53020CF7C4E31FA11B0FD1 /* AppLanguage.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppLanguage.swift; sourceTree = "<group>"; };
 		AF2F641F2193D9F2533DE77C /* legacy.mp4 */ = {isa = PBXFileReference; path = legacy.mp4; sourceTree = "<group>"; };
 		B033DD4B8E657220411A6979 /* CrashDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashDiagnosticsTests.swift; sourceTree = "<group>"; };
+		B515DA6049DE7499240C50B9 /* HistoryBridgeReliabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryBridgeReliabilityTests.swift; sourceTree = "<group>"; };
 		B6B89B96A1C16BEAA46613D8 /* QuarkSeekRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuarkSeekRecoveryTests.swift; sourceTree = "<group>"; };
 		B7E0B9BADB3F5D30D3F44205 /* PlaybackMediaJourneyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackMediaJourneyTests.swift; sourceTree = "<group>"; };
 		B9188C791786442939BA4B1A /* CrashAcceptance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashAcceptance.swift; sourceTree = "<group>"; };
@@ -467,6 +469,7 @@
 				D4A1BE060D34B55A4B0FF02F /* DetailLoadingTests.swift */,
 				670FEFE746E5D3B95EE9D347 /* FavoritesNativeRepairTests.swift */,
 				5262185C72774473ACDDA44A /* FullscreenCompositionTests.swift */,
+				B515DA6049DE7499240C50B9 /* HistoryBridgeReliabilityTests.swift */,
 				BC49E426D6C3F496A7846EDB /* HistoryNativeRepairTests.swift */,
 				8BA60169297E5AC209534829 /* HistoryNavigationLocatorTests.swift */,
 				7D56449ABBD03CAB12FAB2C1 /* HistoryOriginalResourceTests.swift */,
@@ -1121,6 +1124,7 @@
 				C4EE2AD692DE73F0C079A62B /* DetailLoadingTests.swift in Sources */,
 				30B2634E951AC346F431C249 /* FavoritesNativeRepairTests.swift in Sources */,
 				B15DEB070BD026412680AE0E /* FullscreenCompositionTests.swift in Sources */,
+				F70097405A68665AB51C0BA0 /* HistoryBridgeReliabilityTests.swift in Sources */,
 				60D77D55A3C8CF79376AA66A /* HistoryNativeRepairTests.swift in Sources */,
 				0B865A2FB1F181C9BFAE5987 /* HistoryNavigationLocatorTests.swift in Sources */,
 				3A74B61331018435E078DB31 /* HistoryOriginalResourceTests.swift in Sources */,
@@ -1348,7 +1352,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 186;
+				CURRENT_PROJECT_VERSION = 187;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -1575,7 +1579,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 186;
+				CURRENT_PROJECT_VERSION = 187;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

@@ -264,6 +264,7 @@ final class BridgeServer {
              BufferedInputStream input = new BufferedInputStream(client.getInputStream());
              BufferedOutputStream output = new BufferedOutputStream(client.getOutputStream())) {
             client.setSoTimeout(15_000);
+            String requestInteractionID = "";
             try {
                 String requestLine = readLine(input);
                 String[] request = requestLine.split(" ", 3);
@@ -641,6 +642,9 @@ final class BridgeServer {
                 byte[] body = readExactly(input, length);
                 JSONObject payload = new JSONObject(new String(body, StandardCharsets.UTF_8));
                 String interactionID = payload.optString("interactionID", "").trim();
+                // Keep the request identity even if admission or the provider
+                // throws. Failure responses must never become unscoped.
+                requestInteractionID = interactionID;
                 String searchRequestID = "search".equals(payload.optString("method"))
                         ? payload.optString("searchRequestID", "").trim() : "";
                 boolean interactive = payload.optBoolean(
@@ -657,6 +661,7 @@ final class BridgeServer {
                             ),
                             payload.optString("method", "")
                     );
+                    requestInteractionID = interactionID;
                     if (!acceptsInvocation(interactionID)) {
                         writeJSON(
                                 output,
@@ -837,7 +842,13 @@ final class BridgeServer {
                     return;
                 }
                 Log.e(TAG, "RPC request failed", error);
-                writeJSON(output, 500, failure(safeMessage(error)));
+                JSONObject failed = failure(safeMessage(error));
+                failed.put("failureKind", BridgeInvocationFailure.kind(error));
+                if (!requestInteractionID.isEmpty()) {
+                    failed.put("interactionID", requestInteractionID);
+                    failed.put("interaction", BridgeInteractionRegistry.state(requestInteractionID));
+                }
+                writeJSON(output, 500, failed);
             }
         } catch (Throwable error) {
             if (isClientDisconnect(error)) {

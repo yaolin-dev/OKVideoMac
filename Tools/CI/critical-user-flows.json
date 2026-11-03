@@ -117,7 +117,18 @@
       "PlayerStatusPresentationTests/testPreparationSeekAndFailureShareTrackAnchorWithoutSpeedOverlay",
       "PlayerStatusPresentationTests/testFastSeekAndReplacedSessionCancelDelayedStatus",
       "PlayerStatusPresentationTests/testLiveBufferingReplacesModeLabelAndKeepsAnchorThroughAutoHide",
-      "PlayerStatusPresentationTests/testStatusAnchorsFitNarrowAndFullscreenSizedWindows"
+      "PlayerStatusPresentationTests/testStatusAnchorsFitNarrowAndFullscreenSizedWindows",
+      "HistoryBridgeReliabilityTests/testLegacyUnscopedFailurePreservesCauseButNeverResultOrCompletion",
+      "HistoryBridgeReliabilityTests/testOwnedFailureRetainsCategoryAndBothIdentities",
+      "HistoryBridgeReliabilityTests/testConflictingOrMalformedOwnersRejectEvenWhenOneMatches",
+      "HistoryBridgeReliabilityTests/testMissingSuccessIdentityIsProtocolFailureNotDifferentRequest",
+      "HistoryBridgeReliabilityTests/testBridgeTransportFailureCannotEstablishMissingOriginalMovie",
+      "OKVideoMacTests/testAndroidBridgeRejectedCompletedInteractionNeverBecomesPending",
+      "OKVideoMacTests/testAndroidBridgeHTTPFailureOverridesSuccessfulPayload",
+      "OKVideoMacTests/testAndroidBridgeCompletedPlaybackRequiresActualResult",
+      "OKVideoMacTests/testAndroidBridgeStrictTerminalResponseRejectsMissingInteractionID",
+      "OKVideoMacTests/testAndroidBridgeStrictEmptyActionAcknowledgementRemainsPending",
+      "OKVideoMacTests/testAndroidBridgeRejectsTerminalResponseFromDifferentInteraction"
     ],
     "desktop": [
       "PlayerPanelDismissalTests/testOutsideClickClosesEachPanelWithoutChangingPlayback",

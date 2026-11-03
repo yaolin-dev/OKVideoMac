@@ -2494,7 +2494,7 @@ public final class BridgeProtocolTest extends TestCase {
                 .put("line")
                 .put("episode")
                 .put(new JSONArray());
-        String playbackKey = jarURL + ":" + siteKey
+        String playbackKey = DexSpiderRegistry.spiderKey(normalPayload, siteKey)
                 + "\u0000line\u0000episode";
         AtomicInteger invocations = new AtomicInteger();
         CountDownLatch firstEntered = new CountDownLatch(1);

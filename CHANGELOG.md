@@ -2,6 +2,7 @@
 
 ## [Unreleased]
 
+- Local build 187: retain request ownership and failure categories on Java/Dex errors; isolate provider instance caches by initialization inputs; recover a broken WoGG entry once without destroying shared login or media state. History and resume safeguards remain in force.
 - Local build 186: restore pointer input for every playback recovery action by rendering the status actions in a full-viewport overlay with real hit bounds. Retains VOD/live status anchors; adds native pointer regressions across window sizes.
 - Local build 185: transparent VOD status above the timeline, live status in the transport row, delayed wait feedback, and consistent Picture in Picture hover/tooltip behavior. Retains build184 history navigation fixes.
 - Local build 184: retain provider detail request locators independently of history row IDs; recover legacy entries in their original site, retain progress and record stable YpanSo file identity without authorization tokens.

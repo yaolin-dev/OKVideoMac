@@ -2428,6 +2428,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         let interactionID: String?
         let interaction: InteractionResponse?
         let refreshPerformed: Bool?
+        let failureKind: String?
     }
 
     private struct InteractionResponse: Decodable, Sendable {
@@ -2997,6 +2998,15 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
                     terminalResponse.error ?? "Spider 没有返回可播放媒体"
                 )
             }
+            if terminalResponse.failureKind == "cancelled" {
+                throw CancellationError()
+            }
+            if terminalResponse.failureKind == "sourceUnavailable" {
+                throw AppError.spider("原站点暂时无法提供影片详情，已完成本次恢复尝试。请稍后重试；观看进度已保留。")
+            }
+            if terminalResponse.failureKind == "sourceEntry" {
+                throw AppError.spider("原站点入口初始化失败，暂时无法加载影片详情。观看进度已保留。")
+            }
             if let bridgeMessage = terminalResponse.error,
                let cacheFailure = AndroidDexJarCacheFailure(
                    bridgeMessage: bridgeMessage
@@ -3086,18 +3096,20 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         }
         let transportSucceeded = bridgeResponse.ok
             && (200..<300).contains(httpResponse.statusCode)
-        let returnedInteractionID = bridgeResponse.interaction?.interactionID
-            ?? bridgeResponse.interactionID
-        guard Self.interactionIdentifier(
-            returnedInteractionID,
-            matches: requestID,
-            allowsMissing: !requiresScopedIdentity
-        ) else {
+        let returnedIDs = [bridgeResponse.interactionID, bridgeResponse.interaction?.interactionID]
+            .compactMap { $0 }
+        // Validate BOTH envelopes: accepting a matching nested ID must not
+        // conceal a different top-level owner (and vice versa).
+        let mismatched = returnedIDs.contains { UUID(uuidString: $0) != requestID }
+        let missingRequiredIdentity = requiresScopedIdentity && returnedIDs.isEmpty
+        if mismatched || (missingRequiredIdentity && transportSucceeded) {
             return ConfigurationInteractionTerminalResponse(
                 requestID: requestID,
                 outcome: .failed,
                 providerResult: nil,
-                error: "Java/Dex 桥返回了其他配置操作的结果",
+                error: mismatched
+                    ? "Java/Dex 桥返回了其他配置操作的结果"
+                    : "Java/Dex 桥响应缺少请求编号",
                 httpStatusCode: httpResponse.statusCode,
                 refreshPerformed: nil
             )
@@ -3128,7 +3140,9 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
         return ConfigurationInteractionTerminalResponse(
             requestID: requestID,
             outcome: outcome,
-            providerResult: bridgeResponse.selectionEffect == "providerFinished"
+            // Older bridges dropped identity on HTTP failure. Preserve the
+            // request's error, but never consume an unscoped result or poll it.
+            providerResult: !transportSucceeded ? nil : bridgeResponse.selectionEffect == "providerFinished"
                 ? .object(["__okvideoFinishedSelection": bridgeResponse.result ?? .null])
                 : bridgeResponse.result,
             error: outcome == .failed
@@ -3137,7 +3151,7 @@ final class AndroidDexBridgeClient: @unchecked Sendable {
             httpStatusCode: httpResponse.statusCode,
             refreshPerformed: bridgeResponse.interaction?.refreshPerformed
                 ?? bridgeResponse.refreshPerformed,
-            failureKind: bridgeResponse.interaction?.failureKind
+            failureKind: bridgeResponse.interaction?.failureKind ?? bridgeResponse.failureKind
         )
     }
 
@@ -6227,8 +6241,8 @@ actor AndroidRuntimeStartupSingleFlight {
 }
 
 actor AndroidDexBridgeRuntime {
-    static let bridgeVersion = "0.3.54"
-    static let bridgeVersionCode = 66
+    static let bridgeVersion = "0.3.55"
+    static let bridgeVersionCode = 67
     static let bridgeApplicationID = "com.okvideomac.dexbridge"
     static let bridgeCertificateSHA256 =
         "33e95ef23b662f2629a23df892aaff52ae6216f7492cfb559a63d37247a059e0"
