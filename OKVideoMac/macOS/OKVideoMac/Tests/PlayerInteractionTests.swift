@@ -368,10 +368,10 @@ final class PlayerOverlayLayoutTests: XCTestCase {
 }
 
 @MainActor final class PlayerEpisodeContinuationTests: XCTestCase {
-    func testMixedNamingSkipsBonusAudioSubtitlesAndMissingUploads() {
+    func testMixedNamingExcludesBonusAudioAndRequiresConfirmationForMissingUploads() {
         let items = ["21.mkv", "NEW22.mp4", "别名 23.mkv", "第24集 花絮.mkv", "EP24.mp3", "EP24.srt", "另一前缀 25.mkv"]
             .map { PlayEpisode(name: $0, url: "fixture:\($0)") }
-        XCTAssertEqual(PlayerEpisodeAdvancePolicy.nextEpisode(in: items, currentEpisodeID: items[2].id, enabled: true)?.id, items[6].id)
+        XCTAssertNil(PlayerEpisodeAdvancePolicy.nextEpisode(in: items, currentEpisodeID: items[2].id, enabled: true))
         for excluded in items[3...5] {
             XCTAssertNil(PlayerEpisodeAdvancePolicy.nextEpisode(in: items, currentEpisodeID: excluded.id, enabled: true))
         }
@@ -388,7 +388,7 @@ final class PlayerOverlayLayoutTests: XCTestCase {
         let items = ["S02E01.mkv", "S01E22.mkv", "S01E21.mkv", "S02E02-E03.mkv", "S02E04.mkv"]
             .map { PlayEpisode(name: $0, url: "fixture:\($0)") }
         XCTAssertEqual(PlayerEpisodeAdvancePolicy.nextEpisode(in: items, currentEpisodeID: items[2].id, enabled: true)?.id, items[1].id)
-        XCTAssertEqual(PlayerEpisodeAdvancePolicy.nextEpisode(in: items, currentEpisodeID: items[1].id, enabled: true)?.id, items[0].id)
+        XCTAssertNil(PlayerEpisodeAdvancePolicy.nextEpisode(in: items, currentEpisodeID: items[1].id, enabled: true), "Cross-season continuation requires explicit selection")
         XCTAssertNil(PlayerEpisodeAdvancePolicy.nextEpisode(in: items, currentEpisodeID: items[3].id, enabled: true))
     }
 

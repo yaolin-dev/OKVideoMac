@@ -190,7 +190,7 @@ struct DetailView: View {
     @AppStorage("detail.lastPlaySourceName") private var lastPlaySourceName = ""
     @State private var selectedSourceIndex = 0
     @State private var episodeSearchKeyword = ""
-    @State private var episodeSortOrder: EpisodeSortOrder = .sourceOrder
+    @State private var episodeSortOrder: EpisodeSortOrder = .episodeAscending
     @State private var selectedRangeID: String?
     @State private var preparedPresentations: [EpisodePresentation] = []
     @State private var preparedRangeOptions: [EpisodeRangeOption] = []
@@ -327,7 +327,7 @@ struct DetailView: View {
             guard detail.playSources.indices.contains(newValue) else { return }
             lastPlaySourceName = detail.playSources[newValue].name
             episodeSearchKeyword = ""
-            episodeSortOrder = .sourceOrder
+            episodeSortOrder = .episodeAscending
             selectedRangeID = nil
             preparedPresentations = []
             preparedRangeOptions = []
@@ -1144,7 +1144,7 @@ actor EpisodePresentationRepository {
         let values = EpisodeListPresentation.presentations(
             from: source.episodes,
             query: "",
-            sortOrder: .sourceOrder,
+            sortOrder: .episodeAscending,
             categoryName: categoryName
         )
         let snapshot = EpisodePresentationSnapshot(
@@ -1654,7 +1654,7 @@ enum EpisodeListPresentation {
 
         switch sortOrder {
         case .sourceOrder:
-            return values
+            return values.sorted { $0.sourceIndex < $1.sourceIndex }
         case .episodeAscending:
             return values.sorted { compare($0, $1, ascending: true) }
         case .episodeDescending:

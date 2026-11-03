@@ -1,6 +1,167 @@
 {
   "sourceLanguage": "en",
   "strings": {
+    "player.queue.quality-unknown": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continued with this episode’s available resource; quality is not labeled."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已使用本集可用资源继续播放，画质未标注。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已使用本集可用資源繼續播放，畫質未標註。"
+          }
+        }
+      }
+    },
+    "player.queue.quality-changed": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Continued with this episode’s available resource: %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已使用本集可用资源继续播放：%@"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已使用本集可用資源繼續播放：%@"
+          }
+        }
+      }
+    },
+    "player.queue.no-previous": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No previous episode is available on this source."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本线路没有上一集。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本線路沒有上一集。"
+          }
+        }
+      }
+    },
+    "player.queue.no-next": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No next episode is currently available on this source."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本线路暂无下一集。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本線路暫無下一集。"
+          }
+        }
+      }
+    },
+    "player.queue.edition-change": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The next episode uses a different language or edition. Select a resource to continue."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "相邻集数的语言或剪辑版本不同，请选择资源继续播放。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "相鄰集數的語言或剪輯版本不同，請選擇資源繼續播放。"
+          }
+        }
+      }
+    },
+    "player.queue.season-change": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Select a resource to continue at season %d, episode %d."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "即将跨季，请选择资源继续播放第 %d 季第 %d 集。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "即將跨季，請選擇資源繼續播放第 %d 季第 %d 集。"
+          }
+        }
+      }
+    },
+    "player.queue.gap": {
+      "extractionState": "manual",
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Episode %d is unavailable. Select a resource to continue at episode %d."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "第 %d 集暂不可用。请选择资源，确认跳转至第 %d 集。"
+          }
+        },
+        "zh-Hant": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "第 %d 集暫不可用。請選擇資源，確認跳轉至第 %d 集。"
+          }
+        }
+      }
+    },
     "tmdb.match.reason.ambiguous": {
       "extractionState": "manual",
       "localizations": {
@@ -1521,19 +1682,19 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Original resource"
+            "value": "Episode not matched"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "原始资源"
+            "value": "分集未匹配"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "原始資源"
+            "value": "分集未匹配"
           }
         }
       }

@@ -1,5 +1,7 @@
 # Changelog
 
+- Local build 189: sort episode displays naturally without changing source identities; reuse numeric filename parsing for episode artwork; navigate consecutive episode numbers across quality labels, with explicit choices for gaps, seasons and editions.
+
 - Build 188: Compact VOD/live controls, anchored recovery/status panels, hover volume, and native interaction/fullscreen regression coverage.
 
 ## [Unreleased]

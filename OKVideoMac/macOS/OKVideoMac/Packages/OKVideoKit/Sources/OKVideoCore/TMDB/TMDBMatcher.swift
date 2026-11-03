@@ -363,6 +363,9 @@ public enum TMDBEpisodeMapper {
     public static func episodes(_ sources: [PlayEpisode], category: String?, season: TMDBSeason) -> [Int: TMDBEpisode] {
         let form = PlaybackContentForm.category(category)
         guard form != .movie && form != .programme else { return [:] }
+        // A verified season supplies context for the shared numeric parser.
+        // Broad filename-family inference is insufficient artwork evidence
+        // for a cut/part label; descriptive prefixes retain the guarded pass below.
         let parsed = sources.map { PlaybackResourceAnalyzer.analyze($0, categoryName: "电视剧") }
         let maximum = season.episodes.map(\.episodeNumber).max() ?? 0
         let ordinary = parsed.filter { $0.role == .main && $0.endEpisode == nil && ($0.season == nil || $0.season == season.seasonNumber) }.compactMap(\.episode)
@@ -371,7 +374,7 @@ public enum TMDBEpisodeMapper {
         // different from one bad resource. Do not silently map its first half.
         if outOfRange >= 2 && outOfRange * 4 > ordinary.count { return [:] }
         var result = Dictionary(uniqueKeysWithValues: sources.enumerated().compactMap { index, item in
-            episode(item, category: category, season: season, allowExplicitParent: true).map { (index, $0) }
+            episode(item, value: parsed[index], season: season, allowExplicitParent: true).map { (index, $0) }
         })
         // Shared descriptive labels such as "(2026) 英剧 01" or "X-剧名 01"
         // provide episode numbering only after series/season verification.
@@ -400,23 +403,22 @@ public enum TMDBEpisodeMapper {
     public static func episode(_ source: PlayEpisode, category: String?, season: TMDBSeason, allowExplicitParent: Bool = false) -> TMDBEpisode? {
         let form = PlaybackContentForm.category(category)
         guard form != .movie && form != .programme else { return nil }
-        let value = PlaybackResourceAnalyzer.analyze(source, categoryName: "电视剧")
+        return episode(source, value: PlaybackResourceAnalyzer.analyze(source, categoryName: "电视剧"),
+                       season: season, allowExplicitParent: allowExplicitParent)
+    }
+
+    private static func episode(_ source: PlayEpisode, value: PlaybackResourceSemantics,
+                                season: TMDBSeason, allowExplicitParent: Bool) -> TMDBEpisode? {
         guard PlaybackResourceAnalyzer.explicitSeasons(in: source.name).allSatisfy({ $0 == season.seasonNumber }),
               !["番外", "花絮", "预告", "特别篇", "特辑", "彩蛋", "幕后"].contains(where: source.name.contains) || value.season == 0 else { return nil }
         guard value.evidence != .conflict, value.endEpisode == nil, value.issue == nil, value.date == nil,
               (value.role != .part || allowExplicitParent),
               value.season == nil || value.season == season.seasonNumber else { return nil }
         if value.role == .bonus && value.season != 0 { return nil }
-        var number: Int?
-        if value.evidence == .explicit || value.evidence == .structured { number = value.episode }
-        // A complete numeric label has meaning only inside a verified series
-        // and season. Do not scan arbitrary numbers from descriptive filenames.
-        if number == nil, value.role == .main {
-            let name = PlaybackResourceAnalyzer.compactName(source.name).precomposedStringWithCompatibilityMapping
-            if name.range(of: #"^[0-9]{1,4}(?:[\s_]+(?:480[pP]|720[pP]|1080[pP]|2160[pP]|4320[pP]|[248][kK]))?$"#, options: .regularExpression) != nil {
-                number = Int(name.prefix(while: { $0.isNumber }))
-            }
-        }
+        // Reuse the same local number as sorting/navigation. Verified TMDB
+        // series/season context permits numeric files without changing IDs.
+        let number = value.hasLocalEpisode || value.evidence == .explicit || value.evidence == .structured
+            ? value.episode : nil
         guard let number, number > 0 else { return nil }
         guard var matched = season.episodes.first(where: { $0.episodeNumber == number }) else { return nil }
         matched.seasonNumber = season.seasonNumber

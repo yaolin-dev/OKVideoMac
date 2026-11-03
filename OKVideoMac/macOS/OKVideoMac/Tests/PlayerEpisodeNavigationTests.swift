@@ -50,14 +50,14 @@ final class PlayerEpisodeNavigationTests: XCTestCase {
         }
     }
 
-    func testVersionsSeasonsAndMissingUploadsRetainExistingRules() {
+    func testVersionsNeverSkipLogicalEpisodesAndSeasonChangesRequireConfirmation() {
         let items = ["S01E13.4KSDR", "S01E14.4KHDR", "S01E15.4KSDR", "S01E16.4KSDR", "S01E16.4KSDR", "S02E01.4KSDR"]
             .enumerated().map { PlayEpisode(name: $0.element, url: "fixture:\($0.offset)") }
         let index = PlayerEpisodeNavigationIndex(episodes: items)
-        XCTAssertEqual(index.adjacent(to: items[0].id, offset: 1), .available(items[2]))
-        XCTAssertEqual(index.adjacent(to: items[1].id, offset: 1), .boundary)
+        XCTAssertEqual(index.adjacent(to: items[0].id, offset: 1), .available(items[1]))
+        XCTAssertEqual(index.adjacent(to: items[1].id, offset: 1), .available(items[2]))
         XCTAssertEqual(index.adjacent(to: items[2].id, offset: 1), .choice([items[3], items[4]]))
-        XCTAssertEqual(index.adjacent(to: items[3].id, offset: 1), .available(items[5]))
+        XCTAssertEqual(index.adjacent(to: items[3].id, offset: 1), .confirmation([items[5]], .seasonChange(season: 2, episode: 1)))
         let mixed = [PlayEpisode(name: "E14", url: "14"), PlayEpisode(name: "S01E15", url: "15")]
         XCTAssertEqual(PlayerEpisodeNavigationIndex(episodes: mixed).adjacent(to: mixed[0].id, offset: 1), .unavailable)
     }
@@ -66,7 +66,7 @@ final class PlayerEpisodeNavigationTests: XCTestCase {
         let names = ["E14.mp4", "E15.mp4", "E16 花絮.mp4", "E16.mp3", "E16.srt", "E16-E17.mp4", "E18.mp4"]
         let items = names.map { PlayEpisode(name: $0, url: $0) }
         let index = PlayerEpisodeNavigationIndex(episodes: items)
-        XCTAssertEqual(index.adjacent(to: items[1].id, offset: 1), .available(items[6]))
+        XCTAssertEqual(index.adjacent(to: items[1].id, offset: 1), .confirmation([items[6]], .gap(expected: 16, available: 18)))
         for excluded in items[2...5] { XCTAssertEqual(index.adjacent(to: excluded.id, offset: 1), .unavailable) }
         XCTAssertEqual(PlayerEpisodeNavigationIndex(episodes: items, categoryName: "电影").adjacent(to: items[0].id, offset: 1), .unavailable)
         let unknown = ["1", "2", "3"].map { PlayEpisode(name: $0, url: $0) }
@@ -288,5 +288,116 @@ final class PlayerMislabeledVideoNavigationTests: XCTestCase {
             XCTAssertFalse(info.hasDecodedMovingVideo)
             XCTAssertFalse(info.withoutStatistics.hasDecodedMovingVideo)
         }
+    }
+}
+
+
+/// The observed source order and filename shapes, with non-network fixture URLs.
+enum MixedQualityEpisodeFixture {
+    static let order = [15, 9, 10, 11, 12, 1, 2, 3, 4, 5, 6, 7, 8, 13, 14, 16, 17, 18, 19, 20]
+    static var episodes: [PlayEpisode] {
+        order.map { number in
+            let name: String
+            if (9...12).contains(number) { name = "[747.88MB]\(number).mp4" }
+            else if number == 15 { name = "[1.07GB]15_4K.mp4" }
+            else { name = String(format: "[1.55GB]%02d-4K.高码率.mkv", number) }
+            return .init(name: name, url: "fixture:\(number)", referenceIdentity: "original-file-\(number)")
+        }
+    }
+}
+
+final class UnifiedEpisodeNavigationTests: XCTestCase {
+    func testMixedQualityEightToNineAndTwelveToThirteenInBothDirectionsAndAutomaticPolicy() {
+        let values = MixedQualityEpisodeFixture.episodes
+        let byNumber = Dictionary(uniqueKeysWithValues: zip(MixedQualityEpisodeFixture.order, values))
+        for source in [values, Array(values.reversed())] {
+            let index = PlayerEpisodeNavigationIndex(episodes: source, categoryName: "嘟嘟")
+            for number in 1...20 {
+                let current = byNumber[number]!
+                for offset in [-1, 1] {
+                    let expected: PlayerEpisodeNavigationResult = byNumber[number + offset].map { .available($0) } ?? .boundary
+                    XCTAssertEqual(index.adjacent(to: current.id, offset: offset), expected, "E\(number), direction \(offset)")
+                }
+                XCTAssertEqual(PlayerEpisodeAdvancePolicy.nextEpisode(in: source, currentEpisodeID: current.id,
+                    enabled: true, categoryName: "嘟嘟"), byNumber[number + 1])
+            }
+        }
+    }
+
+    func testQualityPreferenceIsWithinTargetEpisodeAndAmbiguityDoesNotSkip() {
+        let values = ["E08.4K", "E09.1080p", "E09.4K", "E10.1080p", "E10.720p", "E11.4K"]
+            .map { PlayEpisode(name: $0, url: "fixture:" + $0) }
+        let index = PlayerEpisodeNavigationIndex(episodes: values)
+        XCTAssertEqual(index.adjacent(to: values[0].id, offset: 1), .available(values[2]))
+        XCTAssertEqual(index.adjacent(to: values[2].id, offset: 1), .choice([values[3], values[4]]))
+        XCTAssertNil(PlayerEpisodeAdvancePolicy.nextEpisode(in: values, currentEpisodeID: values[2].id, enabled: true))
+        let language = ["E08.国语.4K", "E09.粤语.4K"].map { PlayEpisode(name: $0, url: $0) }
+        XCTAssertEqual(PlayerEpisodeNavigationIndex(episodes: language).adjacent(to: language[0].id, offset: 1),
+            .confirmation([language[1]], .editionChange))
+    }
+
+    func testMissingEpisodesRequireExplicitSelectionAndNeverAutoplay() {
+        let values = ["E08.4K", "E10.4K", "E11.4K"].map { PlayEpisode(name: $0, url: $0) }
+        let index = PlayerEpisodeNavigationIndex(episodes: values)
+        XCTAssertEqual(index.adjacent(to: values[0].id, offset: 1), .confirmation([values[1]], .gap(expected: 9, available: 10)))
+        XCTAssertEqual(index.adjacent(to: values[1].id, offset: -1), .confirmation([values[0]], .gap(expected: 9, available: 8)))
+        XCTAssertNil(PlayerEpisodeAdvancePolicy.nextEpisode(in: values, currentEpisodeID: values[0].id, enabled: true))
+    }
+
+    func testSortedSnapshotKeepsOriginalIndicesReferencesAndAllUploads() async throws {
+        var values = MixedQualityEpisodeFixture.episodes
+        values.append(.init(name: "第9集 4K", url: "fixture:9-alt"))
+        values.append(.init(name: "幕后花絮", url: "fixture:extra"))
+        let before = try JSONEncoder().encode(values)
+        let source = PlaySource(name: "嘟嘟无限", episodes: values)
+        let snapshot = await EpisodePresentationRepository().snapshot(videoID: "long-march", source: source, categoryName: "嘟嘟")
+        XCTAssertEqual(snapshot.values.compactMap(\.episodeNumber), Array(1...9) + Array(9...20))
+        for presentation in snapshot.values {
+            XCTAssertEqual(presentation.episode, values[presentation.sourceIndex])
+            XCTAssertEqual(presentation.episode.stableIdentity, values[presentation.sourceIndex].stableIdentity)
+        }
+        let restored = EpisodeListPresentation.filterAndSort(snapshot.values, query: "", sortOrder: .sourceOrder)
+        XCTAssertEqual(restored.map(\.episode), values)
+        XCTAssertEqual(EpisodeListPresentation.filterAndSort(snapshot.values, query: "", sortOrder: .episodeDescending)
+            .compactMap(\.episodeNumber), (Array(1...9) + Array(9...20)).reversed())
+        XCTAssertEqual(try JSONDecoder().decode([PlayEpisode].self, from: before), values)
+        XCTAssertEqual(snapshot.values.last?.episode.url, "fixture:extra")
+    }
+}
+
+@MainActor final class UnifiedEpisodeNavigationStateTests: XCTestCase {
+    func testActualPlayerButtonsAndAutoplayResolveEightAndTwelveWithoutMutatingSource() async {
+        let values = MixedQualityEpisodeFixture.episodes
+        let source = PlaySource(name: "嘟嘟无限", episodes: values)
+        let app = AppState(environment: nil)
+        for number in [8, 9, 12, 13] {
+            let current = values[MixedQualityEpisodeFixture.order.firstIndex(of: number)!]
+            await app.seedEpisodeNavigationForTesting(source: source, current: current, category: "嘟嘟")
+            XCTAssertTrue(app.hasNextEpisode); XCTAssertTrue(app.hasPreviousEpisode)
+            let next = values[MixedQualityEpisodeFixture.order.firstIndex(of: number + 1)!]
+            XCTAssertEqual(app.playerEpisodeNavigation(offset: 1), .available(next))
+            XCTAssertEqual(app.playerEpisodeNavigation(offset: 1, automatic: true).uniqueEpisode, next)
+            XCTAssertEqual(app.playerPanelEpisodePresentations.compactMap(\.episodeNumber), Array(1...20))
+            XCTAssertEqual(app.playerEpisodes, values)
+        }
+        app.playerEpisodeSortOrder = .sourceOrder
+        XCTAssertEqual(app.playerPanelEpisodePresentations.map(\.episode), values)
+        app.playerEpisodeSortOrder = .episodeDescending
+        XCTAssertEqual(app.playerPanelEpisodePresentations.compactMap(\.episodeNumber), Array((1...20).reversed()))
+    }
+
+    func testGapChoiceDisplaysReasonAndIsInvalidatedBySourceReplacement() async {
+        let app = AppState(environment: nil)
+        let values = ["E08.4K", "E10.4K"].map { PlayEpisode(name: $0, url: $0) }
+        let source = PlaySource(name: "line", episodes: values)
+        await app.seedEpisodeNavigationForTesting(source: source, current: values[0])
+        XCTAssertTrue(app.hasNextEpisode)
+        XCTAssertNil(app.playerEpisodeNavigation(offset: 1, automatic: true).uniqueEpisode)
+        await app.playAdjacentEpisode(offset: 1)
+        XCTAssertEqual(app.playerEpisodeNavigationChoice?.confirmation, .gap(expected: 9, available: 10))
+        XCTAssertEqual(app.playerPanelEpisodePresentations.map(\.episode), [values[1]])
+        XCTAssertEqual(app.currentPlayerEpisodeID, values[0].id)
+        await app.seedEpisodeNavigationForTesting(source: .init(name: "replacement", episodes: values), current: values[0])
+        XCTAssertNil(app.playerEpisodeNavigationChoice)
     }
 }

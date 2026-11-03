@@ -278,6 +278,9 @@ struct PlayerView: View {
                 alignPlayerEpisodePageWithCurrentEpisode()
             }
         }
+        .onChange(of: state.playerEpisodeSortOrder) { _ in
+            alignPlayerEpisodePageWithCurrentEpisode()
+        }
         .onChange(of: state.playerEpisodeNavigationChoice?.id) { id in
             guard id != nil else { return }
             inspectedPlayerEpisode = nil
@@ -438,7 +441,7 @@ struct PlayerView: View {
 
     private var playbackStatusLine: some View {
         PlayerPlaybackStatusLine(title: playbackStatusTitle,
-            kind: isFailed ? .failure : state.hasHistoryPlaybackChoices ? .choice : .waiting)
+            kind: isFailed ? .failure : state.hasHistoryPlaybackChoices || state.playerEpisodeTransitionNotice != nil ? .choice : .waiting)
     }
 
     private var playbackStatusTitle: String {
@@ -457,6 +460,7 @@ struct PlayerView: View {
            hasSeekActivity {
             return L10n.string("player.status.seeking-to", fallback: "Seeking to %@", formatTime(target))
         }
+        if let notice = state.playerEpisodeTransitionNotice, !playbackActivityOverlayVisible { return notice }
         return state.playbackStageDescription
     }
 
@@ -1163,7 +1167,7 @@ struct PlayerView: View {
                 )
 
                 if let choice = state.playerEpisodeNavigationChoice {
-                    Text(L10n.string("player.queue.choose-resource", fallback: "This episode has %d resources. Choose one to continue.", choice.episodes.count))
+                    Text(choice.confirmation?.message ?? L10n.string("player.queue.choose-resource", fallback: "This episode has %d resources. Choose one to continue.", choice.episodes.count))
                         .font(.callout)
                     Button(L10n.string("player.queue.show-all", fallback: "Show All Episodes")) {
                         state.dismissPlayerEpisodeNavigationChoice()
@@ -1176,6 +1180,13 @@ struct PlayerView: View {
                     HStack {
                         Text([state.currentPlayerSourceName, state.currentPlayerVersionText].filter { !$0.isEmpty }.joined(separator: " · ")).lineLimit(1).font(.caption).foregroundColor(.secondary)
                         Spacer()
+                        Menu {
+                            Picker(L10n.string("common.sort", fallback: "Sort"), selection: $state.playerEpisodeSortOrder) {
+                                ForEach(EpisodeSortOrder.allCases) { order in Text(order.title).tag(order) }
+                            }
+                        } label: { Image(systemName: "arrow.up.arrow.down") }
+                        .menuStyle(.borderlessButton).fixedSize()
+                        .accessibilityLabel(L10n.string("common.sort", fallback: "Sort"))
                         Button(L10n.string("player.episode.locate", fallback: "Locate Current")) {
                             state.dismissPlayerEpisodeNavigationChoice()
                             alignPlayerEpisodePageWithCurrentEpisode()
@@ -2083,7 +2094,7 @@ struct PlayerView: View {
         case .loading:
             return true
         default:
-            return playbackActivityOverlayVisible
+            return playbackActivityOverlayVisible || state.playerEpisodeTransitionNotice != nil
         }
     }
 

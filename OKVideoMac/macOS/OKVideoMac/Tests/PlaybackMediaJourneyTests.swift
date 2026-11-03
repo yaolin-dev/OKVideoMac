@@ -193,6 +193,79 @@ import OKVideoPersistence
             await cleanup(state, environment, window)
         } catch { await cleanup(state, environment, window); throw error }
     }
+
+    func testMixedQualityEightNineAndTwelveThirteenDecodeViaButtonsAutoplayAndResume() async throws {
+        let (state, environment, window, base) = try await fixture()
+        do {
+            let values = MixedQualityEpisodeFixture.episodes.enumerated().map { index, item -> PlayEpisode in
+                var value = item
+                value.url = base + "/seek/manifest.mpd?episode=\(MixedQualityEpisodeFixture.order[index])"
+                return value
+            }
+            let source = PlaySource(name: "混合画质验证", episodes: values)
+            let detail = VideoDetail(summary: .init(siteKey: "media-journey", siteName: "Fixture",
+                videoID: "mixed-quality", title: "混合画质分集验证", categoryName: "嘟嘟"), playSources: [source])
+            let byNumber = Dictionary(uniqueKeysWithValues: zip(MixedQualityEpisodeFixture.order, values))
+            let host = try XCTUnwrap(window.contentView)
+            func click(_ name: String) async throws {
+                let probe = try XCTUnwrap(BrowserKeyboardView.descendants(of: host)
+                    .compactMap { $0 as? PlayerPresentationProbeView }.first { $0.title == name })
+                let rect = probe.convert(probe.bounds, to: nil)
+                for type: NSEvent.EventType in [.mouseMoved, .leftMouseDown, .leftMouseUp] {
+                    let event = try XCTUnwrap(NSEvent.mouseEvent(with: type,
+                        location: .init(x: rect.midX, y: rect.midY), modifierFlags: [],
+                        timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        context: nil, eventNumber: 1, clickCount: type == .mouseMoved ? 0 : 1, pressure: 1))
+                    window.sendEvent(event)
+                    try await Task.sleep(nanoseconds: 70_000_000)
+                }
+            }
+            for number in [8, 12] {
+                await state.startPlayback(detail: detail, source: source, episode: byNumber[number]!)
+                try await wait("E\(number) decodes") { state.hasCurrentPlaybackStarted && state.playerSnapshot.position > 0.2 && !state.isPlayerEpisodeListPreparing }
+                XCTAssertEqual(state.playerPanelEpisodePresentations.compactMap(\.episodeNumber), Array(1...20))
+                XCTAssertTrue(state.hasNextEpisode)
+                await state.seek(to: 12)
+                try await wait("Progress established") { !state.playerSnapshot.isSeeking && state.playerSnapshot.position >= 11 }
+                await state.closePlayer()
+                let history = try await environment.database.history()
+                XCTAssertTrue(history.contains { $0.episodeName == byNumber[number]!.name && $0.position >= 11 })
+                await state.startPlayback(detail: detail, source: source, episode: byNumber[number]!)
+                try await wait("E\(number) resumes preserved progress") { state.hasCurrentPlaybackStarted && state.playerSnapshot.position >= 11 }
+                try await click("transport-next")
+                try await wait("Native next reaches E\(number + 1)") {
+                    state.currentPlayerEpisodeID == byNumber[number + 1]!.id && state.hasCurrentPlaybackStarted
+                }
+                XCTAssertNotNil(state.playerEpisodeTransitionNotice)
+                try await click("transport-previous")
+                try await wait("Native previous returns to E\(number)") {
+                    state.currentPlayerEpisodeID == byNumber[number]!.id && state.hasCurrentPlaybackStarted
+                }
+                await state.setAutoPlayNextEpisode(true)
+                let duration = try XCTUnwrap(state.playerSnapshot.duration)
+                await state.seek(to: duration)
+                try await wait("Autoplay reaches E\(number + 1)", seconds: 20) {
+                    state.currentPlayerEpisodeID == byNumber[number + 1]!.id && state.hasCurrentPlaybackStarted
+                }
+                // Capture the real production episode picker after continuation.
+                try await click("utility-episodes")
+                try await Task.sleep(nanoseconds: 300_000_000)
+                host.layoutSubtreeIfNeeded()
+                let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                let output = URL(fileURLWithPath: "/private/tmp/OKVideoMac-Episode189-Visuals")
+                try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
+                try data.write(to: output.appendingPathComponent("episode-\(number + 1)-sorted.png"))
+                let attachment = XCTAttachment(data: data, uniformTypeIdentifier: "public.png")
+                attachment.name = "episode-\(number + 1)-sorted"; attachment.lifetime = .keepAlways; add(attachment)
+                try await click("utility-episodes")
+            }
+            XCTAssertEqual(state.playerEpisodes, values)
+            await cleanup(state, environment, window)
+        } catch { await cleanup(state, environment, window); throw error }
+    }
+
     func testHTTPFailureThenRetryAndSlowReplacement() async throws {
         let (state, environment, window, base) = try await fixture()
         do {

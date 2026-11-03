@@ -1,9 +1,27 @@
 import Foundation
 import OKVideoCore
 
+enum PlayerEpisodeNavigationConfirmation: Equatable, Sendable {
+    case gap(expected: Int, available: Int)
+    case seasonChange(season: Int, episode: Int)
+    case editionChange
+
+    var message: String {
+        switch self {
+        case .gap(let expected, let available):
+            return L10n.string("player.queue.gap", fallback: "Episode %d is unavailable. Select a resource to continue at episode %d.", expected, available)
+        case .seasonChange(let season, let episode):
+            return L10n.string("player.queue.season-change", fallback: "Select a resource to continue at season %d, episode %d.", season, episode)
+        case .editionChange:
+            return L10n.string("player.queue.edition-change", fallback: "The next episode uses a different language or edition. Select a resource to continue.")
+        }
+    }
+}
+
 enum PlayerEpisodeNavigationResult: Equatable, Sendable {
     case available(PlayEpisode)
     case choice([PlayEpisode])
+    case confirmation([PlayEpisode], PlayerEpisodeNavigationConfirmation)
     case boundary
     case unavailable
     case preparing
@@ -12,17 +30,26 @@ enum PlayerEpisodeNavigationResult: Equatable, Sendable {
         if case .available(let episode) = self { return episode }
         return nil
     }
-
+    var candidates: [PlayEpisode]? {
+        switch self {
+        case .choice(let items), .confirmation(let items, _): return items
+        default: return nil
+        }
+    }
+    var confirmation: PlayerEpisodeNavigationConfirmation? {
+        if case .confirmation(_, let reason) = self { return reason }
+        return nil
+    }
     var canNavigate: Bool {
         switch self {
-        case .available, .choice: return true
+        case .available, .choice, .confirmation: return true
         case .boundary, .unavailable, .preparing: return false
         }
     }
 }
 
-/// The presentation list keeps every upload. Navigation only needs the next
-/// numbered group to be unique, not every group elsewhere in the same line.
+/// Find the adjacent logical episode before choosing its encode. Quality labels
+/// are preferences, never separate queues that can hide or skip an episode.
 struct PlayerEpisodeNavigationIndex: Sendable {
     private struct Position: Hashable, Comparable, Sendable {
         let season: Int?
@@ -32,51 +59,55 @@ struct PlayerEpisodeNavigationIndex: Sendable {
             return lhs.episode < rhs.episode
         }
     }
+    private struct Candidate: Sendable {
+        let episode: PlayEpisode
+        let version: [String]
+        var edition: [String] { version.filter { !["4K", "1080p", "720p", "HDR", "SDR", "杜比视界"].contains($0) } }
+    }
     private struct Group: Sendable {
         let position: Position
-        let episodes: [PlayEpisode]
+        let candidates: [Candidate]
     }
-    private var groupsByVersion: [String: [Group]] = [:]
-    private var versionsByID: [String: [String]] = [:]
+    private var groups: [Group] = []
+    private var positionsByID: [String: Position] = [:]
 
     init(episodes: [PlayEpisode], categoryName: String? = nil, confirmedVideoEpisodeID: String? = nil) {
-        var versions: [String: [Position: [PlayEpisode]]] = [:]
+        var positions: [Position: [Candidate]] = [:]
         let semantics = PlaybackResourceAnalyzer.analyzeList(episodes, categoryName: categoryName)
         let videoOverrides = PlayerEpisodeVideoEvidence.eligibleIDs(in: episodes,
             categoryName: categoryName, confirmedVideoEpisodeID: confirmedVideoEpisodeID)
         for (episode, value) in zip(episodes, semantics) {
-            let contextual = value.form == .series && value.evidence == .contextual && value.role == .main
             guard !PlaybackResourceAnalyzer.isNonVideoResource(episode) || videoOverrides.contains(episode.id),
-                  value.hasReliableEpisode || contextual,
-                  let number = value.episode, value.endEpisode == nil else { continue }
-            let version = value.versionLabels.joined(separator: "|")
+                  value.hasLocalEpisode, let number = value.episode else { continue }
             let position = Position(season: value.season, episode: number)
-            versions[version, default: [:]][position, default: []].append(episode)
-            versionsByID[episode.id, default: []].append(version)
+            positions[position, default: []].append(Candidate(episode: episode, version: value.versionLabels))
+            positionsByID[episode.id] = position
         }
-        for (version, positions) in versions {
-            // Preserve the existing protection against borrowing an unknown
-            // season from a numbered one, independently within each version.
-            let hasSeason = positions.keys.contains { $0.season != nil }
-            let lacksSeason = positions.keys.contains { $0.season == nil }
-            guard !(hasSeason && lacksSeason) else { continue }
-            groupsByVersion[version] = positions.keys.sorted().map {
-                Group(position: $0, episodes: positions[$0]!)
-            }
-        }
+        // An unnumbered season must never be borrowed from a numbered season.
+        guard !(positions.keys.contains { $0.season == nil } && positions.keys.contains { $0.season != nil }) else { return }
+        groups = positions.keys.sorted().map { Group(position: $0, candidates: positions[$0]!) }
     }
 
     func adjacent(to currentEpisodeID: String, offset: Int) -> PlayerEpisodeNavigationResult {
         guard offset == -1 || offset == 1,
-              let versions = versionsByID[currentEpisodeID], versions.count == 1,
-              let groups = groupsByVersion[versions[0]],
-              let current = groups.firstIndex(where: { group in
-                  group.episodes.contains { $0.id == currentEpisodeID }
-              }) else { return .unavailable }
+              let position = positionsByID[currentEpisodeID],
+              let current = groups.firstIndex(where: { $0.position == position }),
+              let playing = groups[current].candidates.first(where: { $0.episode.id == currentEpisodeID }) else { return .unavailable }
         let target = current + offset
         guard groups.indices.contains(target) else { return .boundary }
-        let candidates = groups[target].episodes
-        return candidates.count == 1 ? .available(candidates[0]) : .choice(candidates)
+        let group = groups[target]
+        let sameVersion = group.candidates.filter { $0.version == playing.version }
+        let sameEdition = group.candidates.filter { $0.edition == playing.edition }
+        let candidates = !sameVersion.isEmpty ? sameVersion : !sameEdition.isEmpty ? sameEdition : group.candidates
+        let episodes = candidates.map(\.episode)
+        if group.position.season != position.season {
+            return .confirmation(episodes, .seasonChange(season: group.position.season!, episode: group.position.episode))
+        }
+        if group.position.episode != position.episode + offset {
+            return .confirmation(episodes, .gap(expected: position.episode + offset, available: group.position.episode))
+        }
+        if sameEdition.isEmpty { return .confirmation(episodes, .editionChange) }
+        return episodes.count == 1 ? .available(episodes[0]) : .choice(episodes)
     }
 }
 
@@ -131,4 +162,5 @@ struct PlayerEpisodeNavigationChoice: Identifiable, Equatable {
     let currentEpisodeID: String
     let offset: Int
     let episodes: [PlayEpisode]
+    var confirmation: PlayerEpisodeNavigationConfirmation? = nil
 }

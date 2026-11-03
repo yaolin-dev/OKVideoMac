@@ -589,3 +589,48 @@ final class TMDBMatcherTests: XCTestCase {
         XCTAssertEqual(TMDBEpisodeMapper.episode(.init(name: "SP S00E03", url: "opaque:special"), category: "电视剧", season: try season(0))?.id, 203)
     }
 }
+
+
+final class UnifiedEpisodeArtworkTests: XCTestCase {
+    func testTechnicalSuffixesMapEveryEpisodeByNumberWithoutChangingHistoryIdentity() throws {
+        let data = try JSONSerialization.data(withJSONObject: ["seasonNumber": 1, "episodes": (1...60).map {
+            ["id": 1000 + $0, "episodeNumber": $0, "stillPath": "/still-\($0).jpg"] as [String: Any]
+        }])
+        let season = try JSONDecoder().decode(TMDBSeason.self, from: data)
+        let order = [15,9,10,11,12,1,2,3,4,5,6,7,8,13,14,16,17,18,19,20]
+        let episodes: [PlayEpisode] = order.map { n in
+            let name = (9...12).contains(n) ? "[747.88MB]\(n).mp4"
+                : n == 15 ? "[1.07GB]15_4K.mp4" : String(format: "[1.55GB]%02d-4K.高码率.mkv", n)
+            return .init(name: name, url: "opaque:\(n)", referenceIdentity: "stable-\(n)")
+        }
+        let originalIDs = episodes.map(\.stableIdentity)
+        let mapped = TMDBEpisodeMapper.episodes(episodes, category: "嘟嘟", season: season)
+        let parsed = PlaybackResourceAnalyzer.analyzeList(episodes, categoryName: "嘟嘟")
+        XCTAssertEqual(mapped.count, 20)
+        for (index, number) in order.enumerated() {
+            XCTAssertEqual(mapped[index]?.episodeNumber, number)
+            XCTAssertEqual(mapped[index]?.stillPath, "/still-\(number).jpg")
+            XCTAssertEqual(parsed[index].episode, mapped[index]?.episodeNumber)
+            XCTAssertNil(PlaybackResourceAnalyzer.trustedEpisode(episodes[index]), "Local artwork evidence cannot upgrade persisted identities")
+        }
+        XCTAssertEqual(episodes.map(\.stableIdentity), originalIDs)
+        let reversed = Array(episodes.reversed())
+        let remapped = TMDBEpisodeMapper.episodes(reversed, category: "嘟嘟", season: season)
+        XCTAssertEqual(remapped[0]?.episodeNumber, 20)
+        XCTAssertTrue(TMDBEpisodeMapper.episodes(episodes, category: "电影", season: season).isEmpty)
+        XCTAssertTrue(TMDBEpisodeMapper.episodes(episodes, category: "综艺", season: season).isEmpty)
+    }
+
+    func testTechnicalWordsDoNotConsumeYearsRangesPartsOrWrongSeasons() throws {
+        let data = try JSONSerialization.data(withJSONObject: ["seasonNumber": 1, "episodes": (1...20).map {
+            ["id": $0, "episodeNumber": $0, "stillPath": "/\($0).jpg"] as [String: Any]
+        }])
+        let season = try JSONDecoder().decode(TMDBSeason.self, from: data)
+        for name in ["2026-4K.高码率.mkv", "06-07-4K.高码率.mkv", "06-4K.高码率.5.1.mkv", "花絮 06-4K.高码率.mkv", "S02E06.4K.高码率.mkv", "第6集 上集", "2026-01-06.mkv"] {
+            XCTAssertNil(TMDBEpisodeMapper.episode(.init(name: name, url: "fixture"), category: "电视剧", season: season), name)
+        }
+        for name in ["06-4K.高码率.mkv", "06_1080p_高码率.mp4", "06.4K.高码版.mkv", "06_480p.mp4", "06_8K.mkv", "06_2K.mkv", "06_4320p.mkv"] {
+            XCTAssertEqual(TMDBEpisodeMapper.episode(.init(name: name, url: "fixture"), category: "电视剧", season: season)?.episodeNumber, 6, name)
+        }
+    }
+}

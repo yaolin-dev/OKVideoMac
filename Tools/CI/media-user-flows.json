@@ -12,6 +12,7 @@
     "XtreamFileNetworkTests/testRejectedLoadRestoresProxyBeforeFollowingPlayback",
     "PlaybackMediaJourneyTests/testCompactPlayerActualRenderPreviews",
     "FullscreenPlaybackTests/testLiveUsesNativeFullscreenWithContinuousPlayback",
-    "FullscreenPlaybackTests/testOnDemandKeepsCustomFullscreenWithContinuousPlayback"
+    "FullscreenPlaybackTests/testOnDemandKeepsCustomFullscreenWithContinuousPlayback",
+    "PlaybackMediaJourneyTests/testMixedQualityEightNineAndTwelveThirteenDecodeViaButtonsAutoplayAndResume"
   ]
 }

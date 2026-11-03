@@ -40,6 +40,11 @@ public struct PlaybackResourceSemantics: Equatable, Sendable {
     public var evidence: Evidence = .none
     public var finale = false
     public var versionLabels: [String] = []
+    /// Local display/navigation/artwork evidence; never a persistent resource identity.
+    public var hasLocalEpisode: Bool {
+        episode != nil && endEpisode == nil && role == .main && form == .series
+            && [.explicit, .structured, .contextual].contains(evidence)
+    }
     public var hasReliableEpisode: Bool {
         episode != nil && endEpisode == nil && role == .main
             && (evidence == .explicit || evidence == .structured)
@@ -241,14 +246,17 @@ public enum PlaybackResourceAnalyzer {
 
     private static func removingTechnicalLabels(_ name: String) -> String {
         var value = name.replacingOccurrences(of: #"(?i)\[[0-9]+(?:\.[0-9]+)?\s*(?:GB|MB|TB)\]"#, with: " ", options: .regularExpression)
-        value = value.replacingOccurrences(of: #"(?i)(?<![A-Z0-9])(?:4K(?:SDR|HDR(?:10\+?)?)?|2160p|1080p|720p|SDR|HDR(?:10\+?)?)(?![A-Z0-9])"#, with: " ", options: .regularExpression)
+        value = value.replacingOccurrences(of: #"(?i)(?<![A-Z0-9])(?:[248]K(?:SDR|HDR(?:10\+?)?)?|4320p|2160p|1080p|720p|480p|SDR|HDR(?:10\+?)?)(?![A-Z0-9])"#, with: " ", options: .regularExpression)
+        // Known technical words may surround a numeric filename. Do not strip
+        // arbitrary descriptions, dates, language/cut labels or extra numbers.
+        value = value.replacingOccurrences(of: #"(?:^|[ ._-])(?:高码率|高码版)(?=$|[ ._-])"#, with: " ", options: .regularExpression)
         return value.trimmingCharacters(in: CharacterSet(charactersIn: " ._-"))
     }
 
     private static func contextualNumber(_ name: String) -> Int? {
         let value = removingTechnicalLabels(name)
-        guard let match = captures(#"^([0-9]{1,3})$"#, value).first,
-              let number = Int(match[0]), valid(number) else { return nil }
+        guard let match = captures(#"^([0-9]{1,4})$"#, value).first,
+              let number = Int(match[0]), valid(number), !(1900...2099).contains(number) else { return nil }
         return number
     }
 

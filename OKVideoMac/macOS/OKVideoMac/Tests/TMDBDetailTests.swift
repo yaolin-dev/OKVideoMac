@@ -1933,6 +1933,24 @@ private struct TMDBPolishKeyboardHarness: View {
         return model
     }
 
+    func testTechnicalFilenameArtworkUsesOriginalIndexAfterDisplaySorting() async throws {
+        let model = try await fixture()
+        defer { model.cancel() }
+        let values = ["[1.55GB]02-4K.高码率.mkv", "[1.55GB]01-4K.高码率.mkv"]
+            .map { PlayEpisode(name: $0, url: "opaque:" + $0) }
+        let source = PlaySource(name: "Line", episodes: values)
+        await model.loadSeason(source: source, category: "电视剧")
+        let snapshot = await EpisodePresentationRepository().snapshot(videoID: "technical", source: source, categoryName: "电视剧")
+        let mapping = model.episodeMapping(source: source, category: "电视剧")
+        XCTAssertEqual(snapshot.values.compactMap(\.episodeNumber), [1, 2])
+        for item in snapshot.values {
+            XCTAssertEqual(mapping[item.sourceIndex]?.episodeNumber, item.episodeNumber)
+            XCTAssertNotNil(mapping[item.sourceIndex]?.stillPath)
+        }
+        XCTAssertFalse(model.episodeMappingComputedOnMain)
+        XCTAssertEqual(source.episodes, values)
+    }
+
     func testRepeatedDisplayReadsReuseOffMainMappingAndPreserveResourceOrder() async throws {
         let model = try await fixture()
         defer { model.cancel() }
