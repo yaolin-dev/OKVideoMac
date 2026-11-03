@@ -102,8 +102,18 @@ import OKVideoPersistence
             await state.togglePlayPause()
             try await wait("Preview pauses") { state.playerSnapshot.status == .paused }
             let host = try XCTUnwrap(window.contentView)
-            func capture(_ name: String) throws {
+            func capture(_ name: String) async throws {
+                // Capture the settled, visible controls as a user moving the
+                // pointer over the player sees them, not an auto-hide frame.
+                let move = try XCTUnwrap(NSEvent.mouseEvent(with: .mouseMoved,
+                    location: .init(x: host.bounds.midX, y: host.bounds.midY), modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 0, clickCount: 0, pressure: 0))
+                NSApp.postEvent(move, atStart: false)
+                try await Task.sleep(nanoseconds: 300_000_000)
                 host.layoutSubtreeIfNeeded()
+                host.displayIfNeeded()
+                CATransaction.flush()
                 let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
                 host.cacheDisplay(in: host.bounds, to: bitmap)
                 let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
@@ -123,24 +133,24 @@ import OKVideoPersistence
                 state.seedPlaybackStatusForTesting(live: false,
                     snapshot: .init(status: .paused, position: 15, duration: 45))
                 try await Task.sleep(nanoseconds: 200_000_000)
-                try capture("vod-\(Int(width))-normal")
+                try await capture("vod-\(Int(width))-normal")
                 state.seedPlaybackStatusForTesting(live: false, snapshot: .init(status: .loading),
                     resolution: .restoringHistory, hasStarted: false,
                     choices: [.init(detail: detail, source: source, episode: source.episodes[1], requiresRelink: true)],
                     failure: "请选择原文件；播放及进度恢复成功前，原观看进度会一直保留。")
                 try await Task.sleep(nanoseconds: 200_000_000)
-                try capture("vod-\(Int(width))-recovery")
+                try await capture("vod-\(Int(width))-recovery")
                 state.seedPlaybackStatusForTesting(live: true, snapshot: .init(status: .playing, position: 15))
                 try await Task.sleep(nanoseconds: 200_000_000)
-                try capture("live-\(Int(width))-normal")
+                try await capture("live-\(Int(width))-normal")
                 state.seedPlaybackStatusForTesting(live: true,
                     snapshot: .init(status: .playing, position: 15, isPausedForCache: true))
                 try await Task.sleep(nanoseconds: 700_000_000)
-                try capture("live-\(Int(width))-buffering")
+                try await capture("live-\(Int(width))-buffering")
                 state.seedPlaybackStatusForTesting(live: true, snapshot: .init(status: .failed("Preview failure")),
                     resolution: .failed, failure: "当前线路连接失败，可以重试或切换频道。")
                 try await Task.sleep(nanoseconds: 200_000_000)
-                try capture("live-\(Int(width))-failure")
+                try await capture("live-\(Int(width))-failure")
             }
             await cleanup(state, environment, window)
         } catch { await cleanup(state, environment, window); throw error }

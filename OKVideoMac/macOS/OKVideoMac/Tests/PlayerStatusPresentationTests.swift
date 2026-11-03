@@ -184,6 +184,14 @@ import OKVideoCore
             try await settle()
             let failed = try status(window, title: L10n.string("player.stage.failed", fallback: "Playback Failed"))
             XCTAssertEqual(failed.minX, live.minX, accuracy: 1); XCTAssertEqual(failed.minY, live.minY, accuracy: 1)
+            let actions = try status(window, title: "status-actions-panel")
+            let play = try status(window, title: "transport-playPause")
+            let liveDescription = try status(window, title: "failure-description")
+            XCTAssertEqual(actions.minX, play.minX, accuracy: 1,
+                "Live actions align with the toolbar edge, not the indented status label")
+            XCTAssertEqual(liveDescription.minX, play.minX, accuracy: 1)
+            XCTAssertEqual(actions.minY, play.maxY + 8, accuracy: 1)
+            XCTAssertLessThan(actions.maxY, size.height - 55)
             try capture(host, "live-\(Int(size.width))-failed")
         }
     }

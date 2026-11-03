@@ -607,7 +607,7 @@ struct PlayerView: View {
         let live = state.isLivePlayback
         let maximumHeight = max(44, anchor.minY - 60)
         let width = live
-            ? max(1, min(420, layout.viewportSize.width - anchor.minX - layout.horizontalInset))
+            ? max(1, min(420, layout.innerWidth))
             : max(1, min(layout.innerWidth - 12, state.hasHistoryPlaybackChoices ? 560 : 420))
         let actionsHeight = hasPlaybackStatusActions ? statusActionsVisibleHeight(maximumHeight: maximumHeight) : 0
         let height = live ? actionsHeight : 20 + (hasPlaybackStatusActions ? actionsHeight + 10 : 0)
@@ -617,6 +617,7 @@ struct PlayerView: View {
                 if !live { playbackStatusLine }
             }
             .frame(width: width, height: height, alignment: .bottomLeading)
+            .playerPresentationProbe("status-actions-panel")
             .contentShape(Rectangle())
             .allowsHitTesting(hasPlaybackStatusActions && !isFullScreenTransitioning)
             .onHover { inside in
@@ -625,7 +626,9 @@ struct PlayerView: View {
             }
             // Position expands the layout to the viewport; keep hover and
             // hit testing on the tight panel bounds before positioning it.
-            .position(x: anchor.minX + (live ? 0 : 6) + width / 2,
+            // The live row's short status stays after volume; multiline
+            // explanations/actions align with the toolbar's outer left edge.
+            .position(x: (live ? layout.horizontalInset : anchor.minX + 6) + width / 2,
                       y: anchor.minY - 8 - height / 2)
         }
     }
