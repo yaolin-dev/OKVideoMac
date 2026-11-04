@@ -2,7 +2,7 @@
 
 Date: 2026-11-04
 
-Current replacement candidate: OKVideoMac 0.9.2 (Build 197), Android Bridge 0.3.58 (70). Build 196 is withdrawn; replacement verification and tag confirmation are pending. See [readiness](RELEASE_READINESS_0.9.2.md). Historical hashes below remain unchanged.
+Current replacement candidate: OKVideoMac 0.9.2 (Build 198), Android Bridge 0.3.58 (70). Build 196 is withdrawn; replacement verification and tag confirmation are pending. See [readiness](RELEASE_READINESS_0.9.2.md). Historical hashes below remain unchanged.
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:
@@ -49,7 +49,7 @@ The release also publishes `THIRD_PARTY_NOTICES.md` with SHA-256
 `d34884d5145f972713ba91a816395c7ececb9cffdf1bd3968ccfc9366f774ad9`.
 All five files are named in the outer source-release manifest and checksums.
 
-## Android aggregate metadata gate (Build 197)
+## Android aggregate metadata gate (Build 198)
 
 `generate_sbom.py` reads the single literal `versionName` in the Bridge app build.gradle, using it for the SPDX aggregate version/purl and CycloneDX metadata/component version/purl/bom-ref. `verify_sbom.py` independently checks both documents against that source version and the SHA-256 of the exact packaged APK, rejecting stale metadata and missing or duplicate aggregates. Ten regression tests cover version changes and these rejection paths. The existing APK/host version contract remains required.
 

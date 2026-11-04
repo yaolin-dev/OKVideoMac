@@ -1,8 +1,8 @@
 # Automatic updates
 
-0.9.2（Build 197）为本轮重建候选；正式分发仍须通过现有签名、公证 Accepted、staple、Gatekeeper 和公开资产门禁。Build 196 已撤回，标签更新等待最终验证及用户确认；见[就绪记录](RELEASE_READINESS_0.9.2.md)。既有历史记录保持原范围。
+0.9.2（Build 198）为本轮重建候选；正式分发仍须通过现有签名、公证 Accepted、staple、Gatekeeper 和公开资产门禁。Build 196 已撤回，标签更新等待最终验证及用户确认；见[就绪记录](RELEASE_READINESS_0.9.2.md)。既有历史记录保持原范围。
 
-0.9.2（197）候选沿用既有稳定 feed、公钥和 Keychain 签名账号。仅在最终 DMG 通过 Accepted 与 staple 后生成并验证新 appcast；公开后再核对 latest 下载和签名。
+0.9.2（198）候选沿用既有稳定 feed、公钥和 Keychain 签名账号。仅在最终 DMG 通过 Accepted 与 staple 后生成并验证新 appcast；公开后再核对 latest 下载和签名。
 
 ## Published 0.9.1
 

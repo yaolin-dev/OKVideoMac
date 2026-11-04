@@ -261,13 +261,31 @@ import OKVideoPersistence
             liveInfoInteraction: liveInfo, onWindowChromeRestored: {}).environmentObject(state))
         if #available(macOS 13.0, *) { host.sizingOptions = [] }
         host.frame = overlay.bounds; host.autoresizingMask = [.width, .height]; overlay.addSubview(host)
-        window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+        // Match the desktop prerequisites used by the other real-media
+        // fixtures. Activation alone does not unhide a newly launched host.
+        NSApp.setActivationPolicy(.regular); NSApp.unhide(nil)
+        NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
         let transition = WindowTransitionCoordinator.state(for: window)
         try await waitFor { self.renderHost(in: composition) != nil }
         let renderHost = try XCTUnwrap(renderHost(in: composition))
         let surface = renderHost.surface
         do {
-            try await waitFor { surface.canAnimateFullscreen }
+            try await waitFor {
+                if !window.isKeyWindow {
+                    NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                    window.makeKeyAndOrderFront(nil)
+                }
+                return window.isKeyWindow && window.isVisible && window.occlusionState.contains(.visible)
+            }
+            do {
+                try await waitFor { surface.canAnimateFullscreen }
+            } catch {
+                NSLog("Fullscreen fixture readiness: %@ active=%@ hidden=%@ key=%@ visible=%@ occlusion=%@ bounds=%@",
+                    surface.readinessDiagnosticsForTesting, String(NSApp.isActive), String(NSApp.isHidden),
+                    String(window.isKeyWindow), String(window.isVisible), String(window.occlusionState.rawValue),
+                    NSStringFromRect(surface.bounds))
+                throw error
+            }
             let media = ResolvedMedia(url: URL(fileURLWithPath: fixture), headers: [:], siteKey: live ? "live" : "fullscreen-fixture",
                 sourceName: "Synthetic", episodeName: "Fullscreen")
             try await player.load(media, startPosition: nil, requestID: UUID())

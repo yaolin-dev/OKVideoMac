@@ -10,7 +10,7 @@ fixtures, not installation of the CI toolchain.
 
 ## Checks and scope
 
-| Check | What runs | 0.9.2 Build 197 candidate scope |
+| Check | What runs | 0.9.2 Build 198 candidate scope |
 | --- | --- | --- |
 | Core (debug), Core (release) | Entire `OKVideoKit` Core/Persistence XCTest suite, separately built and discovered for each configuration | Each: 1,266 discovered, 1,237 passed, 29 declared skips |
 | Node | All six `*.test.js` suites selected by `run_node.py`, using the Node test runner | 72 passed, no skips |
@@ -19,7 +19,7 @@ fixtures, not installation of the CI toolchain.
 | Main App Release compile and critical flows | Verify unsigned App/helpers, then build an isolated ad-hoc signed Release test host and execute the logical user-flow contract | Three executables and 151 critical tests passed; exact identities from `Tools/CI/critical-user-flows.json`; zero skips |
 | CI required | Aggregate the five job groups, including both Core matrix results | Only exact `success` for every group is accepted |
 
-The 197 candidate adds ten SourceAudit SBOM regression tests; final exact-commit CI remains pending and will be linked in the release validation. All other listed test inputs retain the 196 implementation.
+The 198 candidate adds ten SourceAudit SBOM regression tests; final exact-commit CI remains pending and will be linked in the release validation. Business sources retain the 196 implementation; Build 198 also enforces visible/active fullscreen fixture prerequisites and waits for owned asynchronous episode feedback without changing assertions, timeouts or skips.
 
 Counts describe the checked baseline, not a target used to suppress new tests.
 Discovery and generated reports are authoritative. Core skips must match the exact

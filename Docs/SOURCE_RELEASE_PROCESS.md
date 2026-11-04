@@ -2,7 +2,7 @@
 
 ## 0.9.2 release candidate
 
-The local validation candidate uses `OKVideoMac-0.9.2.dmg`, `OKVideoMac-0.9.2-macOS-arm64.zip`, and `OKVideoMac-0.9.2-build197-SOURCE_RELEASE_INDEX.json`. Earlier local candidates used captured source snapshots. The formal release must be rebuilt from the exact clean main commit with package-app.sh --mode distribution --notarize --crash-config FILE, using the existing signing, source, SBOM, updater and publication gates. Local acceptance packages are not public release assets.
+The local validation candidate uses `OKVideoMac-0.9.2.dmg`, `OKVideoMac-0.9.2-macOS-arm64.zip`, and `OKVideoMac-0.9.2-build198-SOURCE_RELEASE_INDEX.json`. Earlier local candidates used captured source snapshots. The formal release must be rebuilt from the exact clean main commit with package-app.sh --mode distribution --notarize --crash-config FILE, using the existing signing, source, SBOM, updater and publication gates. Local acceptance packages are not public release assets.
 
 ## Published 0.9.0 identity
 
@@ -34,14 +34,14 @@ Each formal OKVideoMac binary must be published with a source set produced by
 `macOS/OKVideoMac/Scripts/create-source-release.sh` from the exact release Git
 commit. Moving branches and `latest` URLs are not corresponding-source links.
 
-For the 0.9.2 replacement (Build 197), the required release artifact set is:
+For the 0.9.2 replacement (Build 198), the required release artifact set is:
 
-- `OKVideoMac-0.9.2-build197-source.tar.gz`
-- `OKVideoMac-0.9.2-build197-third-party-source.tar.gz`
-- `OKVideoMac-0.9.2-build197-licenses.tar.gz`
-- `OKVideoMac-0.9.2-build197-SOURCE_RELEASE_INDEX.json`
-- `OKVideoMac-0.9.2-build197-SOURCE_RELEASE_MANIFEST.json`
-- `OKVideoMac-0.9.2-build197-SHA256SUMS`
+- `OKVideoMac-0.9.2-build198-source.tar.gz`
+- `OKVideoMac-0.9.2-build198-third-party-source.tar.gz`
+- `OKVideoMac-0.9.2-build198-licenses.tar.gz`
+- `OKVideoMac-0.9.2-build198-SOURCE_RELEASE_INDEX.json`
+- `OKVideoMac-0.9.2-build198-SOURCE_RELEASE_MANIFEST.json`
+- `OKVideoMac-0.9.2-build198-SHA256SUMS`
 - `OKVideoMac-0.9.2-macOS-arm64.zip` (internal identity/archive carrier)
 - `OKVideoMac-0.9.2.dmg` (the public binary bound by the final manifest)
 - `OKVideoMac-0.9.2.dmg.sha256` (checksum of the final stapled DMG)
@@ -50,10 +50,10 @@ For the 0.9.2 replacement (Build 197), the required release artifact set is:
 - `RELEASE_NOTES_0.9.2.md`
 - `appcast.xml` (signed stable feed; immutable DMG URL and embedded release notes)
 
-The Build 197 release set must also include the macOS and Android SPDX/CycloneDX
+The Build 198 release set must also include the macOS and Android SPDX/CycloneDX
 files (`OKVideoMac-macOS.spdx.json`, `OKVideoMac-macOS.cdx.json`,
 `OKVideoMac-Android.spdx.json`, and `OKVideoMac-Android.cdx.json`), and the
-release-specific `OKVideoMac-0.9.2-build197-SHA256SUMS` that binds the release
+release-specific `OKVideoMac-0.9.2-build198-SHA256SUMS` that binds the release
 asset set. The ZIP remains the established internal `binary` identity carrier;
 it is not the public user download. The DMG is recorded separately as the
 public release artifact.

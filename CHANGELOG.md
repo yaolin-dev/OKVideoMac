@@ -4,7 +4,9 @@
 
 ## [0.9.2] - 2026-11-04
 
-- Build 197: derive Android SPDX/CycloneDX aggregate versions and purls from the current Bridge versionName; reject stale versions, duplicate/missing aggregates and APK hash mismatches. Withdrawn Build 196 and the final tag confirmation are recorded in [readiness](Docs/RELEASE_READINESS_0.9.2.md).
+- Build 198: make the real fullscreen fixture explicitly unhide/activate and verify its visible native window; record render-readiness diagnostics. Wait for current-request asynchronous episode feedback before the existing assertion. Preserve failed Build 197 evidence and rebuild through every distribution gate.
+
+- Build 198: derive Android SPDX/CycloneDX aggregate versions and purls from the current Bridge versionName; reject stale versions, duplicate/missing aggregates and APK hash mismatches. Withdrawn Build 196 and the final tag confirmation are recorded in [readiness](Docs/RELEASE_READINESS_0.9.2.md).
 
 - Restore history through the original provider request locator and stable file identity; retain progress on failures and isolate bounded Java/Dex provider recovery.
 - Compact VOD/live controls and anchored status/recovery actions; keep native pointer input, hover volume and Picture in Picture behavior.

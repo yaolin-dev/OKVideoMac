@@ -1,8 +1,8 @@
 # DMG Release Process
 
-0.9.2（Build 197）为本轮重建候选；正式分发仍须通过现有签名、公证 Accepted、staple、Gatekeeper 和公开资产门禁。Build 196 已撤回，标签更新等待最终验证及用户确认；见[就绪记录](RELEASE_READINESS_0.9.2.md)。既有历史记录保持原范围。
+0.9.2（Build 198）为本轮重建候选；正式分发仍须通过现有签名、公证 Accepted、staple、Gatekeeper 和公开资产门禁。Build 196 已撤回，标签更新等待最终验证及用户确认；见[就绪记录](RELEASE_READINESS_0.9.2.md)。既有历史记录保持原范围。
 
-0.9.2（197）为本轮正式发布候选，基于桌面 Build 195 的源码及远端 main。继续执行本文固定 distribution／Accepted／staple／Gatekeeper／安装与 16 项资产流程，结果见 RELEASE_READINESS_0.9.2.md；本段不表示已发布。
+0.9.2（198）为本轮正式发布候选，基于桌面 Build 195 的源码及远端 main。继续执行本文固定 distribution／Accepted／staple／Gatekeeper／安装与 16 项资产流程，结果见 RELEASE_READINESS_0.9.2.md；本段不表示已发布。
 
 ## Published 0.9.1
 

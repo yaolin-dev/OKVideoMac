@@ -256,7 +256,14 @@ import OKVideoPersistence
                 try await wait("Native next reaches E\(number + 1)") {
                     state.currentPlayerEpisodeID == byNumber[number + 1]!.id && state.hasCurrentPlaybackStarted
                 }
-                if [8, 12].contains(number) { XCTAssertNotNil(state.playerEpisodeTransitionNotice) }
+                if [8, 12].contains(number) {
+                    // The first decoded frame can arrive before the async
+                    // adjacent-episode action publishes its owned feedback.
+                    try await wait("Quality transition feedback is delivered") {
+                        state.playerEpisodeTransitionNotice != nil
+                    }
+                    XCTAssertNotNil(state.playerEpisodeTransitionNotice)
+                }
                 try await click("transport-previous")
                 try await wait("Native previous returns to E\(number)") {
                     state.currentPlayerEpisodeID == byNumber[number]!.id && state.hasCurrentPlaybackStarted

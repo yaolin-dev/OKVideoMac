@@ -1,8 +1,8 @@
 # OKVideoMac Binary → Source Mapping
 
-0.9.2（Build 197）为本轮重建候选；正式分发仍须通过现有签名、公证 Accepted、staple、Gatekeeper 和公开资产门禁。Build 196 已撤回，标签更新等待最终验证及用户确认；见[就绪记录](RELEASE_READINESS_0.9.2.md)。既有历史记录保持原范围。
+0.9.2（Build 198）为本轮重建候选；正式分发仍须通过现有签名、公证 Accepted、staple、Gatekeeper 和公开资产门禁。Build 196 已撤回，标签更新等待最终验证及用户确认；见[就绪记录](RELEASE_READINESS_0.9.2.md)。既有历史记录保持原范围。
 
-0.9.2（197）候选新增的 uchardet 静态输入与 Noto Sans CJK SC 字体分别由 native lock／构建配方和 SubtitleFonts/provenance.json 绑定，并随源码和许可证归档；精确发布提交与最终哈希待本轮正式验证后记录。
+0.9.2（198）候选新增的 uchardet 静态输入与 Noto Sans CJK SC 字体分别由 native lock／构建配方和 SubtitleFonts/provenance.json 绑定，并随源码和许可证归档；精确发布提交与最终哈希待本轮正式验证后记录。
 
 ## Published 0.9.1 (Build 182)
 
