@@ -1,6 +1,23 @@
 # Building OKVideoMac
 
-## 0.8.3 release verification
+## 0.9.1 release verification
+
+The current stable release is **0.9.1 (Build 182)**. Tag `v0.9.1` pins
+`e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`; the existing distribution script
+performed a clean Release build from that exact commit. Developer ID / Hardened
+Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, final installation,
+and all 16 public asset download checks passed. See
+[formal verification](../../../../Docs/RELEASE_VALIDATION_0.9.1.md) and
+[CI toolchain and test commands](../../../../Docs/CI.md).
+
+Use the complete SHA-verified XcodeGen 2.46.0 installation, including
+`share/xcodegen/SettingPresets`. Copying its executable alone omits required test
+host and build settings. The pinned CI installer preserves this layout and checks
+both generated test configurations before compilation. Formal packaging retains
+the existing mandatory `clean build`; documentation-only publication updates
+preserve the tag and signed assets.
+
+## Historical 0.8.3 release verification
 
 Build 136 was rebuilt from the exact clean main commit pinned by v0.8.3 using `Scripts/package-app.sh --mode distribution --notarize`. Existing Developer ID, Hardened Runtime, stable update configuration, Apple Accepted, staple, Gatekeeper, DMG and installation gates passed. See [formal verification](../../../../Docs/RELEASE_VALIDATION_0.8.3.md).
 
@@ -26,7 +43,7 @@ limits are explicit in that record and the
 Keep `project.yml` and the committed Xcode project version/build synchronized.
 Use XcodeGen 2.46.0 exactly for regeneration comparisons; a newer generator is
 not an accepted substitute. `Info.plist` uses the shared version/build settings.
-Android Bridge has its own version, currently 0.3.48 (60), and preserves its
+Android Bridge has its own version, currently 0.3.54 (66), and preserves its
 pinned Release certificate and locked dependency graph.
 
 Default tests cover the app, OKVideoKit, AndroidRuntimeKit, Node and SourceAudit.
@@ -52,7 +69,7 @@ The public release has the complete source/SBOM/hash asset set; see
 [formal verification](../../../../Docs/RELEASE_VALIDATION_0.8.1.md).
 
 The stable updater configuration is tracked in `Supporting/StableUpdateConfiguration.plist`.
-Distribution packaging rejects local/unconfigured feeds, verifies the exact 34-path
+Distribution packaging rejects local/unconfigured feeds, verifies the exact 38-path
 Mach-O inventory, and generates a signed appcast after final DMG notarization and
 stapling. Keep the existing Developer ID/notary profile and the dedicated Sparkle
 Keychain signing account available. See [automatic updates](../../../../Docs/AUTOMATIC_UPDATES.md).

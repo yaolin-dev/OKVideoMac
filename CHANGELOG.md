@@ -1,17 +1,16 @@
 # Changelog
 
-- Local build 190: fix mixed S01/unmarked episode names disabling every previous/next button. Replay all 37 real provider filenames, preserve source/history identities, and restrict ambiguous season boundaries without disabling unrelated neighbours.
-
-- Local build 189: sort episode displays naturally without changing source identities; reuse numeric filename parsing for episode artwork; navigate consecutive episode numbers across quality labels, with explicit choices for gaps, seasons and editions.
-
-- Build 188: Compact VOD/live controls, anchored recovery/status panels, hover volume, and native interaction/fullscreen regression coverage.
-
 ## [Unreleased]
 
-- Local build 187: retain request ownership and failure categories on Java/Dex errors; isolate provider instance caches by initialization inputs; recover a broken WoGG entry once without destroying shared login or media state. History and resume safeguards remain in force.
-- Local build 186: restore pointer input for every playback recovery action by rendering the status actions in a full-viewport overlay with real hit bounds. Retains VOD/live status anchors; adds native pointer regressions across window sizes.
-- Local build 185: transparent VOD status above the timeline, live status in the transport row, delayed wait feedback, and consistent Picture in Picture hover/tooltip behavior. Retains build184 history navigation fixes.
-- Local build 184: retain provider detail request locators independently of history row IDs; recover legacy entries in their original site, retain progress and record stable YpanSo file identity without authorization tokens.
+## [0.9.2] - 2026-11-04
+
+- Restore history through the original provider request locator and stable file identity; retain progress on failures and isolate bounded Java/Dex provider recovery.
+- Compact VOD/live controls and anchored status/recovery actions; keep native pointer input, hover volume and Picture in Picture behavior.
+- Unify episode sorting, adjacent navigation and TMDB artwork for mixed numbered filenames and quality labels; retain original resource/history identities and season context.
+- Restrict legacy local-file range compatibility to the explicitly selected Ali original TVBox line; preserve other routes and request ownership.
+- Add subtitle encoding detection, per-subtitle encoding/font choices, a bundled CJK fallback font and sanitized diagnostics.
+- Show a compact live programme summary with the playback controls, and retain episode lists and scroll position while season metadata arrives.
+
 
 ## [0.9.1] - 2026-11-01
 
@@ -28,6 +27,7 @@
 - Use lightweight playback icons and consistent toolbar hover feedback; dismiss player panels on outside clicks and retain source/track/history controls.
 - Align Android Bridge host and APK versions at 0.3.54 (66), enforce the package contract and preserve authorization continuity.
 - Add credential-free CI for Core/Persistence Debug and Release, Node, offline/static, Android JVM and isolated App Release critical flows, with pinned tools and strict report validation. Pin the XCTest product/module names and all transitive C module maps and search paths explicitly so fresh Release test builds receive the required module maps without duplicating host package linkage; include module maps in reusable-build fingerprints. Install the complete SHA-verified XcodeGen distribution, including SettingPresets, and reject incomplete generated host settings before compilation.
+- Release **0.9.1 / Build 182** passed local Release/native regression and exact-commit GitHub CI, Developer ID / Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, desktop installation, and all 16 draft/public asset download checks. The stable feed and downloaded DMG signatures were independently verified. See [formal verification](Docs/RELEASE_VALIDATION_0.9.1.md) for checksums, failure handling and remaining limits.
 
 ## [0.9.0] - 2026-10-26
 

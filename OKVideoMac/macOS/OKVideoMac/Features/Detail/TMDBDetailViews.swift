@@ -407,6 +407,13 @@ final class TMDBSynopsisOverlay: NSView {
     @objc private func dismiss() { close() }
 }
 
+enum TMDBEpisodeLayout {
+    static let shelfHeight: CGFloat = 170
+    static let artworkWidth: CGFloat = 160
+    static let artworkHeight: CGFloat = 90
+    static let titleHeight: CGFloat = 16
+}
+
 struct TMDBEpisodeSkeleton: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -415,13 +422,13 @@ struct TMDBEpisodeSkeleton: View {
                 HStack(spacing: 14) {
                     ForEach(0..<9) { _ in
                         VStack(alignment: .leading, spacing: 7) {
-                            RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.12)).frame(width: 160, height: 90)
-                            RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.12)).frame(width: 125, height: 12)
+                            RoundedRectangle(cornerRadius: 8).fill(Color.secondary.opacity(0.12)).frame(width: TMDBEpisodeLayout.artworkWidth, height: TMDBEpisodeLayout.artworkHeight)
+                            RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.12)).frame(width: 125, height: 12).frame(height: TMDBEpisodeLayout.titleHeight)
                         }
                     }
-                }.padding(4)
+                }.padding(8)
             }
-        }.frame(height: 162).accessibilityHidden(true)
+        }.frame(height: TMDBEpisodeLayout.shelfHeight).accessibilityHidden(true)
     }
 }
 
@@ -486,7 +493,7 @@ struct TMDBEpisodeCards: View {
     @StateObject private var keyboard = TMDBEpisodeKeyboardController()
     var body: some View {
         let mapping = metadata.episodeMapping(source: .init(name: sourceName, episodes: sourceEpisodes, referenceIdentity: sourceReferenceIdentity), category: category)
-        TMDBHorizontalShelf(count: episodes.count, cardWidth: 160, height: 170, identifier: "tmdb.episodes", contentInset: 8, revealIndex: episodes.firstIndex(where: { $0.id == selectedID }), countLabel: L10n.string("tmdb.resources.count", fallback: "%d resources", episodes.count), heading: metadata.season.map { L10n.string("tmdb.season.number", fallback: "Season %d", $0.seasonNumber) } ?? (metadata.selection?.reference.type == .tv || PlaybackContentForm.category(category) == .series
+        TMDBHorizontalShelf(count: episodes.count, cardWidth: TMDBEpisodeLayout.artworkWidth, height: TMDBEpisodeLayout.shelfHeight, identifier: "tmdb.episodes", contentInset: 8, revealIndex: episodes.firstIndex(where: { $0.id == selectedID }), countLabel: L10n.string("tmdb.resources.count", fallback: "%d resources", episodes.count), heading: metadata.season.map { L10n.string("tmdb.season.number", fallback: "Season %d", $0.seasonNumber) } ?? (metadata.selection?.reference.type == .tv || PlaybackContentForm.category(category) == .series
             ? L10n.string("detail.episodes", fallback: "Episodes") : L10n.string("detail.playable-resources", fallback: "Playable Resources"))) { index in
             let item = episodes[index], mapped = mapping[item.sourceIndex]
             TMDBEpisodeCard(item: item, mapped: mapped, stillURL: metadata.imageURL(mapped?.stillPath, kind: .still),
@@ -535,13 +542,14 @@ struct TMDBEpisodeCard: View {
                     }.foregroundStyle(.white).padding(10)
                 }
             }
-            .frame(width: 160, height: 90).clipped().cornerRadius(8)
+            .frame(width: TMDBEpisodeLayout.artworkWidth, height: TMDBEpisodeLayout.artworkHeight).clipped().cornerRadius(8)
             .shadow(color: .black.opacity(0.16), radius: 4, x: 0, y: 2)
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected ? Color.accentColor : .clear, lineWidth: 2).padding(-3))
             Text(title).font(.system(size: 12, weight: selected ? .semibold : .regular)).lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .frame(height: TMDBEpisodeLayout.titleHeight, alignment: .topLeading)
         }
-        .frame(width: 160, alignment: .leading)
+        .frame(width: TMDBEpisodeLayout.artworkWidth, alignment: .leading)
         .accessibilityHidden(true)
         .overlay {
             TMDBEpisodeActivation(label: title, selected: selected, identifier: identifier, onSelect: onSelect, onPlay: onPlay, keyboard: keyboard)

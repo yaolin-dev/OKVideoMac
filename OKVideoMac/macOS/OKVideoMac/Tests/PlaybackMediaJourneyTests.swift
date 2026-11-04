@@ -76,6 +76,23 @@ import OKVideoPersistence
         }
         return (state, environment, window, base)
     }
+    /// Synthetic mouseMoved events do not reliably enter AppKit tracking areas.
+    /// Use the same first click on the video that a person can use to reveal
+    /// controls, and wait for the fade before targeting a button or timeline.
+    private func revealForPointerInteraction(_ window: NSWindow) async throws {
+        NSApp.activate(ignoringOtherApps: true); window.makeKeyAndOrderFront(nil)
+        let host = try XCTUnwrap(window.contentView)
+        let point = host.convert(.init(x: host.bounds.midX, y: host.bounds.midY), to: nil)
+        for type: NSEvent.EventType in [.leftMouseDown, .leftMouseUp] {
+            window.sendEvent(try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point,
+                modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                windowNumber: window.windowNumber, context: nil, eventNumber: 1,
+                clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)))
+        }
+        try await Task.sleep(nanoseconds: 250_000_000)
+        print("JOURNEY_POINTER_READY active=\(NSApp.isActive) key=\(window.isKeyWindow)")
+    }
+
     private func content(_ base: String, prefix: String = "") -> (VideoDetail, PlaySource) {
         let source = PlaySource(name: "Fixture", episodes: (1...3).map {
             PlayEpisode(name: "E\($0).mp3", url: base + prefix + "/seek/manifest.mpd?episode=\($0)")
@@ -163,6 +180,7 @@ import OKVideoPersistence
             try await wait("First frame and decoded video") { state.hasCurrentPlaybackStarted && state.playerSnapshot.position > 0.3 && state.hasNextEpisode }
             await state.seek(to: 30)
             try await wait("Seek reaches requested position") { !state.playerSnapshot.isSeeking && state.playerSnapshot.position >= 29 }
+            try await revealForPointerInteraction(window)
             // Exercise the production floating button with a real pointer event.
             // Compact transport remains at the left edge at every viewport size.
             let layout = PlayerOverlayLayout(viewportSize: window.contentView!.bounds.size)
@@ -208,6 +226,7 @@ import OKVideoPersistence
             let byNumber = Dictionary(uniqueKeysWithValues: zip(MixedSeasonProviderFixture.order, values))
             let host = try XCTUnwrap(window.contentView)
             func click(_ name: String) async throws {
+                if name.hasPrefix("transport-") { try await revealForPointerInteraction(window) }
                 let probe = try XCTUnwrap(BrowserKeyboardView.descendants(of: host)
                     .compactMap { $0 as? PlayerPresentationProbeView }.first { $0.title == name })
                 let rect = probe.convert(probe.bounds, to: nil)
@@ -430,6 +449,7 @@ import OKVideoPersistence
     }
 
     private func drag(_ window: NSWindow, from: Double, to: Double) async throws {
+        try await revealForPointerInteraction(window)
         let host = try XCTUnwrap(window.contentView)
         let track = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).first { $0 is ProgressHoverTrackingNSView })
         func point(_ fraction: Double) -> NSPoint {

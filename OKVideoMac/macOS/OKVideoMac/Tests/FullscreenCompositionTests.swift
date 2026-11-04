@@ -195,8 +195,11 @@ import OKVideoPersistence
         guard let fixture = ProcessInfo.processInfo.environment["OKVIDEO_PIP_FIXTURE"] else {
             throw XCTSkip("Requires the synthetic video fixture and an unlocked desktop")
         }
+        let originalPointer = CGEvent(source: nil)?.location
+        defer { if let originalPointer { CGWarpMouseCursorPosition(originalPointer) } }
         let state = AppState(environment: nil)
         state.playerWindowPreferences.setMode(.automaticAspect)
+        var reopenLive: (() async -> Void)?
         if live {
             let source = StoredLiveSource(name: "Fullscreen fixture", sourceKind: .pasted, rawData: Data())
             let channel = LiveChannel(groupName: "Fixture", name: "Live fullscreen", streams: [
@@ -205,14 +208,17 @@ import OKVideoPersistence
                 groups: [.init(name: "Fixture", channels: [channel])]))
             state.importedRouteLoadForTesting = { _, _, _ in }
             await state.playImportedLive(state.acceptedImportedCatalogs[source.id]!.selections(for: channel)[0], navigationChannels: [channel])
+            reopenLive = {
+                await state.playImportedLive(state.acceptedImportedCatalogs[source.id]!.selections(for: channel)[0], navigationChannels: [channel])
+            }
             let liveSource = LiveSourceID.imported(source.id), now = Date()
             let generation = state.liveEPG.prepare(source: liveSource, revision: "fixture")
             let incarnation = UUID(), demand = UUID()
             XCTAssertTrue(state.liveEPG.publish(.init(token: .init(serviceIncarnation: incarnation,
                 resourceIdentity: "fixture", sourceEpoch: "fixture", dataVersion: "1", demandRevision: demand),
                 items: [.init(match: .init(kind: .exact, channelID: "fixture"),
-                    current: .init(channelID: "fixture", title: "当前节目 · 自然与旅行", start: now.addingTimeInterval(-900), end: now.addingTimeInterval(900)),
-                    next: .init(channelID: "fixture", title: "下一节目 · 晚间新闻", start: now.addingTimeInterval(900), end: now.addingTimeInterval(2700)))]),
+                    current: .init(channelID: "fixture", title: "自然与旅行", start: now.addingTimeInterval(-900), end: now.addingTimeInterval(900)),
+                    next: .init(channelID: "fixture", title: "晚间新闻", start: now.addingTimeInterval(900), end: now.addingTimeInterval(2700)))]),
                 channels: [channel], source: liveSource, revision: "fixture", generation: generation,
                 demandRevision: demand, serviceIncarnation: incarnation))
         } else {
@@ -250,9 +256,9 @@ import OKVideoPersistence
         videoView.translatesAutoresizingMaskIntoConstraints = true
         videoView.frame = composition.bounds; videoView.autoresizingMask = [.width, .height]
         composition.addSubview(videoView)
-        let liveInfo = PlayerLiveInfoPresentation()
+        let liveInfo = PlayerLiveInfoInteraction()
         let host = PlayerOverlayHostingView(rootView: PlayerView(playerSnapshotState: state.playerSnapshotState,
-            liveInfoPresentation: liveInfo, onWindowChromeRestored: {}).environmentObject(state))
+            liveInfoInteraction: liveInfo, onWindowChromeRestored: {}).environmentObject(state))
         if #available(macOS 13.0, *) { host.sizingOptions = [] }
         host.frame = overlay.bounds; host.autoresizingMask = [.width, .height]; overlay.addSubview(host)
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -267,41 +273,70 @@ import OKVideoPersistence
             try await player.load(media, startPosition: nil, requestID: UUID())
             try await waitFor { latest.status == .playing && latest.position > 0.1 }
             let context = surface.openGLContext
+            func summaryMounted() -> Bool {
+                BrowserKeyboardView.descendants(of: host).compactMap { $0 as? PlayerPresentationProbeView }
+                    .contains { $0.title == "live-programme-summary" }
+            }
+            func button(_ id: String) -> NSButton? {
+                BrowserKeyboardView.descendants(of: host).compactMap { $0 as? NSButton }
+                    .first { candidate in
+                        guard candidate.accessibilityIdentifier() == id, !candidate.isHiddenOrHasHiddenAncestor else { return false }
+                        let point = candidate.convert(NSPoint(x: candidate.bounds.midX, y: candidate.bounds.midY), to: nil)
+                        return window.contentView?.hitTest(point) === candidate
+                    }
+            }
+            func revealControlsByClick() throws {
+                let centre = host.convert(NSPoint(x: host.bounds.midX, y: host.bounds.midY), to: nil)
+                for type: NSEvent.EventType in [.leftMouseDown, .leftMouseUp] {
+                    window.sendEvent(try XCTUnwrap(NSEvent.mouseEvent(with: type, location: centre,
+                        modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                        context: nil, eventNumber: 0, clickCount: 1, pressure: type == .leftMouseDown ? 1 : 0)))
+                }
+            }
             if live {
-                // The summary now expires independently after four seconds.
-                // Opening details explicitly pins the same card while playback
-                // and native fullscreen transitions continue underneath it.
                 try await Task.sleep(nanoseconds: 500_000_000)
+                // The real pointer must start over video, not over either
+                // hover region left under it by a previous fullscreen test.
+                let centre = NSPoint(x: host.bounds.midX, y: host.bounds.midY)
+                let screenPoint = window.convertPoint(toScreen: host.convert(centre, to: nil))
+                CGWarpMouseCursorPosition(.init(x: screenPoint.x,
+                    y: (NSScreen.screens.first?.frame.maxY ?? 0) - screenPoint.y))
+                try revealControlsByClick()
+                liveInfo.hover(false)
+                try await Task.sleep(nanoseconds: 250_000_000)
                 host.layoutSubtreeIfNeeded()
-                XCTAssertTrue(liveInfo.visible, "The injected presentation must own the rendered card")
-                let layout = PlayerOverlayLayout(viewportSize: host.bounds.size)
-                let fromTop = layout.programmeTopInset + 20
-                let local = NSPoint(x: host.bounds.width - layout.programmeTrailingInset - 34,
-                    y: host.isFlipped ? fromTop : host.bounds.height - fromTop)
-                let point = host.convert(local, to: nil)
-                NSLog("LiveInfo click bounds=%@ point=%@ hit=%@ key=%@ transition=%@", NSStringFromRect(host.bounds), NSStringFromPoint(point), String(describing: window.contentView?.hitTest(point)), String(window.isKeyWindow), String(transition.isTransitioning))
-                let down = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
-                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
-                    context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
-                let up = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [],
-                    timestamp: down.timestamp + 0.05, windowNumber: window.windowNumber,
-                    context: nil, eventNumber: 2, clickCount: 1, pressure: 0))
-                // NSButton tracks synchronously until release, so queue the
-                // release before dispatching the press through real hit testing.
-                NSApp.postEvent(up, atStart: true)
-                window.sendEvent(down)
-                try await waitFor { liveInfo.expanded }
+                XCTAssertTrue(summaryMounted())
+                XCTAssertNotNil(button("player.live.playPause"))
+                XCTAssertFalse(BrowserKeyboardView.descendants(of: host).contains {
+                    $0.accessibilityIdentifier().hasPrefix("player.live.info.")
+                }, "There must be no information or details actions")
+                try await Task.sleep(nanoseconds: 3_200_000_000)
+                XCTAssertFalse(summaryMounted())
+                XCTAssertNil(button("player.live.playPause"))
+                try revealControlsByClick()
+                try await waitFor { summaryMounted() && button("player.live.playPause") != nil }
+                liveInfo.hover(true)
                 let readsBefore = await player.mediaInfoRefreshCountForTesting()
-                try await Task.sleep(nanoseconds: 2_200_000_000)
+                try await Task.sleep(nanoseconds: 3_200_000_000)
+                XCTAssertTrue(summaryMounted())
+                XCTAssertNotNil(button("player.live.playPause"), "Hovering the summary must hold both layers")
                 let readsAfter = await player.mediaInfoRefreshCountForTesting()
-                XCTAssertEqual(readsAfter, readsBefore, "Programme details must reuse cached media information without starting the statistics poller")
-                NSLog("LiveInfo native metadata reads during 2.2s details display: %d", readsAfter - readsBefore)
+                XCTAssertEqual(readsAfter, readsBefore, "The summary must not query native media information")
+                NSLog("LiveInfo native metadata reads during 3.2s summary display: %d", readsAfter - readsBefore)
+                liveInfo.hover(false)
+                try await Task.sleep(nanoseconds: 3_200_000_000)
+                XCTAssertFalse(summaryMounted())
+                XCTAssertNil(button("player.live.playPause"))
+                try revealControlsByClick()
+                let previousPlaybackID = state.playbackPresentationID
+                await reopenLive?()
+                XCTAssertNotEqual(state.playbackPresentationID, previousPlaybackID)
+                try await waitFor { summaryMounted() && button("player.live.playPause") != nil }
                 host.layoutSubtreeIfNeeded()
-                let detailBitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-                host.cacheDisplay(in: host.bounds, to: detailBitmap)
-                XCTAssertGreaterThan(try renderedProgrammeBounds(detailBitmap, viewport: host.bounds.size, scanFraction: 0.8).height, 180,
-                    "A real click must expand programme details in place")
-
+                let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                XCTAssertLessThan(try renderedProgrammeBounds(bitmap, viewport: host.bounds.size, scanFraction: 0.8).height, 180,
+                    "Reopening the same channel must still render only the compact summary")
                 XCTAssertNil(controller.customWindowsToEnterFullScreen(for: window, on: try XCTUnwrap(window.screen)))
             }
             // Exercise the neutral prewarmed shell, fixed sizing, automatic
@@ -342,7 +377,9 @@ import OKVideoPersistence
                     XCTAssertTrue(CATransform3DIsIdentity(overlay.layer!.transform))
                     try await Task.sleep(nanoseconds: 180_000_000)
                     if live && round == 0 {
-                        XCTAssertTrue(liveInfo.expanded, "An explicitly opened detail card must survive fullscreen transitions")
+                        try revealControlsByClick()
+                        try await waitFor { summaryMounted() && button("player.live.playPause") != nil }
+                        try await Task.sleep(nanoseconds: 200_000_000)
                         host.layoutSubtreeIfNeeded()
                         let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
                         host.cacheDisplay(in: host.bounds, to: bitmap)
@@ -357,7 +394,8 @@ import OKVideoPersistence
                             XCTAssertEqual(host.bounds.width - card.maxX, 20, accuracy: 2)
                             XCTAssertEqual(card.minY, 44, accuracy: 2)
                         }
-                        XCTAssertEqual(card.width, 344, accuracy: 2, "The refined information card keeps the same width in both window modes")
+                        XCTAssertEqual(card.width, 344, accuracy: 2, "The summary keeps the same width in both window modes")
+                        XCTAssertLessThan(card.height, 180, "Fullscreen must not expand the summary")
                         let image = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), uniformTypeIdentifier: "public.png")
                         image.name = entering ? "live-programme-fullscreen" : "live-programme-windowed"
                         image.lifetime = .keepAlways

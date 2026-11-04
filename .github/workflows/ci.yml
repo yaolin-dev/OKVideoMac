@@ -39,7 +39,7 @@ jobs:
   app:
     name: Main App Release compile and critical flows
     needs: android
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 50
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
@@ -70,7 +70,7 @@ jobs:
             ${{ runner.temp }}/okvideo-app-dependencies/CrashReporter/Source
             ${{ runner.temp }}/okvideo-app-dependencies/Downloads
             ${{ runner.temp }}/okvideo-app-dependencies/SourcePackages
-          key: app-deps-v1-${{ runner.os }}-${{ runner.arch }}-xcode16.2-${{ hashFiles('OKVideoMac/macOS/OKVideoMac/Packages/OKCrashDiagnostics/Package.swift', 'OKVideoMac/macOS/OKVideoMac/Scripts/prepare-crash-reporter.sh', 'OKVideoMac/macOS/OKVideoMac/Scripts/prepare-sparkle.py', 'ThirdParty/sparkle-lock.json') }}
+          key: app-deps-v2-macos15-${{ runner.os }}-${{ runner.arch }}-xcode16.2-${{ hashFiles('OKVideoMac/macOS/OKVideoMac/Packages/OKCrashDiagnostics/Package.swift', 'OKVideoMac/macOS/OKVideoMac/Scripts/prepare-crash-reporter.sh', 'OKVideoMac/macOS/OKVideoMac/Scripts/prepare-sparkle.py', 'ThirdParty/sparkle-lock.json') }}
       - name: Verify unsigned Release structure and run isolated App regressions
         run: >-
           python3 Tools/CI/run_app.py
@@ -155,7 +155,7 @@ jobs:
 
   offline:
     name: Offline audits and static checks
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
@@ -217,7 +217,7 @@ jobs:
 
   core:
     name: Core (${{ matrix.configuration }})
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -243,7 +243,7 @@ jobs:
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/okvideo-core-${{ matrix.configuration }}
-          key: core-v1-${{ runner.os }}-${{ runner.arch }}-xcode16.2-${{ matrix.configuration }}-${{ hashFiles('OKVideoMac/macOS/OKVideoMac/Packages/OKVideoKit/**') }}
+          key: core-v2-macos15-${{ runner.os }}-${{ runner.arch }}-xcode16.2-${{ matrix.configuration }}-${{ hashFiles('OKVideoMac/macOS/OKVideoMac/Packages/OKVideoKit/**') }}
       - name: Build, discover and run complete suite
         run: >-
           python3 Tools/CI/run_core.py

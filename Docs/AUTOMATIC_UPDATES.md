@@ -1,8 +1,14 @@
 # Automatic updates
 
+0.9.2（196）候选沿用既有稳定 feed、公钥和 Keychain 签名账号。仅在最终 DMG 通过 Accepted 与 staple 后生成并验证新 appcast；公开后再核对 latest 下载和签名。
+
+## Published 0.9.1
+
+The stable latest feed offers **0.9.1 (182)**. All 16 public assets, latest feed bytes and XML/DMG signatures passed verification. The existing HTTPS feed, public key and pinned Sparkle tools are unchanged. This does not claim a new complete update-installation cycle. See [verification](RELEASE_VALIDATION_0.9.1.md).
+
 ## Published 0.9.0
 
-The stable latest feed offers **0.9.0 (155)**, above all earlier public builds. The existing HTTPS feed, Sparkle public key and pinned 2.10.0 tools are unchanged. All 16 draft and anonymous public downloads match local SHA-256 and GitHub digests; latest feed bytes, XML signature and the final downloaded DMG EdDSA signature pass. The public DMG also passes staple, codesign, Gatekeeper and disk-image verification. This does not claim a new complete Sparkle update-installation cycle. See [formal verification](RELEASE_VALIDATION_0.9.0.md).
+At 0.9.0 publication, the stable feed offered **0.9.0 (155)**, above all earlier public builds. The existing HTTPS feed, Sparkle public key and pinned 2.10.0 tools are unchanged. All 16 draft and anonymous public downloads match local SHA-256 and GitHub digests; latest feed bytes, XML signature and the final downloaded DMG EdDSA signature pass. The public DMG also passes staple, codesign, Gatekeeper and disk-image verification. This does not claim a new complete Sparkle update-installation cycle. See [formal verification](RELEASE_VALIDATION_0.9.0.md).
 
 ## Published 0.8.7
 

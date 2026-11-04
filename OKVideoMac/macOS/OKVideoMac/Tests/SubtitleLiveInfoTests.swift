@@ -6,18 +6,16 @@ import OKVideoCore
 @testable import OKVideoMac
 
 final class SubtitleLiveInfoTests: XCTestCase {
-    func testSummaryPausesItsRemainingTimeAndDetailsStayOpen() {
-        var state = PlayerLiveInfoVisibility()
-        state.show(now: 100); state.hold(true, now: 101)
-        state.expire(now: 120); XCTAssertEqual(state.mode, .summary)
-        state.hold(false, now: 200); state.expire(now: 202.9)
-        XCTAssertEqual(state.mode, .summary)
-        state.expire(now: 203); XCTAssertEqual(state.mode, .hidden)
-        state.show(now: 300); state.expand(); state.expire(now: 1000)
-        XCTAssertEqual(state.mode, .details)
-        state.close(); XCTAssertEqual(state.mode, .hidden)
-        state.show(now: 2000); state.expire(now: 2004)
-        XCTAssertEqual(state.mode, .hidden, "Changing channel starts a fresh four-second summary")
+    @MainActor func testProgrammeInfoUsesControlVisibilityAndHoldsDuringInteraction() {
+        let state = PlayerLiveInfoInteraction()
+        func mayHide() -> Bool {
+            PlayerControlVisibilityPolicy.shouldAutoHide(isLivePlayback: true,
+                controlsHovering: false, isFailed: false,
+                keepsControlsVisible: state.holdsControlsVisible, isPlaying: true)
+        }
+        XCTAssertTrue(mayHide())
+        state.hover(true); XCTAssertFalse(mayHide())
+        state.hover(false); XCTAssertTrue(mayHide())
         let start = Date(timeIntervalSince1970: 1000)
         let empty = PlayerLiveInfoTimelineSchedule(intervals: [])
         XCTAssertEqual(Array(empty.entries(from: start, mode: .normal)), [start], "No EPG must not keep a refresh clock alive")
@@ -74,7 +72,7 @@ final class SubtitleLiveInfoTests: XCTestCase {
         XCTAssertFalse(settings.canChooseEncoding); XCTAssertFalse(settings.canChooseFont)
     }
 
-    @MainActor func testProgrammeCardFitsSmallWindowsAndKeepsDetailsInPlace() throws {
+    @MainActor func testProgrammeSummaryFitsSmallWindowsWithoutActions() throws {
         let now = Date(), source = LiveSourceID.imported(UUID())
         let channel = LiveChannel(groupName: "Fixture", name: "CCTV-5+", tvgID: "1", streams: [])
         let current = EPGProgramme(channelID: "1", title: "实况录像－2026年世界泳联游泳世界杯 乌兹别克斯坦站", start: now.addingTimeInterval(-600), end: now.addingTimeInterval(1800))
@@ -86,21 +84,20 @@ final class SubtitleLiveInfoTests: XCTestCase {
             items: [.init(match: .init(kind: .exact, channelID: "1"), current: current, next: next)], availability: .fresh)
         XCTAssertTrue(epg.publish(batch, channels: [channel], source: source, revision: "fixture", generation: generation, demandRevision: demand, serviceIncarnation: incarnation))
         for width in [CGFloat(240), CGFloat(344)] {
-            for expanded in [false, true] {
-                let presentation = PlayerLiveInfoPresentation(); presentation.show()
-                if expanded { presentation.expand() }
-                let host = NSHostingView(rootView: PlayerLiveProgrammeCard(epg: epg, presentation: presentation, channel: channel, source: source, stream: nil, mediaInfo: nil, compact: width < 300, maximumHeight: 280)
-                    .environment(\.colorScheme, .dark).frame(width: width))
-                let size = host.fittingSize
-                XCTAssertEqual(size.width, width, accuracy: 1)
-                XCTAssertGreaterThan(size.height, 70); XCTAssertLessThanOrEqual(size.height, 280)
-                if let folder = ProcessInfo.processInfo.environment["OKVIDEO_SUBTITLE_VISUAL_OUTPUT"] {
-                    host.frame = NSRect(origin: .zero, size: size); host.layoutSubtreeIfNeeded()
-                    let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
-                    host.cacheDisplay(in: host.bounds, to: bitmap)
-                    try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: folder).appendingPathComponent("live-\(Int(width))-\(expanded ? "detail" : "summary").png"))
-                }
-                presentation.close()
+            let interaction = PlayerLiveInfoInteraction()
+            let host = NSHostingView(rootView: PlayerLiveProgrammeCard(epg: epg, interaction: interaction,
+                channel: channel, source: source, compact: width < 300)
+                .environment(\.colorScheme, .dark).frame(width: width))
+            let size = host.fittingSize
+            XCTAssertEqual(size.width, width, accuracy: 1)
+            XCTAssertGreaterThan(size.height, 70); XCTAssertLessThan(size.height, 180)
+            XCTAssertTrue(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? NSButton }.isEmpty,
+                "The summary must contain no Details, Back, Hide or information buttons")
+            if let folder = ProcessInfo.processInfo.environment["OKVIDEO_SUBTITLE_VISUAL_OUTPUT"] {
+                host.frame = NSRect(origin: .zero, size: size); host.layoutSubtreeIfNeeded()
+                let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: bitmap)
+                try bitmap.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: folder).appendingPathComponent("live-\(Int(width))-summary.png"))
             }
         }
     }

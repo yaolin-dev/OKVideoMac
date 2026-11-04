@@ -16,7 +16,7 @@ fixtures, not installation of the CI toolchain.
 | Node | All six `*.test.js` suites selected by `run_node.py`, using the Node test runner | 72 passed, no skips |
 | Offline audits and static checks | SourceAudit synthetic tests, crash configuration tests, tiny Mach-O/dSYM symbol gates, CI validator tests, static checks | 52 audit tests (including 7 native launcher cases), 15 crash configuration tests, 7 symbol cases; no skips |
 | Android Release JVM and unsigned bridge | Existing locked Gradle Release build and JVM tests in a fresh source copy; verify APK is unsigned | 65 JVM tests, no skips; compile-only APK |
-| Main App Release compile and critical flows | Verify unsigned App/helpers, then build an isolated ad-hoc signed Release test host and execute the logical user-flow contract | Three executables plus exact test identities from `Tools/CI/critical-user-flows.json`; zero allowed skips |
+| Main App Release compile and critical flows | Verify unsigned App/helpers, then build an isolated ad-hoc signed Release test host and execute the logical user-flow contract | Three executables and 102 critical tests passed; exact identities from `Tools/CI/critical-user-flows.json`; zero skips |
 | CI required | Aggregate the five job groups, including both Core matrix results | Only exact `success` for every group is accepted |
 
 Counts describe the checked baseline, not a target used to suppress new tests.
@@ -27,6 +27,12 @@ Empty suites, unexplained skips, missing completions, duplicates, test process
 errors and contradictory totals fail the check. Other test suites allow no skips.
 The 51 CI validator tests exercise malformed reports, missing work, failure,
 cancellation, skipped jobs, Python fixture errors, complete tool installation and generated test-host configuration.
+
+The published `v0.9.1` tag pins `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`.
+Both the [candidate run](https://github.com/yaolin-dev/OKVideoMac/actions/runs/41308881387)
+and [main run](https://github.com/yaolin-dev/OKVideoMac/actions/runs/41312795609)
+passed for that exact commit. Signing, notarization and final public download
+verification are recorded separately in [release validation](RELEASE_VALIDATION_0.9.1.md).
 
 Static checks parse tracked Python, JavaScript, shell and JSON inputs, run actionlint,
 require full commit SHA pins for Actions, reject workflow secret references and
@@ -39,7 +45,7 @@ branch-protection rule; repository protection settings were not changed.
 
 ## Toolchain and isolation
 
-- macOS 14 arm64 runners select Xcode 16.2 / Swift 6.0.3. Linux jobs use Ubuntu 24.04.
+- macOS 15 arm64 runners select the same Xcode 16.2 / Swift 6.0.3. Linux jobs use Ubuntu 24.04.
 - Python 3.13.15, Node 22.23.0 and Temurin JDK 17.0.19+10 are selected explicitly.
 - actionlint 1.7.12 and XcodeGen 2.46.0 downloads must match the official archive
   SHA-256 values in [tool-downloads.json](../Tools/CI/tool-downloads.json).
@@ -65,6 +71,18 @@ relevant input hashes; only successful jobs on a `main` push save caches. Tests
 still run after a cache hit. Android explicitly reruns tasks without build-cache
 results. Toolchain/dependency upgrades must update the corresponding pins and
 verification evidence together.
+
+The November 1 publication-documentation runs on macOS 14 were cancelled before
+their Mac jobs started because of GitHub's scheduled image brownout. The
+[official retirement notice](https://github.com/actions/runner-images/issues/13518)
+sets November 2, 2026 as the removal date. Main now selects `macos-15`; its
+[official arm64 image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-15-arm64-Readme.md)
+still includes Xcode 16.2. The App and Core cache namespaces include `macos15`
+to prevent restoring older host caches. Test contracts, exact skip rules, tool
+versions and distribution/signing gates are unchanged. Cancelled jobs supply no
+test evidence and are not counted as passed. The successful release-commit runs
+above remain evidence for the immutable 0.9.1 binary; subsequent main CI validates
+the hosted-runner migration independently.
 
 ## Local commands
 
@@ -224,5 +242,6 @@ proof for later changes.
 - Developer ID, Hardened Runtime, Apple Accepted notarization, staple, Gatekeeper,
   installation and public artifact/source integrity remain required by the
   [formal release process](SOURCE_RELEASE_PROCESS.md). CI success is not release
-  approval. These CI/test/documentation changes leave App 0.9.0 / Build 155 and its
-  existing signed release assets unchanged.
+  approval. App 0.9.1 / Build 182 separately passed these distribution gates; see
+  [formal validation](RELEASE_VALIDATION_0.9.1.md). Later documentation-only commits
+  preserve the tag, build-time source snapshot and signed assets.

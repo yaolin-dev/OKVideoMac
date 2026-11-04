@@ -952,9 +952,11 @@ private struct TMDBRenderImages: HTTPClient {
 private actor TMDBSeasonImageProbe: HTTPClient {
     let data: Data
     private(set) var paths: [String] = []
-    init(data: Data) { self.data = data }
+    var delay: UInt64
+    init(data: Data, delay: UInt64 = 0) { self.data = data; self.delay = delay }
     func send(_ request: HTTPRequest) async throws -> HTTPResponse {
         paths.append(request.url.path)
+        if delay > 0 { try await Task.sleep(nanoseconds: delay) }
         return HTTPResponse(url: request.url, statusCode: 200, headers: ["Content-Type": "image/png"], body: data)
     }
 }
@@ -962,9 +964,13 @@ private actor TMDBSeasonImageProbe: HTTPClient {
 private struct TMDBRenderService: TMDBServing {
     let work: TMDBWork
     let episodes: TMDBSeason
+    var seasonDelay: UInt64 = 0
     func search(query: String, type: TMDBMediaType?, year: Int?) async throws -> [TMDBWork] { [work] }
     func detail(_ reference: TMDBReference) async throws -> TMDBWork { work }
-    func season(tvID: Int, number: Int) async throws -> TMDBSeason { episodes }
+    func season(tvID: Int, number: Int) async throws -> TMDBSeason {
+        if seasonDelay > 0 { try await Task.sleep(nanoseconds: seasonDelay) }
+        return episodes
+    }
     func imageConfiguration() async throws -> TMDBImageConfiguration { throw TMDBError.unavailable(404) }
 }
 
@@ -2368,7 +2374,7 @@ extension TMDBDetailTests {
 }
 
 @MainActor final class TMDBNamedFilenameTests: XCTestCase {
-    private func fixture() async throws -> (TMDBDetailModel, VideoDetail) {
+    private func fixture(loadSeason: Bool = true, seasonDelay: UInt64 = 0) async throws -> (TMDBDetailModel, VideoDetail) {
         let names = (1...38).map { String(format: "[1.37GB] W我是XJ WSXJ %02d 4K.mkv", $0) }
             + (1...31).map { String(format: "我是刑警 S01E%02d 1080p.mkv", $0) }
         let source = PlaySource(name: "夸父原1", episodes: names.enumerated().map {
@@ -2388,9 +2394,9 @@ extension TMDBDetailTests {
         let detail = VideoDetail(summary: .init(siteKey: "fixture", siteName: "Fixture", videoID: "named-files",
             title: "我是刑警", year: "2024", categoryName: "电视剧"), playSources: [source])
         let model = TMDBDetailModel()
-        await model.load(repository: TMDBRepository(client: TMDBRenderService(work: work, episodes: season)), key: "named-files", input: .init(detail: detail))
+        await model.load(repository: TMDBRepository(client: TMDBRenderService(work: work, episodes: season, seasonDelay: seasonDelay)), key: "named-files", input: .init(detail: detail))
         _ = try XCTUnwrap(model.selection)
-        await model.loadSeason(source: source, category: detail.summary.categoryName)
+        if loadSeason { await model.loadSeason(source: source, category: detail.summary.categoryName) }
         return (model, detail)
     }
 
@@ -2441,6 +2447,58 @@ extension TMDBDetailTests {
             let seasons = Set(values.filter { range.episodeIDs.contains($0.id) }.map { $0.seasonNumber ?? 1 })
             XCTAssertEqual(seasons.count, 1)
         }
+    }
+
+    func testLateSeasonAndArtworkKeepMountedShelfAndScrollPosition() async throws {
+        let (model, detail) = try await fixture(loadSeason: false, seasonDelay: 1_500_000_000)
+        defer { model.cancel() }
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 320, pixelsHigh: 180,
+            bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0))
+        for y in 0..<180 { for x in 0..<320 { bitmap.setColor(.systemTeal, atX: x, y: y) } }
+        let network = TMDBSeasonImageProbe(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), delay: 300_000_000)
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("stable-artwork-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let images = ImageRepository(dataRepository: try ImageDataRepository(cacheDirectory: directory, httpClient: network))
+        let state = AppState(environment: nil)
+        let host = NSHostingView(rootView: DetailView(detail: detail, metadata: model)
+            .environmentObject(state).environment(\.imageRepository, images))
+        let window = NSWindow(contentRect: .init(x: -3000, y: -3000, width: 900, height: 900),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host
+        defer { window.close() }
+        func shelf() -> TMDBShelfScrollProbe? {
+            BrowserKeyboardView.descendants(of: host).compactMap { $0 as? TMDBShelfScrollProbe }.first
+        }
+        for _ in 0..<60 {
+            if shelf() != nil { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        XCTAssertNil(model.season, "Measure the real source cards before season metadata arrives")
+        let probe = try XCTUnwrap(shelf()), scroll = try XCTUnwrap(probe.enclosingScrollView)
+        let outer = try XCTUnwrap(scroll.superview?.enclosingScrollView)
+        scroll.contentView.scroll(to: .init(x: 237, y: scroll.contentView.bounds.minY))
+        scroll.reflectScrolledClipView(scroll.contentView)
+        outer.contentView.scroll(to: .init(x: 0, y: 120))
+        outer.reflectScrolledClipView(outer.contentView)
+        try await Task.sleep(nanoseconds: 100_000_000)
+        host.layoutSubtreeIfNeeded()
+        let frame = scroll.convert(scroll.bounds, to: host)
+        let horizontal = scroll.contentView.bounds.origin, vertical = outer.contentView.bounds.origin
+        let documentSize = try XCTUnwrap(outer.documentView).frame.size
+        for _ in 0..<120 {
+            try await Task.sleep(nanoseconds: 25_000_000)
+            host.layoutSubtreeIfNeeded()
+            XCTAssertTrue(shelf() === probe, "Late metadata must enrich, not replace, the mounted shelf")
+            XCTAssertEqual(scroll.contentView.bounds.minX, horizontal.x, accuracy: 0.5)
+            XCTAssertEqual(outer.contentView.bounds.minY, vertical.y, accuracy: 0.5)
+            XCTAssertEqual(scroll.convert(scroll.bounds, to: host).minY, frame.minY, accuracy: 0.5)
+            XCTAssertEqual(outer.documentView?.frame.height ?? 0, documentSize.height, accuracy: 0.5)
+        }
+        XCTAssertNotNil(model.season)
+        let stills = try XCTUnwrap(model.season).episodes.compactMap { model.imageURL($0.stillPath, kind: .still) }
+        XCTAssertTrue(stills.contains { images.cachedPoster(for: .init(url: $0, pixels: 320)) != nil },
+            "Exercise real asynchronous image decoding as well as metadata")
     }
 
     func testNamedFileDetailRendersMatchedArtSynopsisVersionsAndResourceCount() async throws {

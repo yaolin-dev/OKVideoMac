@@ -12,7 +12,7 @@ struct PlayerView: View {
     @State private var scrubPosition: Double?
     @State private var scrubRevision = UUID()
     @State private var controlsVisible = true
-    @StateObject private var liveInfo = PlayerLiveInfoPresentation()
+    @StateObject private var liveInfo = PlayerLiveInfoInteraction()
     @State private var playbackStatusActionsHeight: CGFloat = 44
     @StateObject private var controlTooltip = PlayerControlTooltipState()
     @State private var controlsHovering = false
@@ -40,11 +40,11 @@ struct PlayerView: View {
 
     init(
         playerSnapshotState: PlayerSnapshotState,
-        liveInfoPresentation: PlayerLiveInfoPresentation? = nil,
+        liveInfoInteraction: PlayerLiveInfoInteraction? = nil,
         onWindowChromeRestored: @escaping () -> Void
     ) {
         self.playerSnapshotState = playerSnapshotState
-        _liveInfo = StateObject(wrappedValue: liveInfoPresentation ?? PlayerLiveInfoPresentation())
+        _liveInfo = StateObject(wrappedValue: liveInfoInteraction ?? PlayerLiveInfoInteraction())
         _overlayObservation = StateObject(wrappedValue: PlayerOverlayObservation(source: playerSnapshotState))
         self.onWindowChromeRestored = onWindowChromeRestored
     }
@@ -126,19 +126,17 @@ struct PlayerView: View {
                     }
                 }
             }
-            .allowsHitTesting(!isFullScreenTransitioning && (controlsVisible || liveInfo.visible || hasPlaybackStatusActions))
+            .allowsHitTesting(!isFullScreenTransitioning && (controlsVisible || hasPlaybackStatusActions))
             .environment(\.colorScheme, .dark)
 
-            // Keep the interactive card above the full-window status and volume overlays.
+            // Keep the summary above the full-window status and volume overlays.
             Group {
-                if liveInfo.visible, state.isLivePlayback, activeUtilityPanel == nil,
+                if controlsVisible, state.isLivePlayback, activeUtilityPanel == nil,
                    !isFullScreenTransitioning,
                    let channel = state.livePlaybackChannel,
                    let source = state.livePlaybackSourceID {
-                    PlayerLiveProgrammeCard(epg: state.liveEPG, presentation: liveInfo, channel: channel,
-                        source: source, stream: state.livePlaybackStream,
-                        mediaInfo: state.playerSnapshot.mediaInfo, compact: geometry.size.width < 600,
-                        maximumHeight: max(120, geometry.size.height - 140))
+                    PlayerLiveProgrammeCard(epg: state.liveEPG, interaction: liveInfo, channel: channel,
+                        source: source, compact: geometry.size.width < 600)
                         .equatable()
                         .frame(width: min(344, max(1, geometry.size.width - layout.programmeTrailingInset * 2)))
                         .padding(.trailing, layout.programmeTrailingInset)
@@ -149,7 +147,6 @@ struct PlayerView: View {
                 }
             }
             .environment(\.colorScheme, .dark)
-            .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: liveInfo.visible)
 
             if controlsVisible,
                let activeUtilityPanel {
@@ -203,12 +200,13 @@ struct PlayerView: View {
             updateTooltipAvailability()
         }
         .onChange(of: state.livePlaybackChannel?.id) { _ in
-            if state.isLivePlayback { liveInfo.show() } else { liveInfo.close() }
+            if state.isLivePlayback { revealControls() }
         }
-        .onChange(of: liveInfo.isInteracting) { value in
+        .onChange(of: liveInfo.holdsControlsVisible) { value in
             if value { keepControlsVisible() } else { scheduleControlsHide() }
         }
         .onChange(of: state.playbackPresentationID) { _ in
+            if state.isLivePlayback { revealControls() }
             volumeHideTask?.cancel(); isCompactVolumePresented = false
             volumeButtonHovering = false; volumePopoverHovering = false
             dismissProgressPreview(); scrubRevision = UUID(); scrubPosition = nil; controlTooltip.dismiss()
@@ -232,7 +230,6 @@ struct PlayerView: View {
         }
         .onAppear {
             overlayObservation.setVisible(controlsVisible)
-            if state.isLivePlayback && !liveInfo.visible { liveInfo.show() }
             revealControls()
             updatePlaybackActivityOverlay(
                 isActive: hasTransientPlaybackActivity
@@ -833,7 +830,6 @@ struct PlayerView: View {
 
     private var compactUtilityMenu: some View {
         Menu {
-            if state.isLivePlayback { Button(L10n.string("player.live-info.toggle", fallback: "Programme information")) { toggleLiveInfo() } }
             if state.hasPlaybackQualityChoices {
                 Menu(L10n.string("player.quality", fallback: "Quality")) { qualityMenuItems }
             }
@@ -1043,13 +1039,6 @@ struct PlayerView: View {
 
     private var utilityControls: some View {
         HStack(spacing: 4) {
-                if state.isLivePlayback {
-                    Button { toggleLiveInfo() } label: { utilityMenuIcon("info.circle") }
-                        .buttonStyle(.plain)
-                        .accessibilityLabel(L10n.string("player.live-info.toggle", fallback: "Programme information"))
-                        .accessibilityIdentifier("player.live.info.toggle")
-                        .playerControlHelp(L10n.string("player.live-info.toggle", fallback: "Programme information"))
-                }
                 utilityPanelButton(systemImage: "list.bullet", panel: .episodes, help: resourceControlTitle)
                 utilityPanelButton(systemImage: "captions.bubble", panel: .subtitles,
                     help: L10n.string("player.subtitles", fallback: "Subtitles"))
@@ -2247,18 +2236,12 @@ struct PlayerView: View {
             isLivePlayback: state.isLivePlayback,
             controlsHovering: controlsHovering,
             isFailed: isFailed,
-            keepsControlsVisible: liveInfo.isInteracting || isFullScreenTransitioning || activeUtilityPanel != nil || isCompactVolumePresented || isVolumeEditing || scrubPosition != nil,
+            keepsControlsVisible: (state.isLivePlayback && liveInfo.holdsControlsVisible) || isFullScreenTransitioning || activeUtilityPanel != nil || isCompactVolumePresented || isVolumeEditing || scrubPosition != nil,
             isPlaying: {
                 if case .playing = state.playerSnapshot.status { return true }
                 return false
             }()
         )
-    }
-
-    private func toggleLiveInfo() {
-        activeUtilityPanel = nil
-        if liveInfo.visible { liveInfo.close() } else { liveInfo.show() }
-        revealControls()
     }
 
     private func revealControls() {
@@ -3084,7 +3067,7 @@ struct PlayerOverlayLayout {
     var showsQuality = false
     var showsTransportControls = true
     static let transportWidth: CGFloat = 116
-    var expandedToolsWidth: CGFloat { showsTransportControls ? 196 : 236 }
+    var expandedToolsWidth: CGFloat { 196 }
     var horizontalInset: CGFloat { 20 }
     var controlWidth: CGFloat { max(1, viewportSize.width - horizontalInset * 2) }
     var bottomInset: CGFloat { 12 }

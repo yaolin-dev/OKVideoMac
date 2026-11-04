@@ -881,7 +881,9 @@ struct DetailView: View {
             return
         }
         let sourceID = source.id
-        isPreparingEpisodes = true
+        // Late season metadata enriches an already mounted shelf. Replacing it
+        // with a skeleton resets horizontal scrolling and shifts the page.
+        isPreparingEpisodes = preparedPresentations.isEmpty
         let snapshot = await EpisodePresentationRepository.shared.snapshot(
             videoID: detail.summary.id,
             source: source,

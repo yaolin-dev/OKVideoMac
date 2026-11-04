@@ -1,8 +1,8 @@
 # OKVideoMac
 
-The current release candidate is **0.9.1 (Build 194)**. Resource-based history recovery; stable TMDB matching; 20-way search with local source ordering and automatic scroll loading; EPG cleanup and timestamp caching; lighter playback controls; scoped media proxy settings; and request-scoped Quark/CatPaw seek recovery. See [release notes](Docs/RELEASE_NOTES_0.9.1.md). Formal signing, notarization and publication are tracked in the release readiness record.
+The current release candidate is **0.9.2 (Build 196)**. See [release notes](Docs/RELEASE_NOTES_0.9.2.md) and [readiness](Docs/RELEASE_READINESS_0.9.2.md). Signing, notarization and publication are pending this release run.
 
-The latest stable release is **0.9.0 (Build 155)** with reorganized Settings, conditional TMDB details, DASH, live previews and playback/stability repairs. Developer ID, Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks passed. See [release notes](Docs/RELEASE_NOTES_0.9.0.md) and [formal verification](Docs/RELEASE_VALIDATION_0.9.0.md).
+The latest stable release is **0.9.1 (Build 182)** with cloud-drive seek recovery, original-resource history, stable TMDB matching, 20-way search, EPG cleanup and lighter playback controls. Developer ID, Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks passed. See [release notes](Docs/RELEASE_NOTES_0.9.1.md) and [formal verification](Docs/RELEASE_VALIDATION_0.9.1.md).
 
 English | [简体中文](README_zh-CN.md)
 
@@ -18,7 +18,7 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
-The latest stable release is **0.9.0 (Build 155)**, Developer ID signed and Apple-notarized.
+The latest stable release is **0.9.1 (Build 182)**, Developer ID signed and Apple-notarized.
 
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search · QuickJS/Node Spiders**
 
@@ -26,13 +26,22 @@ The latest stable release is **0.9.0 (Build 155)**, Developer ID signed and Appl
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.9.0 (Build 155)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
+**0.9.1 (Build 182)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
 
-Download the Developer ID signed and Apple-notarized [v0.9.0 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.0/OKVideoMac-0.9.0.dmg). Stapling, Gatekeeper, final DMG and fresh-install smoke checks passed.
+Download the Developer ID signed and Apple-notarized [v0.9.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.1/OKVideoMac-0.9.1.dmg). Stapling, Gatekeeper, final DMG and fresh-install smoke checks passed.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs and notices accompany the release.
 
 > OKVideoMac is a player and provider client. It does not include third-party video sources, accounts, cookies, parsing services or DRM keys.
+
+## New in 0.9.2
+
+- Restore history through the original provider request locator and stable file identity; retain progress on failures and isolate bounded Java/Dex provider recovery.
+- Compact VOD/live controls and anchored status/recovery actions; keep native pointer input, hover volume and Picture in Picture behavior.
+- Unify episode sorting, adjacent navigation and TMDB artwork for mixed numbered filenames and quality labels; retain original resource/history identities and season context.
+- Restrict legacy local-file range compatibility to the explicitly selected Ali original TVBox line; preserve other routes and request ownership.
+- Add subtitle encoding detection, per-subtitle encoding/font choices, a bundled CJK fallback font and sanitized diagnostics.
+- Show a compact live programme summary with the playback controls, and retain episode lists and scroll position while season metadata arrives.
 
 ## New in 0.9.1
 
@@ -43,7 +52,7 @@ Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disab
 - Add a media system-proxy preference, lightweight transport icons, bounded seek diagnostics and cancellation of stale cloud-drive reads.
 - Keep the Quark original-file buffering profile; adapt the pinned CatPaw Quark/UC/Ali download helper without changing other source packages.
 
-## New in 0.9.0
+## 0.9.0 history
 
 - Searchable Settings with progress, cancellation and clear results for source refresh, compatibility, cache, backup and diagnostics operations.
 - Original source details by default. Automatic TMDB details require a saved credential and working API/image connections; a compact native selector retains an explicit Original choice.
@@ -378,12 +387,15 @@ checks; a local Debug compile is not a public release artifact.
 
 ## Release integrity
 
-The 0.8.5 / Build 138 DMG passed Release packaging, Developer ID, Apple Accepted, staple, Gatekeeper, installation and 16 public asset checks. Tag `v0.8.5` pins `b7fd9026bfee95d2d815dbb39e985225c3004e67`. See [verification](Docs/RELEASE_VALIDATION_0.8.5.md). Historical signed assets and tags remain unchanged.
+The 0.9.1 / Build 182 DMG passed Release packaging, Developer ID / Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks. Tag `v0.9.1` pins `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`. See [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.1.md). Later documentation commits preserve the tag, signed assets and build-time source snapshot.
 
 ## Documentation
 
-- [0.8.4 release notes](Docs/RELEASE_NOTES_0.8.4.md)
-- [0.8.4 release verification](Docs/RELEASE_VALIDATION_0.8.4.md)
+- [0.9.1 release notes](Docs/RELEASE_NOTES_0.9.1.md)
+- [0.9.1 release verification and checksums](Docs/RELEASE_VALIDATION_0.9.1.md)
+- [Release readiness](Docs/RELEASE_READINESS_0.9.1.md)
+- [Corresponding-source release process](Docs/SOURCE_RELEASE_PROCESS.md)
+- [CI and test coverage](Docs/CI.md)
 - [Automatic updates](Docs/AUTOMATIC_UPDATES.md)
 
 - [Detailed project documentation](OKVideoMac/README.md)
