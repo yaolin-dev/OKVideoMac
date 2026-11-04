@@ -1017,6 +1017,13 @@ final class MPVPlayerClient: PlayerClient {
     private var didEmitEndedForCurrentMedia = false
     private var pendingStartPosition: TimeInterval?
     private var pendingSubtitles: [URL] = []
+    private let subtitlePreferences = PlayerSubtitlePreferenceStore()
+    private var subtitleTracks: [Int: (key: String, settings: PlayerSubtitleSettings)] = [:]
+    private var subtitleLoadedEncodings: [String: SubtitleTextEncoding] = [:]
+    private var appliedSubtitleKey: String?
+    private var subtitleDiagnostic = PlayerSubtitleDiagnostics()
+    private var subtitleWarning: String?
+
     private var didEmitFileLoadedForCurrentMedia = false
     private var startupTimelinePosition: Double?
     private var diagnosticsGeneration = UUID()
@@ -1128,6 +1135,15 @@ final class MPVPlayerClient: PlayerClient {
             // track that many remuxes mark as the container default.
             try setOption("slang", value: "zh-Hans,zh-CN,cmn-Hans,zh,chi,zho", client: created)
             try setOption("subs-with-matching-audio", value: "yes", client: created)
+            try setOption("sub-codepage", value: "auto", client: created)
+            try setOption("sub-font-provider", value: "auto", client: created)
+            if let fonts = PlayerSubtitleFonts.directory {
+                try setOption("sub-fonts-dir", value: fonts.path, client: created)
+                try setOption("sub-font", value: PlayerSubtitleFonts.family, client: created)
+            }
+            // Native messages are filtered before storage; never retain paths,
+            // subtitle dialogue, signed URLs or unrelated verbose player logs.
+            try setOption("msg-level", value: "all=warn,sub/ass=v,lavf=info", client: created)
             try library.checked(
                 library.initialize(created),
                 operation: L10n.string("player.operation.initialize", fallback: "Initialize libmpv")
@@ -1138,6 +1154,7 @@ final class MPVPlayerClient: PlayerClient {
                 playerID: renderOwnerID,
                 mode: teardownMode
             )
+            _ = "terminal-default".withCString { library.requestLogMessages?(created, $0) }
             try installPropertyObservers(client: created)
         } catch {
             library.destroy(created)
@@ -1250,6 +1267,11 @@ final class MPVPlayerClient: PlayerClient {
                 let previousNetworkOptions = self.currentNetworkOptions
                 let previousTransportProfile = self.currentMediaTransportProfile
                 let previousSnapshot = self.snapshot
+                let previousSubtitleTracks = self.subtitleTracks
+                let previousSubtitleEncodings = self.subtitleLoadedEncodings
+                let previousSubtitleKey = self.appliedSubtitleKey
+                let previousSubtitleDiagnostics = self.subtitleDiagnostic
+                let previousSubtitleWarning = self.subtitleWarning
                 let previousDidEmitEnded = self.didEmitEndedForCurrentMedia
                 let previousDidEmitFileLoaded = self.didEmitFileLoadedForCurrentMedia
                 self.endSeekReadDiagnostics()
@@ -1274,6 +1296,14 @@ final class MPVPlayerClient: PlayerClient {
                     self.pendingStartPosition = startPosition.flatMap {
                         $0.isFinite && $0 > 0 ? $0 : nil
                     }
+                    self.subtitleTracks = [:]
+                    self.subtitleLoadedEncodings = [:]
+                    self.appliedSubtitleKey = nil
+                    self.subtitleDiagnostic = PlayerSubtitleDiagnostics()
+                    self.subtitleWarning = nil
+                    self.snapshot.subtitleSettings = PlayerSubtitleSettings()
+                    try self.applySubtitleFont(.original, client: client)
+                    try self.subtitleProperty("sub-codepage", "auto", client: client)
                     self.pendingSubtitles = media.subtitles
                     self.currentMediaTransportProfile = media.transportProfile
                     self.currentMedia = media
@@ -1331,6 +1361,12 @@ final class MPVPlayerClient: PlayerClient {
                     self.currentNetworkOptions = previousNetworkOptions
                     self.currentMediaTransportProfile = previousTransportProfile
                     self.snapshot = previousSnapshot
+                    self.subtitleTracks = previousSubtitleTracks
+                    self.subtitleLoadedEncodings = previousSubtitleEncodings
+                    self.appliedSubtitleKey = previousSubtitleKey
+                    self.subtitleDiagnostic = previousSubtitleDiagnostics
+                    self.subtitleWarning = previousSubtitleWarning
+                    try? self.applySubtitleFont(previousSnapshot.subtitleSettings.fontStyle, client: client)
                     self.didEmitEndedForCurrentMedia = previousDidEmitEnded
                     self.didEmitFileLoadedForCurrentMedia = previousDidEmitFileLoaded
                     self.replacingMediaRequestID = nil
@@ -1608,6 +1644,113 @@ final class MPVPlayerClient: PlayerClient {
                 client: client
             )
         }
+    }
+
+    func setSubtitleEncoding(_ encoding: SubtitleTextEncoding) async throws {
+        try await perform { client in
+            self.refreshTracks(client: client)
+            guard let id = self.snapshot.subtitleSettings.trackID, let track = self.subtitleTracks[id], track.settings.canChooseEncoding else {
+                throw AppError.playback(L10n.string("player.subtitle.external-only", fallback: "Encoding can only be changed for the current external text subtitle."))
+            }
+            try self.reloadSubtitle(id: id, key: track.key, encoding: encoding, client: client)
+            var preference = self.subtitlePreferences.preference(for: track.key)
+            preference.encoding = encoding
+            self.subtitlePreferences.save(preference, for: track.key)
+            self.subtitleWarning = nil
+            self.refreshTracks(client: client); self.emitSnapshot()
+        }
+    }
+
+    func setSubtitleFontStyle(_ style: SubtitleFontStyle) async throws {
+        try await perform { client in
+            self.refreshTracks(client: client)
+            guard let id = self.snapshot.subtitleSettings.trackID, let track = self.subtitleTracks[id], track.settings.canChooseFont else {
+                throw AppError.playback(L10n.string("player.subtitle.text-only", fallback: "Font selection only applies to text subtitles."))
+            }
+            try self.applySubtitleFont(style, client: client)
+            var preference = self.subtitlePreferences.preference(for: track.key)
+            preference.fontStyle = style
+            self.subtitlePreferences.save(preference, for: track.key)
+            self.subtitleWarning = nil
+            self.refreshTracks(client: client); self.emitSnapshot()
+        }
+    }
+
+    func subtitleDiagnostics() async throws -> String {
+        try await perform { client in
+            self.refreshTracks(client: client)
+            return self.subtitleDiagnostic.report(settings: self.snapshot.subtitleSettings, bundledFont: PlayerSubtitleFonts.directory != nil)
+        }
+    }
+
+    private func subtitleProperty(_ name: String, _ value: String, client: OpaquePointer) throws {
+        try name.withCString { key in
+            try value.withCString { string in
+                try library.checked(library.setPropertyString(client, key, string), operation: L10n.string("player.subtitle.option", fallback: "Set subtitle option"))
+            }
+        }
+    }
+
+    private func applySubtitleFont(_ style: SubtitleFontStyle, client: OpaquePointer) throws {
+        let values = [
+            ("sub-font", PlayerSubtitleFonts.directory == nil ? "PingFang SC" : PlayerSubtitleFonts.family),
+            ("sub-ass-override", style == .compatible ? "strip" : "scale"),
+            ("embeddedfonts", style == .compatible ? "no" : "yes")
+        ].filter { propertyString($0.0, client: client) != $0.1 }
+        guard !values.isEmpty else { return }
+        // These options rebuild libass. Updating an active, paused subtitle
+        // repeatedly can discard its cached cue. Deselect only the subtitle
+        // while applying them, then restore it without seeking the video.
+        let selected = propertyString("sid", client: client)
+        let restoresTrack = selected.flatMap(Int.init).map { $0 > 0 } ?? false
+        if restoresTrack { try subtitleProperty("sid", "no", client: client) }
+        defer {
+            if restoresTrack, let selected { try? subtitleProperty("sid", selected, client: client) }
+        }
+        for (name, value) in values { try subtitleProperty(name, value, client: client) }
+    }
+
+    private func reloadSubtitle(id: Int, key: String, encoding: SubtitleTextEncoding, client: OpaquePointer) throws {
+        try subtitleProperty("sub-codepage", encoding.mpvValue, client: client)
+        defer { try? subtitleProperty("sub-codepage", "auto", client: client) }
+        do {
+            try command(["sub-reload", String(id)], client: client)
+            subtitleLoadedEncodings[key] = encoding
+        } catch {
+            subtitleDiagnostic.loadFailures += 1
+            subtitleWarning = L10n.string("player.subtitle.reload-failed", fallback: "Subtitle reload failed. Check the subtitle file or export diagnostics.")
+            throw AppError.playback(subtitleWarning!)
+        }
+    }
+
+    private func refreshSubtitleSettings(client: OpaquePointer) {
+        let ids = Set(snapshot.tracks.filter { $0.type == .subtitle }.map(\.id))
+        subtitleTracks = subtitleTracks.filter { ids.contains($0.key) }
+        let keys = Set(subtitleTracks.values.map(\.key))
+        subtitleLoadedEncodings = subtitleLoadedEncodings.filter { keys.contains($0.key) }
+        guard let selected = snapshot.tracks.first(where: { $0.type == .subtitle && $0.isSelected }),
+              let track = subtitleTracks[selected.id] else {
+            if appliedSubtitleKey != nil { try? applySubtitleFont(.original, client: client) }
+            appliedSubtitleKey = nil
+            snapshot.subtitleSettings = PlayerSubtitleSettings()
+            snapshot.subtitleSettings.warning = subtitleWarning
+            return
+        }
+        if appliedSubtitleKey != track.key {
+            do {
+                try applySubtitleFont(track.settings.canChooseFont ? track.settings.fontStyle : .original, client: client)
+                appliedSubtitleKey = track.key
+            } catch { subtitleWarning = L10n.string("player.subtitle.font-warning", fallback: "Subtitle font settings could not be applied. Diagnostics are available.") }
+        }
+        if track.settings.canChooseEncoding,
+           (subtitleLoadedEncodings[track.key] ?? .automatic) != track.settings.encoding {
+            // Mark the attempt before native events are delivered. A failed
+            // reload is surfaced once instead of retrying on every snapshot.
+            subtitleLoadedEncodings[track.key] = track.settings.encoding
+            try? reloadSubtitle(id: selected.id, key: track.key, encoding: track.settings.encoding, client: client)
+        }
+        snapshot.subtitleSettings = track.settings
+        snapshot.subtitleSettings.warning = subtitleWarning
     }
 
     func setSubtitleDelay(_ delay: TimeInterval) async throws {
@@ -2394,6 +2537,16 @@ final class MPVPlayerClient: PlayerClient {
         switch event.eventID {
         case NativeEvent.logMessage:
             recordSeekReadWarning(event)
+            let missingCount = subtitleDiagnostic.missingGlyphs.count
+            _ = subtitleDiagnostic.record(
+                prefix: event.propertyName.map { String(cString: $0) } ?? "",
+                text: event.stringValue.map { String(cString: $0) } ?? ""
+            )
+            if subtitleDiagnostic.missingGlyphs.count > missingCount {
+                subtitleWarning = L10n.string("player.subtitle.glyph-warning", fallback: "Missing subtitle glyphs detected. Try the compatible font or export diagnostics.")
+                snapshot.subtitleSettings.warning = subtitleWarning
+                emitSnapshot()
+            }
         case NativeEvent.fileLoaded:
             guard let client else { return }
             let isFirstFileLoaded = !didEmitFileLoadedForCurrentMedia
@@ -2460,14 +2613,11 @@ final class MPVPlayerClient: PlayerClient {
             }
             pendingStartPosition = nil
             for subtitle in pendingSubtitles {
-                try? command(
-                    [
-                        "sub-add",
-                        subtitle.absoluteString,
-                        "auto"
-                    ],
-                    client: client
-                )
+                do { try command(["sub-add", subtitle.absoluteString, "auto"], client: client) }
+                catch {
+                    subtitleDiagnostic.loadFailures += 1
+                    subtitleWarning = L10n.string("player.subtitle.load-warning", fallback: "Some external subtitles failed to load. Reload them or export diagnostics.")
+                }
             }
             pendingSubtitles = []
             refreshTracks(client: client)
@@ -3014,7 +3164,7 @@ final class MPVPlayerClient: PlayerClient {
         }
         seekRecovery = nil
         if seekReadDiagnosticsEnabled, let client {
-            _ = "no".withCString { library.requestLogMessages?(client, $0) }
+            _ = "terminal-default".withCString { library.requestLogMessages?(client, $0) }
         }
         PlayerExperimentLogger.performance(
             "phase=seek_read_closed observations=\(24 - window.remaining) request_generation=\(window.requestGeneration) seek_generation=\(window.seekGeneration)",
@@ -3228,6 +3378,19 @@ final class MPVPlayerClient: PlayerClient {
                   ) else { continue }
             let rawTitle = String(cString: title)
             let rawLanguage = String(cString: language)
+            if trackType == .subtitle {
+                let external = propertyString("track-list/\(index)/external", client: client) == "yes"
+                let filename = external ? propertyString("track-list/\(index)/external-filename", client: client) : nil
+                let key = PlayerSubtitlePreferenceStore.identity(media: PlayerSubtitlePreferenceStore.mediaScope(currentMedia, requestID: currentRequestID), external: filename,
+                    trackID: Int(identifier), title: rawTitle)
+                let preference = subtitlePreferences.preference(for: key)
+                var settings = PlayerSubtitleSettings()
+                settings.trackID = Int(identifier); settings.isExternal = external
+                settings.codec = propertyString("track-list/\(index)/codec", client: client)
+                settings.encoding = preference.encoding; settings.fontStyle = preference.fontStyle
+                settings.warning = subtitleWarning
+                subtitleTracks[Int(identifier)] = (key, settings)
+            }
             tracks.append(
                 MediaTrack(
                     id: Int(identifier),
@@ -3241,6 +3404,7 @@ final class MPVPlayerClient: PlayerClient {
             )
         }
         snapshot.tracks = tracks
+        refreshSubtitleSettings(client: client)
     }
 }
 
@@ -3663,6 +3827,16 @@ final class PlayerLifecycleController {
 
     func addSubtitle(url: URL) async throws {
         try await requireClient().addSubtitle(url: url)
+    }
+
+    func setSubtitleEncoding(_ encoding: SubtitleTextEncoding) async throws {
+        try await requireClient().setSubtitleEncoding(encoding)
+    }
+    func setSubtitleFontStyle(_ style: SubtitleFontStyle) async throws {
+        try await requireClient().setSubtitleFontStyle(style)
+    }
+    func subtitleDiagnostics() async throws -> String {
+        try await requireClient().subtitleDiagnostics()
     }
 
     func setSubtitleDelay(_ delay: TimeInterval) async throws {

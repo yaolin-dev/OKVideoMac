@@ -170,9 +170,9 @@ import OKVideoPersistence
 
     /// The upper-right portion of the isolated overlay contains only the card.
     /// A stray centered live title also expands these bounds and fails the check.
-    private func renderedProgrammeBounds(_ bitmap: NSBitmapImageRep, viewport: NSSize) throws -> NSRect {
+    private func renderedProgrammeBounds(_ bitmap: NSBitmapImageRep, viewport: NSSize, scanFraction: Double = 1.0 / 3.0) throws -> NSRect {
         var minX = bitmap.pixelsWide, minY = bitmap.pixelsHigh, maxX = -1, maxY = -1
-        for y in stride(from: 0, to: bitmap.pixelsHigh / 3, by: 2) {
+        for y in stride(from: 0, to: Int(Double(bitmap.pixelsHigh) * scanFraction), by: 2) {
             for x in stride(from: bitmap.pixelsWide / 2, to: bitmap.pixelsWide, by: 2) {
                 guard let color = bitmap.colorAt(x: x, y: y)?.usingColorSpace(.deviceRGB),
                       max(color.redComponent, color.greenComponent, color.blueComponent) > 0.03 else { continue }
@@ -250,8 +250,9 @@ import OKVideoPersistence
         videoView.translatesAutoresizingMaskIntoConstraints = true
         videoView.frame = composition.bounds; videoView.autoresizingMask = [.width, .height]
         composition.addSubview(videoView)
+        let liveInfo = PlayerLiveInfoPresentation()
         let host = PlayerOverlayHostingView(rootView: PlayerView(playerSnapshotState: state.playerSnapshotState,
-            onWindowChromeRestored: {}).environmentObject(state))
+            liveInfoPresentation: liveInfo, onWindowChromeRestored: {}).environmentObject(state))
         if #available(macOS 13.0, *) { host.sizingOptions = [] }
         host.frame = overlay.bounds; host.autoresizingMask = [.width, .height]; overlay.addSubview(host)
         window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
@@ -267,6 +268,40 @@ import OKVideoPersistence
             try await waitFor { latest.status == .playing && latest.position > 0.1 }
             let context = surface.openGLContext
             if live {
+                // The summary now expires independently after four seconds.
+                // Opening details explicitly pins the same card while playback
+                // and native fullscreen transitions continue underneath it.
+                try await Task.sleep(nanoseconds: 500_000_000)
+                host.layoutSubtreeIfNeeded()
+                XCTAssertTrue(liveInfo.visible, "The injected presentation must own the rendered card")
+                let layout = PlayerOverlayLayout(viewportSize: host.bounds.size)
+                let fromTop = layout.programmeTopInset + 20
+                let local = NSPoint(x: host.bounds.width - layout.programmeTrailingInset - 34,
+                    y: host.isFlipped ? fromTop : host.bounds.height - fromTop)
+                let point = host.convert(local, to: nil)
+                NSLog("LiveInfo click bounds=%@ point=%@ hit=%@ key=%@ transition=%@", NSStringFromRect(host.bounds), NSStringFromPoint(point), String(describing: window.contentView?.hitTest(point)), String(window.isKeyWindow), String(transition.isTransitioning))
+                let down = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseDown, location: point, modifierFlags: [],
+                    timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 1, clickCount: 1, pressure: 1))
+                let up = try XCTUnwrap(NSEvent.mouseEvent(with: .leftMouseUp, location: point, modifierFlags: [],
+                    timestamp: down.timestamp + 0.05, windowNumber: window.windowNumber,
+                    context: nil, eventNumber: 2, clickCount: 1, pressure: 0))
+                // NSButton tracks synchronously until release, so queue the
+                // release before dispatching the press through real hit testing.
+                NSApp.postEvent(up, atStart: true)
+                window.sendEvent(down)
+                try await waitFor { liveInfo.expanded }
+                let readsBefore = await player.mediaInfoRefreshCountForTesting()
+                try await Task.sleep(nanoseconds: 2_200_000_000)
+                let readsAfter = await player.mediaInfoRefreshCountForTesting()
+                XCTAssertEqual(readsAfter, readsBefore, "Programme details must reuse cached media information without starting the statistics poller")
+                NSLog("LiveInfo native metadata reads during 2.2s details display: %d", readsAfter - readsBefore)
+                host.layoutSubtreeIfNeeded()
+                let detailBitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
+                host.cacheDisplay(in: host.bounds, to: detailBitmap)
+                XCTAssertGreaterThan(try renderedProgrammeBounds(detailBitmap, viewport: host.bounds.size, scanFraction: 0.8).height, 180,
+                    "A real click must expand programme details in place")
+
                 XCTAssertNil(controller.customWindowsToEnterFullScreen(for: window, on: try XCTUnwrap(window.screen)))
             }
             // Exercise the neutral prewarmed shell, fixed sizing, automatic
@@ -307,6 +342,7 @@ import OKVideoPersistence
                     XCTAssertTrue(CATransform3DIsIdentity(overlay.layer!.transform))
                     try await Task.sleep(nanoseconds: 180_000_000)
                     if live && round == 0 {
+                        XCTAssertTrue(liveInfo.expanded, "An explicitly opened detail card must survive fullscreen transitions")
                         host.layoutSubtreeIfNeeded()
                         let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))
                         host.cacheDisplay(in: host.bounds, to: bitmap)
@@ -321,7 +357,7 @@ import OKVideoPersistence
                             XCTAssertEqual(host.bounds.width - card.maxX, 20, accuracy: 2)
                             XCTAssertEqual(card.minY, 44, accuracy: 2)
                         }
-                        XCTAssertEqual(card.width, 310, accuracy: 2, "Original programme card width must be retained")
+                        XCTAssertEqual(card.width, 344, accuracy: 2, "The refined information card keeps the same width in both window modes")
                         let image = XCTAttachment(data: try XCTUnwrap(bitmap.representation(using: .png, properties: [:])), uniformTypeIdentifier: "public.png")
                         image.name = entering ? "live-programme-fullscreen" : "live-programme-windowed"
                         image.lifetime = .keepAlways

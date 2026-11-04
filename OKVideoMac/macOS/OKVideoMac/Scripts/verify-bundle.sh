@@ -542,4 +542,13 @@ fi
 # An installed/system FFmpeg cannot satisfy this check.
 PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/verify-dash-playback.py" \
   --library "$FRAMEWORKS/libmpv.dylib" --ffmpeg "$FRAMEWORKS/libavformat.61.dylib"
+
+# Subtitle assets are release inputs, not optional machine-installed fonts.
+SUBTITLE_FONT="$APP/Contents/Resources/SubtitleFonts/Fonts/NotoSansCJKsc-Regular.otf"
+if [[ ! -f "$SUBTITLE_FONT" ]] || [[ "$(shasum -a 256 "$SUBTITLE_FONT" | awk '{print $1}')" != "2c76254f6fc379fddfce0a7e84fb5385bb135d3e399294f6eeb6680d0365b74b" ]]; then
+  echo "Subtitle fallback font is missing or differs from the locked asset." >&2
+  exit 1
+fi
+[[ -s "$APP/Contents/Resources/SubtitleFonts/NotoSansCJK-OFL.txt" ]] || exit 1
+PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/verify-subtitle-runtime.py" --library "$FRAMEWORKS/libmpv.dylib" --fonts "$APP/Contents/Resources/SubtitleFonts/Fonts"
 echo "Bundle verification passed: $APP"

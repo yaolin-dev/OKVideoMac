@@ -98,6 +98,7 @@ def main():
     parser.add_argument('--derived-data', type=Path, required=True)
     parser.add_argument('--runtime-app', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--only', action='append', default=[], help='Run a named contract test while diagnosing a failure')
     args = parser.parse_args()
     args.output = args.output.resolve()
     if args.output.is_relative_to(ROOT):
@@ -114,6 +115,11 @@ def main():
         identities = plan['tests']
         if plan['schema'] != 1 or not identities or len(identities) != len(set(identities)):
             raise ValueError('Invalid media journey contract')
+        if args.only:
+            if len(args.only) != len(set(args.only)) or not set(args.only).issubset(identities):
+                raise ValueError('Focused tests must be unique members of the media contract')
+            identities = args.only
+        report['focusedRun'] = bool(args.only)
         verify_source_contract(project, identities)
         stamp = json.loads((args.derived_data / 'critical-regression-build.json').read_text())
         if stamp['sourceFingerprint'] != source_fingerprint(project):
@@ -151,12 +157,19 @@ def main():
         fixtures = project / 'Native/DASHSmoke/fixtures'
         for name, expected in json.loads((fixtures/'SHA256.json').read_text()).items():
             if digest(fixtures/name) != expected: raise ValueError('Fixture changed: '+name)
+        # Native test hosts must not read fixtures from protected Documents
+        # directories: a TCC prompt can block open() and then player teardown.
+        staged_fixtures = args.output / 'Fixtures'
+        shutil.copytree(fixtures, staged_fixtures)
+        fixtures = staged_fixtures
         server = FixtureServer(fixtures)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         config = manifest['OKVideoMacTests']
         config.setdefault('EnvironmentVariables', {})['OKVIDEO_JOURNEY_HTTP'] = f'http://127.0.0.1:{server.server_port}'
         config['EnvironmentVariables']['OKVIDEO_JOURNEY_FIXTURES'] = str(fixtures)
         config['EnvironmentVariables']['OKVIDEO_PIP_FIXTURE'] = str(fixtures / 'seek/manifest.mpd')
+        visual_output = args.output / 'visuals'; visual_output.mkdir()
+        config['EnvironmentVariables']['OKVIDEO_SUBTITLE_VISUAL_OUTPUT'] = str(visual_output)
         test_run = output_products / manifests[0].name
         test_run.write_bytes(plistlib.dumps(manifest))
         argv = ['xcodebuild', 'test-without-building', '-xctestrun', test_run,
@@ -167,7 +180,7 @@ def main():
         code = command([str(x) for x in argv], args.output/'tests.log', 900)
         result = validate_results((args.output/'tests.log').read_text(errors='replace'), identities, code)
         write_junit(args.output/'junit.xml', result, 'Real media playback journeys')
-        if not any(x['range'] for x in server.requests): raise ValueError('No real HTTP byte-range traffic')
+        if not args.only and not any(x['range'] for x in server.requests): raise ValueError('No real HTTP byte-range traffic')
         if source_fingerprint(project) != stamp['sourceFingerprint']: raise ValueError('Source changed during run')
         report.update(result, status='passed')
     except Exception as error:

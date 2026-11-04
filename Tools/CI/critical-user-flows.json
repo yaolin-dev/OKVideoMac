@@ -147,7 +147,12 @@
       "TMDBDetailPerformanceTests/testMemoryTrimPreservesVisiblePixelsAndRestoresFromDiskWithoutNetwork",
       "MixedSeasonProviderNavigationTests/testCompleteActual37ResourceLineNavigatesEveryNeighbourWithoutRewritingIdentity",
       "MixedSeasonProviderNavigationTests/testAmbiguousSeasonEvidenceCannotDisableUnrelatedNeighboursOrCrossUnknownSeason",
-      "MixedSeasonProviderNavigationStateTests/testActual37ResourceLineEnablesBothButtonsIncludingEpisode11AndKeepsOriginalSource"
+      "MixedSeasonProviderNavigationStateTests/testActual37ResourceLineEnablesBothButtonsIncludingEpisode11AndKeepsOriginalSource",
+      "SubtitleLiveInfoTests/testSummaryPausesItsRemainingTimeAndDetailsStayOpen",
+      "SubtitleLiveInfoTests/testSubtitlePreferencesArePrivateAndDoNotLeakAcrossResources",
+      "SubtitleLiveInfoTests/testSubtitleDiagnosticsRetainFactsWithoutURLsPathsOrDialogue",
+      "SubtitleLiveInfoTests/testBitmapAndEmbeddedSubtitlesDoNotOfferWrongRepairs",
+      "SubtitleLiveInfoTests/testProgrammeCardFitsSmallWindowsAndKeepsDetailsInPlace"
     ],
     "desktop": [
       "TMDBNamedFilenameTests/testNamedFileDetailRendersMatchedArtSynopsisVersionsAndResourceCount",

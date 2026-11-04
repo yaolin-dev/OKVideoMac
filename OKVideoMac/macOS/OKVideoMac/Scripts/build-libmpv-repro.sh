@@ -14,7 +14,7 @@ BUILD_DIR="$REPRO_ROOT/build/mpv-0.41.0"
 PREFIX="$REPRO_ROOT/mpv-prefix"
 PATCH_FILE="$PROJECT_DIR/Patches/mpv-0.41.0-coreaudio-without-cocoa.patch"
 VIDEOTOOLBOX_GL_PATCH_FILE="$PROJECT_DIR/Patches/mpv-0.41.0-libmpv-videotoolbox-gl.patch"
-FFMPEG_PREFIX="$REPRO_ROOT/prefix"
+FFMPEG_PREFIX="$(cd "$REPRO_ROOT/prefix" && pwd -P)"
 REPORT_DIR="$REPRO_ROOT/reports"
 
 for tool in shasum tar lipo otool clang; do
@@ -38,8 +38,9 @@ if [[ "$(shasum -a 256 "$ARCHIVE" | awk '{print $1}')" != "$EXPECTED_SHA256" ]];
   exit 1
 fi
 
+bash "$SCRIPT_DIR/build-uchardet.sh"
 export PKG_CONFIG=/opt/local/bin/pkg-config
-export PKG_CONFIG_LIBDIR="$FFMPEG_PREFIX/lib/pkgconfig:$REPRO_ROOT/xml-prefix/lib/pkgconfig:/opt/local/lib/pkgconfig:/opt/local/share/pkgconfig"
+export PKG_CONFIG_LIBDIR="$REPRO_ROOT/uchardet-prefix/lib/pkgconfig:$FFMPEG_PREFIX/lib/pkgconfig:$REPRO_ROOT/xml-prefix/lib/pkgconfig:/opt/local/lib/pkgconfig:/opt/local/share/pkgconfig"
 for package in libavcodec libavfilter libavformat libavutil libswresample libswscale; do
   pc_dir="$($PKG_CONFIG --variable=pcfiledir "$package")"
   if [[ "$pc_dir" != "$FFMPEG_PREFIX/lib/pkgconfig" ]]; then
@@ -69,6 +70,7 @@ export MACOSX_DEPLOYMENT_TARGET=12.0
   --buildtype release \
   -Dcplayer=false \
   -Dlibmpv=true \
+  -Duchardet=enabled \
   -Dbuild-date=false \
   -Dtests=false \
   -Dfuzzers=false \

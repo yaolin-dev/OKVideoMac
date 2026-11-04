@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "release": "OKVideoMac 0.9.1 (193)",
+  "release": "OKVideoMac 0.9.1 (194)",
   "target": {
     "architecture": "arm64",
     "deployment_target": "12.0",
@@ -348,6 +348,21 @@
         "libc++abi.1.dylib"
       ],
       "status": "UNRESOLVED_SOURCE_INPUT"
+    },
+    {
+      "component": "uchardet",
+      "version": "0.0.8",
+      "upstream": "https://www.freedesktop.org/software/uchardet/releases/uchardet-0.0.8.tar.xz",
+      "source_sha256": "e97a60cfc00a1c147a674b097bb1422abd9fa78a2d9ce3f3fdcc2e78a34ac5f0",
+      "license": "MPL-1.1 OR GPL-2.0-or-later OR LGPL-2.1-or-later; public GPL player uses GPL alternative",
+      "build_system": "CMake",
+      "build_flags": "BUILD_SHARED_LIBS=OFF BUILD_BINARY=OFF CMAKE_POSITION_INDEPENDENT_CODE=ON",
+      "recipe": "OKVideoMac/macOS/OKVideoMac/Scripts/build-uchardet.sh",
+      "outputs": [
+        "libuchardet.a (statically linked into libmpv.dylib)"
+      ],
+      "source_status": "locked upstream archive; unmodified",
+      "status": "REPRODUCIBLE_SOURCE_BUILD"
     }
   ]
 }

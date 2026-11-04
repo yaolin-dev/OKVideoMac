@@ -13,6 +13,8 @@
     "PlaybackMediaJourneyTests/testCompactPlayerActualRenderPreviews",
     "FullscreenPlaybackTests/testLiveUsesNativeFullscreenWithContinuousPlayback",
     "FullscreenPlaybackTests/testOnDemandKeepsCustomFullscreenWithContinuousPlayback",
-    "PlaybackMediaJourneyTests/testMixedQualityEightNineAndTwelveThirteenDecodeViaButtonsAutoplayAndResume"
+    "PlaybackMediaJourneyTests/testMixedQualityEightNineAndTwelveThirteenDecodeViaButtonsAutoplayAndResume",
+    "SubtitleNativeTests/testEncodingFontReloadAndMediaSwitchUseTheRealPlayer",
+    "SubtitleLiveInfoTests/testProgrammeCardFitsSmallWindowsAndKeepsDetailsInPlace"
   ]
 }

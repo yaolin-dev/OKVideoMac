@@ -77,6 +77,8 @@ public enum MediaNetworkPolicy: Equatable, Sendable {
 }
 
 public struct ResolvedMedia: Equatable, Sendable {
+    /// Host-owned subtitle preference scope; independent of reusable proxy URLs.
+    public var subtitlePreferenceIdentity: String? = nil
     /// Host-owned playback preference snapshot; never decoded from a provider.
     public var mediaProxyPreference: Bool? = nil
     public var mediaNetworkRouteOverride: PlaybackMediaNetworkRoute? = nil

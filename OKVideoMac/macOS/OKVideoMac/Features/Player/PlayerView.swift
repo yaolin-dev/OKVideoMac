@@ -12,6 +12,7 @@ struct PlayerView: View {
     @State private var scrubPosition: Double?
     @State private var scrubRevision = UUID()
     @State private var controlsVisible = true
+    @StateObject private var liveInfo = PlayerLiveInfoPresentation()
     @State private var playbackStatusActionsHeight: CGFloat = 44
     @StateObject private var controlTooltip = PlayerControlTooltipState()
     @State private var controlsHovering = false
@@ -39,9 +40,11 @@ struct PlayerView: View {
 
     init(
         playerSnapshotState: PlayerSnapshotState,
+        liveInfoPresentation: PlayerLiveInfoPresentation? = nil,
         onWindowChromeRestored: @escaping () -> Void
     ) {
         self.playerSnapshotState = playerSnapshotState
+        _liveInfo = StateObject(wrappedValue: liveInfoPresentation ?? PlayerLiveInfoPresentation())
         _overlayObservation = StateObject(wrappedValue: PlayerOverlayObservation(source: playerSnapshotState))
         self.onWindowChromeRestored = onWindowChromeRestored
     }
@@ -105,19 +108,6 @@ struct PlayerView: View {
             // The live header no longer stretches this stack. Anchor the card
             // to the whole viewport, not the narrower adaptive control row.
             .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .overlay(alignment: .topTrailing) {
-                if controlsVisible, state.isLivePlayback, activeUtilityPanel == nil,
-                   !isFullScreenTransitioning,
-                   let channel = state.livePlaybackChannel,
-                   let source = state.livePlaybackSourceID {
-                    PlayerLiveProgrammeCard(epg: state.liveEPG, channel: channel,
-                        source: source, stream: state.livePlaybackStream)
-                        .frame(width: min(310, max(1, geometry.size.width - layout.programmeTrailingInset * 2)))
-                        .padding(.trailing, layout.programmeTrailingInset)
-                        .padding(.top, layout.programmeTopInset + (isWindowFullScreen ? fullscreenTopInset : 0))
-                        .allowsHitTesting(false)
-                }
-            }
             // Recovery buttons need real bounds in the full viewport. Drawing
             // them above the toolbar's contentShape makes them visible but
             // unreachable to mouse events (AX actions still work).
@@ -136,8 +126,30 @@ struct PlayerView: View {
                     }
                 }
             }
-            .allowsHitTesting(!isFullScreenTransitioning && (controlsVisible || hasPlaybackStatusActions))
+            .allowsHitTesting(!isFullScreenTransitioning && (controlsVisible || liveInfo.visible || hasPlaybackStatusActions))
             .environment(\.colorScheme, .dark)
+
+            // Keep the interactive card above the full-window status and volume overlays.
+            Group {
+                if liveInfo.visible, state.isLivePlayback, activeUtilityPanel == nil,
+                   !isFullScreenTransitioning,
+                   let channel = state.livePlaybackChannel,
+                   let source = state.livePlaybackSourceID {
+                    PlayerLiveProgrammeCard(epg: state.liveEPG, presentation: liveInfo, channel: channel,
+                        source: source, stream: state.livePlaybackStream,
+                        mediaInfo: state.playerSnapshot.mediaInfo, compact: geometry.size.width < 600,
+                        maximumHeight: max(120, geometry.size.height - 140))
+                        .equatable()
+                        .frame(width: min(344, max(1, geometry.size.width - layout.programmeTrailingInset * 2)))
+                        .padding(.trailing, layout.programmeTrailingInset)
+                        .padding(.top, layout.programmeTopInset + (isWindowFullScreen ? fullscreenTopInset : 0))
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                        .transition(.opacity)
+                        .zIndex(48)
+                }
+            }
+            .environment(\.colorScheme, .dark)
+            .animation(reduceMotion ? nil : .easeInOut(duration: 0.16), value: liveInfo.visible)
 
             if controlsVisible,
                let activeUtilityPanel {
@@ -190,6 +202,12 @@ struct PlayerView: View {
             if !visible { dismissProgressPreview() }
             updateTooltipAvailability()
         }
+        .onChange(of: state.livePlaybackChannel?.id) { _ in
+            if state.isLivePlayback { liveInfo.show() } else { liveInfo.close() }
+        }
+        .onChange(of: liveInfo.isInteracting) { value in
+            if value { keepControlsVisible() } else { scheduleControlsHide() }
+        }
         .onChange(of: state.playbackPresentationID) { _ in
             volumeHideTask?.cancel(); isCompactVolumePresented = false
             volumeButtonHovering = false; volumePopoverHovering = false
@@ -214,6 +232,7 @@ struct PlayerView: View {
         }
         .onAppear {
             overlayObservation.setVisible(controlsVisible)
+            if state.isLivePlayback && !liveInfo.visible { liveInfo.show() }
             revealControls()
             updatePlaybackActivityOverlay(
                 isActive: hasTransientPlaybackActivity
@@ -814,6 +833,7 @@ struct PlayerView: View {
 
     private var compactUtilityMenu: some View {
         Menu {
+            if state.isLivePlayback { Button(L10n.string("player.live-info.toggle", fallback: "Programme information")) { toggleLiveInfo() } }
             if state.hasPlaybackQualityChoices {
                 Menu(L10n.string("player.quality", fallback: "Quality")) { qualityMenuItems }
             }
@@ -1023,6 +1043,13 @@ struct PlayerView: View {
 
     private var utilityControls: some View {
         HStack(spacing: 4) {
+                if state.isLivePlayback {
+                    Button { toggleLiveInfo() } label: { utilityMenuIcon("info.circle") }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(L10n.string("player.live-info.toggle", fallback: "Programme information"))
+                        .accessibilityIdentifier("player.live.info.toggle")
+                        .playerControlHelp(L10n.string("player.live-info.toggle", fallback: "Programme information"))
+                }
                 utilityPanelButton(systemImage: "list.bullet", panel: .episodes, help: resourceControlTitle)
                 utilityPanelButton(systemImage: "captions.bubble", panel: .subtitles,
                     help: L10n.string("player.subtitles", fallback: "Subtitles"))
@@ -1422,6 +1449,7 @@ struct PlayerView: View {
                     Text(L10n.string("player.subtitle-settings", fallback: "Subtitle Settings"))
                         .font(.caption.weight(.semibold))
                         .foregroundColor(.white.opacity(0.58))
+                    subtitleCompatibilityControls
                     panelStepperRow(
                         title: L10n.string("player.subtitle-size", fallback: "Size"),
                         value: "\(Int(state.playerSubtitleScale * 100))%",
@@ -1474,6 +1502,63 @@ struct PlayerView: View {
                     }
                 }
             }
+        }
+    }
+
+    private var subtitleCompatibilityControls: some View {
+        let subtitle = state.playerSnapshot.subtitleSettings
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text(L10n.string("player.subtitle.encoding", fallback: "Text encoding")).font(.caption)
+                Spacer()
+                Picker(L10n.string("player.subtitle.encoding", fallback: "Text encoding"), selection: Binding(
+                    get: { subtitle.encoding },
+                    set: { value in Task { await state.setPlayerSubtitleEncoding(value) } }
+                )) {
+                    Text(L10n.string("player.subtitle.auto", fallback: "Automatic")).tag(SubtitleTextEncoding.automatic)
+                    Text("UTF-8").tag(SubtitleTextEncoding.utf8)
+                    Text("GB18030 / GBK").tag(SubtitleTextEncoding.gb18030)
+                    Text("Big5").tag(SubtitleTextEncoding.big5)
+                }
+                .labelsHidden().pickerStyle(.menu).frame(maxWidth: 180)
+                .disabled(!subtitle.canChooseEncoding || state.isChangingSubtitleCompatibility)
+                .accessibilityIdentifier("player.subtitle.encoding")
+            }
+            HStack {
+                Text(L10n.string("player.subtitle.font", fallback: "Subtitle font")).font(.caption)
+                Spacer()
+                Picker(L10n.string("player.subtitle.font", fallback: "Subtitle font"), selection: Binding(
+                    get: { subtitle.fontStyle },
+                    set: { value in Task { await state.setPlayerSubtitleFontStyle(value) } }
+                )) {
+                    Text(L10n.string("player.subtitle.original", fallback: "Original style")).tag(SubtitleFontStyle.original)
+                    Text(L10n.string("player.subtitle.compatible", fallback: "Compatible Chinese font")).tag(SubtitleFontStyle.compatible)
+                }
+                .labelsHidden().pickerStyle(.menu).frame(maxWidth: 180)
+                .disabled(!subtitle.canChooseFont || state.isChangingSubtitleCompatibility)
+                .accessibilityIdentifier("player.subtitle.font")
+            }
+            Text(subtitle.isBitmap ? L10n.string("player.subtitle.bitmap-note", fallback: "Image subtitles do not use fonts or text encodings.") :
+                subtitle.fontStyle == .compatible ? L10n.string("player.subtitle.compatible-note", fallback: "Compatibility mode simplifies ASS effects for this subtitle only.") :
+                L10n.string("player.subtitle.encoding-note", fallback: "Encoding applies to external text subtitles. Settings are saved per subtitle."))
+                .font(.caption2).foregroundColor(.white.opacity(0.58)).fixedSize(horizontal: false, vertical: true)
+            if let warning = subtitle.warning {
+                Text(warning).font(.caption2).foregroundColor(.orange).fixedSize(horizontal: false, vertical: true)
+            }
+            Button(L10n.string("player.subtitle.export", fallback: "Export subtitle diagnostics…")) { chooseSubtitleDiagnosticLocation() }
+                .buttonStyle(.plain).font(.caption).foregroundColor(.white.opacity(0.78))
+                .accessibilityIdentifier("player.subtitle.export-diagnostics")
+        }
+    }
+
+    private func chooseSubtitleDiagnosticLocation() {
+        let panel = NSSavePanel()
+        panel.title = L10n.string("player.subtitle.export-title", fallback: "Export subtitle diagnostics")
+        panel.nameFieldStringValue = "OKVideoMac-Subtitle-Diagnostics.json"
+        panel.allowedContentTypes = [.json]
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            Task { await state.exportPlayerSubtitleDiagnostics(to: url) }
         }
     }
 
@@ -2162,12 +2247,18 @@ struct PlayerView: View {
             isLivePlayback: state.isLivePlayback,
             controlsHovering: controlsHovering,
             isFailed: isFailed,
-            keepsControlsVisible: isFullScreenTransitioning || activeUtilityPanel != nil || isCompactVolumePresented || isVolumeEditing || scrubPosition != nil,
+            keepsControlsVisible: liveInfo.isInteracting || isFullScreenTransitioning || activeUtilityPanel != nil || isCompactVolumePresented || isVolumeEditing || scrubPosition != nil,
             isPlaying: {
                 if case .playing = state.playerSnapshot.status { return true }
                 return false
             }()
         )
+    }
+
+    private func toggleLiveInfo() {
+        activeUtilityPanel = nil
+        if liveInfo.visible { liveInfo.close() } else { liveInfo.show() }
+        revealControls()
     }
 
     private func revealControls() {
@@ -2866,39 +2957,6 @@ enum PlayerEpisodePagePolicy {
     }
 }
 
-/// Kept in the shared control overlay so native fullscreen hides and restores
-/// programme information together with the controls, without moving video.
-struct PlayerLiveProgrammeCard: View {
-    @ObservedObject var epg: LiveEPGState
-    let channel: LiveChannel
-    let source: LiveSourceID
-    let stream: LiveStream?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            Text(channel.name)
-                .font(.callout.weight(.semibold))
-                .lineLimit(1)
-            LiveNowNextView(epg: epg, channel: channel, source: source,
-                usesPlayerProgressColors: true)
-            if let stream, !stream.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                Label(stream.name, systemImage: "point.3.connected.trianglepath.dotted")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .padding(14)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .overlay {
-            RoundedRectangle(cornerRadius: 14).stroke(.white.opacity(0.08), lineWidth: 1)
-        }
-        .environment(\.colorScheme, .dark)
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("player.live.programme-card")
-    }
-}
-
 private enum PlayerUtilityPanel: Equatable {
     case information
     case episodes
@@ -3026,7 +3084,7 @@ struct PlayerOverlayLayout {
     var showsQuality = false
     var showsTransportControls = true
     static let transportWidth: CGFloat = 116
-    var expandedToolsWidth: CGFloat { 196 }
+    var expandedToolsWidth: CGFloat { showsTransportControls ? 196 : 236 }
     var horizontalInset: CGFloat { 20 }
     var controlWidth: CGFloat { max(1, viewportSize.width - horizontalInset * 2) }
     var bottomInset: CGFloat { 12 }

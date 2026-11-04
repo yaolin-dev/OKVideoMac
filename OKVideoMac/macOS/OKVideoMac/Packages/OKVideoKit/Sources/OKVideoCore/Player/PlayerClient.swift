@@ -55,6 +55,7 @@ public enum PlaybackMediaNetworkRoute: Equatable, Sendable {
 }
 
 public struct PlayerSnapshot: Equatable, Sendable {
+    public var subtitleSettings = PlayerSubtitleSettings()
     public var mediaNetworkRoute: PlaybackMediaNetworkRoute? = nil
     public var mediaProxyPreference: Bool? = nil
     public var seekTransaction: PlayerSeekTransaction? = nil
@@ -168,6 +169,9 @@ public protocol PlayerClient: AnyObject {
     func setSubtitleScale(_ scale: Double) async throws
     func setSubtitlePosition(_ position: Double) async throws
     func setSubtitleBorderSize(_ size: Double) async throws
+    func setSubtitleEncoding(_ encoding: SubtitleTextEncoding) async throws
+    func setSubtitleFontStyle(_ style: SubtitleFontStyle) async throws
+    func subtitleDiagnostics() async throws -> String
     func setAudioDelay(_ delay: TimeInterval) async throws
     func setAspectRatio(_ ratio: String?) async throws
     func setHardwareDecoding(enabled: Bool) async throws
@@ -177,6 +181,9 @@ public protocol PlayerClient: AnyObject {
 }
 
 public extension PlayerClient {
+    func setSubtitleEncoding(_ encoding: SubtitleTextEncoding) async throws { throw AppError.unsupported("当前播放器不支持字幕编码切换") }
+    func setSubtitleFontStyle(_ style: SubtitleFontStyle) async throws { throw AppError.unsupported("当前播放器不支持字幕字体切换") }
+    func subtitleDiagnostics() async throws -> String { throw AppError.unsupported("当前播放器不支持字幕诊断") }
     func seek(to position: TimeInterval, transactionID: UUID, playbackRequestID: UUID? = nil) async throws {
         try await seek(to: position)
     }

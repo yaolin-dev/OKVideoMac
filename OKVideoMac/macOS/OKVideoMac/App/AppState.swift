@@ -5573,6 +5573,7 @@ final class AppState: ObservableObject {
     @Published private(set) var playerRenderClient: MPVPlayerClient?
     @Published private(set) var playerSubtitlesEnabled = false
     @Published private(set) var selectedPlayerSubtitleTrackID: Int?
+    @Published private(set) var isChangingSubtitleCompatibility = false
     @Published private(set) var playerSubtitleDelay: TimeInterval = 0
     @Published private(set) var playerSubtitleScale: Double = 1
     @Published private(set) var playerSubtitlePosition: Double = 100
@@ -18287,8 +18288,34 @@ final class AppState: ObservableObject {
         }
     }
 
+    func setPlayerSubtitleEncoding(_ value: SubtitleTextEncoding) async {
+        guard !isChangingSubtitleCompatibility else { return }
+        isChangingSubtitleCompatibility = true
+        defer { isChangingSubtitleCompatibility = false }
+        do { try await environment?.player.setSubtitleEncoding(value) }
+        catch { show(error, title: L10n.string("player.subtitle.encoding-failed", fallback: "Unable to change subtitle encoding"), target: .player) }
+    }
+
+    func setPlayerSubtitleFontStyle(_ value: SubtitleFontStyle) async {
+        guard !isChangingSubtitleCompatibility else { return }
+        isChangingSubtitleCompatibility = true
+        defer { isChangingSubtitleCompatibility = false }
+        do { try await environment?.player.setSubtitleFontStyle(value) }
+        catch { show(error, title: L10n.string("player.subtitle.font-failed", fallback: "Unable to change subtitle font"), target: .player) }
+    }
+
+    func exportPlayerSubtitleDiagnostics(to url: URL) async {
+        do {
+            guard let text = try await environment?.player.subtitleDiagnostics() else { return }
+            try Data(text.utf8).write(to: url, options: .atomic)
+        } catch { show(error, title: L10n.string("player.subtitle.export-failed", fallback: "Unable to export subtitle diagnostics"), target: .player) }
+    }
+
     func resetPlayerSubtitleSettings() async {
         do {
+            let subtitle = playerSnapshot.subtitleSettings
+            if subtitle.canChooseEncoding && subtitle.encoding != .automatic { try await environment?.player.setSubtitleEncoding(.automatic) }
+            if subtitle.canChooseFont && subtitle.fontStyle != .original { try await environment?.player.setSubtitleFontStyle(.original) }
             try await environment?.player.setSubtitleDelay(0)
             try await environment?.player.setSubtitleScale(1)
             try await environment?.player.setSubtitlePosition(100)
@@ -23245,6 +23272,10 @@ final class AppState: ObservableObject {
         let isTVBoxPlayback = providers[detail.summary.siteKey]?.capability
             == .javaDexSpider
         var scopedMedia = media
+        scopedMedia.subtitlePreferenceIdentity = PlayerSubtitlePreferenceStore.opaqueIdentity([
+            configurationID.uuidString, detail.summary.siteKey, detail.summary.id,
+            source.id, episode.id
+        ])
         scopedMedia.mediaProxyPreference = MediaProxyPreference.enabled
         if isTVBoxPlayback {
             scopedMedia.transportProfile = .tvBox

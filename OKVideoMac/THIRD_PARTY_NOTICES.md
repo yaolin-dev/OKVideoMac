@@ -1,6 +1,6 @@
 # OKVideoMac Third-Party Notices
 
-This is the authoritative third-party index for OKVideoMac 0.9.1 (Build 193). It
+This is the authoritative third-party index for OKVideoMac 0.9.1 (Build 194). It
 covers executable material actually shipped in the macOS App and its embedded
 Android APK. Third-party software remains under its original terms; the
 project's `GPL-3.0-only` license does not relicense it.
@@ -96,3 +96,8 @@ Official distribution and source are pinned in ThirdParty/sparkle-lock.json.
 Copyright notices and the MIT, BSD-2-Clause and Zlib component licenses are
 reproduced in THIRD_PARTY_LICENSES/Sparkle-LICENSE.txt. The five embedded
 framework/helper executables are included in the exact packaged inventory.
+
+## Subtitle compatibility (Build 194)
+
+- uchardet 0.0.8: https://www.freedesktop.org/wiki/Software/uchardet/. Statically linked into the public GPL player for text subtitle charset detection. Original MPL 1.1 / GPL 2.0-or-later / LGPL 2.1-or-later notices are retained; this combination uses the GPL alternative. The pinned source archive is included with the corresponding source release. See `THIRD_PARTY_LICENSES/uchardet-LICENSE.txt` and `ThirdParty/native-lock.json`.
+- Noto Sans CJK SC Regular 2.004, unmodified: https://github.com/notofonts/noto-cjk/tree/Sans2.004. SIL Open Font License 1.1; see `THIRD_PARTY_LICENSES/NotoSansCJK-OFL.txt`. The exact font and checksum are in `Resources/SubtitleFonts`. No system font installation is performed.
