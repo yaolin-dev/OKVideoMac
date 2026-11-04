@@ -1,8 +1,9 @@
 # OKVideoMac
 
-- 当前发布候选：0.9.2（Build 196）
-- 目标 tag：`v0.9.2`；全部发布门禁通过后创建。
-- source release index：`OKVideoMac-0.9.2-build196-SOURCE_RELEASE_INDEX.json`。
+- 当前发布候选：0.9.2（Build 197）
+- 目标 tag：`v0.9.2`；本轮旧标签已创建；新候选完整验证后按用户确认更新。
+- source release index：`OKVideoMac-0.9.2-build197-SOURCE_RELEASE_INDEX.json`。
+- Build 197 修正 Android SBOM 版本、purl 与 APK 哈希校验；撤回的 196 证据保留，标签更新等待新候选验证及用户确认。
 - 本轮包含历史恢复、分集导航、紧凑控制栏、阿狸原限定兼容、字幕与直播摘要修复，见[发布说明](../Docs/RELEASE_NOTES_0.9.2.md)与[就绪记录](../Docs/RELEASE_READINESS_0.9.2.md)。
 
 

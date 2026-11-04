@@ -1,5 +1,7 @@
 # Building OKVideoMac
 
+当前重建候选为 0.9.2（Build 197），Bridge 0.3.58（70）。仍使用 package-app.sh --mode distribution --notarize --crash-config FILE 及全部源码、SBOM、签名、公证、staple 与 Gatekeeper 门禁；见[本轮就绪记录](../../../../Docs/RELEASE_READINESS_0.9.2.md)。下文 0.9.1 记录为历史证据。
+
 ## 0.9.1 release verification
 
 The current stable release is **0.9.1 (Build 182)**. Tag `v0.9.1` pins

@@ -1,10 +1,8 @@
 # Release SBOM Process
 
-Date: 2026-10-09
+Date: 2026-11-04
 
-Current published release: OKVideoMac 0.8.3 (Build 136). All four SBOMs are
-provided with [v0.8.3](https://github.com/yaolin-dev/OKVideoMac/releases/tag/v0.8.3);
-see [release validation](RELEASE_VALIDATION_0.8.3.md). Historical hashes below remain unchanged.
+Current replacement candidate: OKVideoMac 0.9.2 (Build 197), Android Bridge 0.3.58 (70). Build 196 is withdrawn; replacement verification and tag confirmation are pending. See [readiness](RELEASE_READINESS_0.9.2.md). Historical hashes below remain unchanged.
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:
@@ -16,8 +14,8 @@ Every packaged release contains four machine-readable documents under
 
 `Tools/SourceAudit/generate_sbom.py` inventories the built App, not a static
 expected-file list. It refuses unknown or missing executables by comparing the exact approved Mach-O
-path set in `ThirdParty/approved-macho-paths.json`. The 0.8.3 package contains
-34 arm64 Mach-O components, including five Sparkle executables; the count is
+path set in `ThirdParty/approved-macho-paths.json`. The 0.9.2 package contains
+38 arm64 Mach-O components, including five Sparkle executables; the count is
 derived from that exact path set and is not a lower-bound allowance. Every nested Mach-O has a final post-signing SHA-256.
 The main executable deliberately has no embedded-SBOM hash because signing the
 outer App rewrites its code signature, which would create a circular resource
@@ -50,3 +48,9 @@ values:
 The release also publishes `THIRD_PARTY_NOTICES.md` with SHA-256
 `d34884d5145f972713ba91a816395c7ececb9cffdf1bd3968ccfc9366f774ad9`.
 All five files are named in the outer source-release manifest and checksums.
+
+## Android aggregate metadata gate (Build 197)
+
+`generate_sbom.py` reads the single literal `versionName` in the Bridge app build.gradle, using it for the SPDX aggregate version/purl and CycloneDX metadata/component version/purl/bom-ref. `verify_sbom.py` independently checks both documents against that source version and the SHA-256 of the exact packaged APK, rejecting stale metadata and missing or duplicate aggregates. Ten regression tests cover version changes and these rejection paths. The existing APK/host version contract remains required.
+
+The strict inventory contains 38 Mach-O paths, 170 locked Maven modules and two static diagnostics SDKs. uchardet 0.0.8 and the unmodified Noto Sans CJK SC 2.004 font additionally retain their native lock, source archive, notices and font provenance; those records do not imply an extra dynamic executable.

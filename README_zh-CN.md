@@ -1,6 +1,6 @@
 # OKVideoMac
 
-当前发布候选为 **0.9.2（Build 196）**。见[发布说明](Docs/RELEASE_NOTES_0.9.2.md)和[发布就绪记录](Docs/RELEASE_READINESS_0.9.2.md)；签名、公证与公开发布以本轮实际验证为准。
+当前发布候选为 **0.9.2（Build 197）**。见[发布说明](Docs/RELEASE_NOTES_0.9.2.md)和[发布就绪记录](Docs/RELEASE_READINESS_0.9.2.md)；签名、公证与公开发布以本轮实际验证为准。
 
 最新稳定版本为 **0.9.1（Build 182）**，包含网盘快进、原始资源历史恢复、TMDB 匹配保留、20 并发搜索、EPG 回收和轻量播放控制。Developer ID、Hardened Runtime、Apple Notarization **Accepted**、staple、Gatekeeper、安装及全部 16 项公开资产核验通过。见[发布说明](Docs/RELEASE_NOTES_0.9.1.md)和[正式验证](Docs/RELEASE_VALIDATION_0.9.1.md)。
 
@@ -35,6 +35,8 @@
 > 本项目是播放器与源客户端，不内置第三方内容源、账号、Cookie、解析服务或 DRM 密钥。
 
 ## 0.9.2 新增与修复
+
+- Build 197 修复 Android SBOM 历史版本硬编码，严格核对版本、purl 和 APK 哈希。短暂公开的 Build 196 已撤回，新候选验证后按用户确认更新本轮标签。
 
 - 按原 Provider 请求入口与稳定文件身份恢复历史，失败时保留进度，并隔离 Java/Dex 源的有界恢复。
 - 紧凑点播／直播控制栏与锚定状态、恢复操作，保留原生鼠标命中、悬停音量和画中画行为。

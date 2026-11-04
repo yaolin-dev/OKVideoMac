@@ -10,14 +10,16 @@ fixtures, not installation of the CI toolchain.
 
 ## Checks and scope
 
-| Check | What runs | Current 0.9.1 validation |
+| Check | What runs | 0.9.2 Build 197 candidate scope |
 | --- | --- | --- |
-| Core (debug), Core (release) | Entire `OKVideoKit` Core/Persistence XCTest suite, separately built and discovered for each configuration | Each: 1,261 discovered, 1,232 passed, 29 declared skips |
+| Core (debug), Core (release) | Entire `OKVideoKit` Core/Persistence XCTest suite, separately built and discovered for each configuration | Each: 1,266 discovered, 1,237 passed, 29 declared skips |
 | Node | All six `*.test.js` suites selected by `run_node.py`, using the Node test runner | 72 passed, no skips |
-| Offline audits and static checks | SourceAudit synthetic tests, crash configuration tests, tiny Mach-O/dSYM symbol gates, CI validator tests, static checks | 52 audit tests (including 7 native launcher cases), 15 crash configuration tests, 7 symbol cases; no skips |
-| Android Release JVM and unsigned bridge | Existing locked Gradle Release build and JVM tests in a fresh source copy; verify APK is unsigned | 65 JVM tests, no skips; compile-only APK |
-| Main App Release compile and critical flows | Verify unsigned App/helpers, then build an isolated ad-hoc signed Release test host and execute the logical user-flow contract | Three executables and 102 critical tests passed; exact identities from `Tools/CI/critical-user-flows.json`; zero skips |
+| Offline audits and static checks | SourceAudit synthetic tests, crash configuration tests, tiny Mach-O/dSYM symbol gates, CI validator tests, static checks | 62 audit tests (including 7 native launcher cases), 15 crash configuration tests, 7 symbol cases; no skips |
+| Android Release JVM and unsigned bridge | Existing locked Gradle Release build and JVM tests in a fresh source copy; verify APK is unsigned | 77 JVM tests, no skips; compile-only APK |
+| Main App Release compile and critical flows | Verify unsigned App/helpers, then build an isolated ad-hoc signed Release test host and execute the logical user-flow contract | Three executables and 151 critical tests passed; exact identities from `Tools/CI/critical-user-flows.json`; zero skips |
 | CI required | Aggregate the five job groups, including both Core matrix results | Only exact `success` for every group is accepted |
+
+The 197 candidate adds ten SourceAudit SBOM regression tests; final exact-commit CI remains pending and will be linked in the release validation. All other listed test inputs retain the 196 implementation.
 
 Counts describe the checked baseline, not a target used to suppress new tests.
 Discovery and generated reports are authoritative. Core skips must match the exact
@@ -28,7 +30,7 @@ errors and contradictory totals fail the check. Other test suites allow no skips
 The 51 CI validator tests exercise malformed reports, missing work, failure,
 cancellation, skipped jobs, Python fixture errors, complete tool installation and generated test-host configuration.
 
-The published `v0.9.1` tag pins `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`.
+The historical `v0.9.1` tag pins `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`.
 Both the [candidate run](https://github.com/yaolin-dev/OKVideoMac/actions/runs/41308881387)
 and [main run](https://github.com/yaolin-dev/OKVideoMac/actions/runs/41312795609)
 passed for that exact commit. Signing, notarization and final public download

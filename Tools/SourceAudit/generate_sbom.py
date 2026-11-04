@@ -153,13 +153,24 @@ def artifact_file(cache: Path, group: str, artifact: str, version: str) -> Path 
     return sorted(exact)[0] if exact else None
 
 
+def android_bridge_version(lock: Path) -> str:
+    """Use the same literal versionName enforced by the APK/host contract."""
+    gradle = lock.with_name("build.gradle")
+    values = re.findall(r'^\s*versionName\s*=\s*"([0-9]+(?:\.[0-9]+){2})"\s*$',
+                        gradle.read_text(encoding="utf-8"), re.MULTILINE)
+    if len(values) != 1:
+        raise SystemExit("Expected one literal Android Bridge versionName for SBOM")
+    return values[0]
+
+
 def android_inventory(lock: Path, cache: Path, apk: Path) -> list[dict[str, str]]:
+    version = android_bridge_version(lock)
     result = [
         {
             "name": "AndroidDexBridge",
-            "version": "0.3.14",
+            "version": version,
             "license": "GPL-3.0-only",
-            "purl": "pkg:generic/OKVideoMac-AndroidDexBridge@0.3.14",
+            "purl": f"pkg:generic/OKVideoMac-AndroidDexBridge@{version}",
             "artifact": "AndroidDexBridge-release.apk",
             "sha256": sha256(apk),
         },
@@ -328,14 +339,15 @@ def main() -> None:
         Path(args.gradle_cache).expanduser().resolve(),
         app / "Contents/Resources/AndroidDexBridge-release.apk",
     )
+    android_version = android[0]["version"]
     seed = f"OKVideoMac-{version}-{build}-" + hashlib.sha256(
         json.dumps([native, android], sort_keys=True).encode()
     ).hexdigest()
     documents = {
         "OKVideoMac-macOS.spdx.json": spdx("OKVideoMac macOS", version, native, created, seed + "-mac-spdx"),
         "OKVideoMac-macOS.cdx.json": cyclonedx("OKVideoMac macOS", version, native, created, seed + "-mac-cdx"),
-        "OKVideoMac-Android.spdx.json": spdx("OKVideoMac AndroidDexBridge", "0.3.14", android, created, seed + "-android-spdx"),
-        "OKVideoMac-Android.cdx.json": cyclonedx("OKVideoMac AndroidDexBridge", "0.3.14", android, created, seed + "-android-cdx"),
+        "OKVideoMac-Android.spdx.json": spdx("OKVideoMac AndroidDexBridge", android_version, android, created, seed + "-android-spdx"),
+        "OKVideoMac-Android.cdx.json": cyclonedx("OKVideoMac AndroidDexBridge", android_version, android, created, seed + "-android-cdx"),
     }
     for filename, document in documents.items():
         write_json(output / filename, document)

@@ -1,6 +1,6 @@
 # OKVideoMac
 
-The current release candidate is **0.9.2 (Build 196)**. See [release notes](Docs/RELEASE_NOTES_0.9.2.md) and [readiness](Docs/RELEASE_READINESS_0.9.2.md). Signing, notarization and publication are pending this release run.
+The current release candidate is **0.9.2 (Build 197)**. See [release notes](Docs/RELEASE_NOTES_0.9.2.md) and [readiness](Docs/RELEASE_READINESS_0.9.2.md). Signing, notarization and publication are pending this release run.
 
 The latest stable release is **0.9.1 (Build 182)** with cloud-drive seek recovery, original-resource history, stable TMDB matching, 20-way search, EPG cleanup and lighter playback controls. Developer ID, Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks passed. See [release notes](Docs/RELEASE_NOTES_0.9.1.md) and [formal verification](Docs/RELEASE_VALIDATION_0.9.1.md).
 
@@ -35,6 +35,8 @@ Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disab
 > OKVideoMac is a player and provider client. It does not include third-party video sources, accounts, cookies, parsing services or DRM keys.
 
 ## New in 0.9.2
+
+- Build 197 derives Android SPDX/CycloneDX aggregate versions and package references from the current Bridge source and rejects stale metadata or APK hashes. The briefly published Build 196 is withdrawn; the replacement tag awaits final validation and user confirmation.
 
 - Restore history through the original provider request locator and stable file identity; retain progress on failures and isolate bounded Java/Dex provider recovery.
 - Compact VOD/live controls and anchored status/recovery actions; keep native pointer input, hover volume and Picture in Picture behavior.

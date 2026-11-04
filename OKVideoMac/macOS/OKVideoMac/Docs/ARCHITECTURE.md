@@ -164,3 +164,10 @@ AVD 和 ADB server 不在清理范围。
 - QuickJS Spider 只获得显式提供的受限辅助 API，不获得本地文件或 Shell API。
 - Node bundle 在独立子进程中运行并具有 Node 的文件/进程能力；它属于可信配置边界，
   只应加载用户信任且可核验的 bundle。Android/Dex 代码隔离在私有 Emulator/Bridge。
+
+## 0.9.2 播放器补充
+
+- PlayerSubtitleSupport 维护按不透明身份保存的编码／字体偏好及白名单诊断；静态 uchardet 和 CJK 后备字体沿用现有媒体库和资源路径。
+- PlayerLiveProgrammeCard 展示已缓存节目单，以本地分钟／节目边界时钟驱动并随控件显隐，不拥有 EPG 网络请求。
+- 分集排序、TMDB 映射与上下集导航共用已确认的季／集语义；原始资源身份和持久化进度独立，歧义边界要求明确选择。
+- 原始历史恢复及阿狸原本地文件范围兼容保持 Provider、线路和会话归属限制。

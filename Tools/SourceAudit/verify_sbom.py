@@ -10,6 +10,7 @@ import subprocess
 from pathlib import Path
 from approved_inventory import require_approved
 from crash_sdk_inventory import verify_static_sdk_documents
+from generate_sbom import android_bridge_version
 
 
 def sha256(path: Path) -> str:
@@ -36,6 +37,29 @@ def locked_coordinates(lock: Path) -> set[str]:
     }
 
 
+def verify_android_bridge_documents(spdx: dict, cdx: dict, version: str, apk: Path) -> None:
+    expected_purl = f"pkg:generic/OKVideoMac-AndroidDexBridge@{version}"
+    digest = sha256(apk)
+    packages = [p for p in spdx.get("packages", []) if p.get("name") == "AndroidDexBridge"]
+    if len(packages) != 1:
+        raise SystemExit("Android Bridge SPDX aggregate is missing or duplicated")
+    package = packages[0]
+    purls = [r.get("referenceLocator") for r in package.get("externalRefs", [])
+             if r.get("referenceType") == "purl"]
+    if (package.get("versionInfo") != version or purls != [expected_purl]
+            or package.get("checksums") != [{"algorithm": "SHA256", "checksumValue": digest}]):
+        raise SystemExit("Android Bridge SPDX version, purl or APK hash mismatch")
+    components = [p for p in cdx.get("components", []) if p.get("name") == "AndroidDexBridge"]
+    if len(components) != 1:
+        raise SystemExit("Android Bridge CycloneDX aggregate is missing or duplicated")
+    component = components[0]
+    if (cdx.get("metadata", {}).get("component", {}).get("version") != version
+            or component.get("version") != version or component.get("purl") != expected_purl
+            or component.get("bom-ref") != expected_purl
+            or component.get("hashes") != [{"alg": "SHA-256", "content": digest}]):
+        raise SystemExit("Android Bridge CycloneDX version, purl or APK hash mismatch")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--app", required=True)
@@ -46,6 +70,10 @@ def main() -> None:
     sbom = Path(args.sbom_dir).resolve()
     mac = json.loads((sbom / "OKVideoMac-macOS.spdx.json").read_text(encoding="utf-8"))
     android = json.loads((sbom / "OKVideoMac-Android.spdx.json").read_text(encoding="utf-8"))
+    android_cdx = json.loads((sbom / "OKVideoMac-Android.cdx.json").read_text(encoding="utf-8"))
+    verify_android_bridge_documents(android, android_cdx,
+        android_bridge_version(Path(args.gradle_lock).resolve()),
+        app / "Contents/Resources/AndroidDexBridge-release.apk")
     cdx = json.loads((sbom / "OKVideoMac-macOS.cdx.json").read_text(encoding="utf-8"))
     verify_static_sdk_documents(app, mac, cdx)
     native_packages = [package for package in mac["packages"] if package.get("packageFileName")]
