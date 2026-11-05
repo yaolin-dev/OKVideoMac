@@ -1,8 +1,10 @@
 # Immutable Corresponding-Source Release Process
 
-## 0.9.2 release candidate
+**2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
-The local validation candidate uses `OKVideoMac-0.9.2.dmg`, `OKVideoMac-0.9.2-macOS-arm64.zip`, and `OKVideoMac-0.9.2-build198-SOURCE_RELEASE_INDEX.json`. Earlier local candidates used captured source snapshots. The formal release must be rebuilt from the exact clean main commit with package-app.sh --mode distribution --notarize --crash-config FILE, using the existing signing, source, SBOM, updater and publication gates. Local acceptance packages are not public release assets.
+## Published 0.9.2 identity
+
+Release `v0.9.2` pins exact clean main commit `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`, built by the unmodified `package-app.sh --mode distribution --notarize --crash-config FILE` workflow. The Accepted/stapled public download is `OKVideoMac-0.9.2.dmg`; `OKVideoMac-0.9.2-macOS-arm64.zip` is internal only. `OKVideoMac-0.9.2-build198-SOURCE_RELEASE_INDEX.json`, corresponding manifest, source and third-party source archives, licences, APK, SBOMs, notices, notes and signed feed form the established 16 public assets. Local/GitHub digests and all 16 anonymous downloads match. See [formal verification](RELEASE_VALIDATION_0.9.2.md). The current-round withdrawn tag was updated only after explicit final user approval. Later documentation commits preserve this tag and all signed build-time artifacts, including source/notes snapshots; other releases remain immutable.
 
 ## Published 0.9.0 identity
 

@@ -1,5 +1,7 @@
 # OKVideoMac 0.9.2（Build 198）Release Notes
 
+**2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
+
 本版本汇总已交付本地 Build 184–195 的开源修复，以 GitHub 正式 0.9.1（182）为发布对照。Build 198 修复 Android SBOM 的历史版本硬编码，SPDX 聚合包、CycloneDX 文档元数据及 purl 统一读取当前桥接版本，并校验 APK 哈希。
 
 - 按原 Provider 请求入口与稳定文件身份恢复历史，失败时保留进度，并隔离 Java/Dex 源的有界恢复。
@@ -23,7 +25,7 @@ Android Bridge 为 **0.3.58（70）**；最低系统 macOS 12.0，仅 Apple Sili
 
 Source/player behavior still depends on provider, account and network support. Ambiguous file identity, season or edition boundaries require explicit selection. The local-file workaround applies only to the selected Ali original TVBox line. Subtitle preferences stay scoped to the selected subtitle. No new programme/network polling is introduced by the live summary.
 
-历史本地测试记录不转记为本次结果。Release 测试、签名、公证 Accepted、staple、Gatekeeper、最终文件哈希和发布提交将在本轮验证完成后记录。Build 196 曾短暂公开并已撤回，旧产物与证据保留；Build 198 全部门禁通过后，由用户确认本轮 v0.9.2 标签及草稿资产更新。其他既有版本标签和资产保持不可变。
+最终验证完成：准确 release commit `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`，Apple **Accepted** `5f54c532-70f9-4a86-b3f4-1ee90dbdbc06`。完整本地 Release／媒体、签名、staple、Gatekeeper、安装及准确提交 CI 全部七项通过；16 项公开资产匿名下载逐项匹配 SHA-256。Build 196 撤回后，经用户最终确认更新本轮 v0.9.2 标签与资产并公开为 latest；完整计数、失败历史、校验和及验证边界见[正式验证](RELEASE_VALIDATION_0.9.2.md)。其他既有版本标签和资产保持不可变。构建时归档的说明是验证前快照，main 补录最终结果，不回写签名产物。
 
 Android SBOM aggregate versions and purls now follow the Bridge source versionName. Both SPDX and CycloneDX must match that version and the exact packaged APK SHA-256; missing or duplicate aggregates fail the release gate.
 

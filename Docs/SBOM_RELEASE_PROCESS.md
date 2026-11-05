@@ -1,8 +1,10 @@
 # Release SBOM Process
 
-Date: 2026-11-04
+**2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
-Current replacement candidate: OKVideoMac 0.9.2 (Build 198), Android Bridge 0.3.58 (70). Build 196 is withdrawn; replacement verification and tag confirmation are pending. See [readiness](RELEASE_READINESS_0.9.2.md). Historical hashes below remain unchanged.
+Date: 2026-11-05
+
+Current published release: OKVideoMac 0.9.2 (Build 198), Android Bridge 0.3.58 (70). Both Android formats now derive their aggregate versions and purls from the actual Bridge source and verify the exact packaged APK hash; ten regression tests cover stale, duplicate and missing metadata. Build 196 is withdrawn; Build 198 publication and all 16 anonymous asset hashes are verified. See [formal verification](RELEASE_VALIDATION_0.9.2.md). Historical hashes below remain unchanged.
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:

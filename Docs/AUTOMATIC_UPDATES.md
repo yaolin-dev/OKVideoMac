@@ -1,12 +1,14 @@
 # Automatic updates
 
-0.9.2（Build 198）为本轮重建候选；正式分发仍须通过现有签名、公证 Accepted、staple、Gatekeeper 和公开资产门禁。Build 196 已撤回，标签更新等待最终验证及用户确认；见[就绪记录](RELEASE_READINESS_0.9.2.md)。既有历史记录保持原范围。
+**2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
-0.9.2（198）候选沿用既有稳定 feed、公钥和 Keychain 签名账号。仅在最终 DMG 通过 Accepted 与 staple 后生成并验证新 appcast；公开后再核对 latest 下载和签名。
+当前正式版本为 0.9.2（Build 198），tag `v0.9.2` 固定 `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`。本轮撤回标签已按用户最终确认更新，16 项资产与公开下载全部一致；见[正式验证](RELEASE_VALIDATION_0.9.2.md)。
+
+当前稳定 latest feed 提供 **0.9.2（198）**。沿用既有 HTTPS feed、公钥、Keychain 签名账号及锁定 Sparkle 2.10.0 工具；最终 DMG 的 Accepted、staple、不可变 URL、长度、DMG EdDSA 与 XML 签名，以及 latest 匿名下载字节均通过。不把签名与下载验证宣称为新一轮完整 Sparkle 更新安装周期。
 
 ## Published 0.9.1
 
-The stable latest feed offers **0.9.1 (182)**. All 16 public assets, latest feed bytes and XML/DMG signatures passed verification. The existing HTTPS feed, public key and pinned Sparkle tools are unchanged. This does not claim a new complete update-installation cycle. See [verification](RELEASE_VALIDATION_0.9.1.md).
+At 0.9.1 publication, the stable latest feed offered **0.9.1 (182)**. All 16 public assets, latest feed bytes and XML/DMG signatures passed verification. The existing HTTPS feed, public key and pinned Sparkle tools are unchanged. This does not claim a new complete update-installation cycle. See [verification](RELEASE_VALIDATION_0.9.1.md).
 
 ## Published 0.9.0
 

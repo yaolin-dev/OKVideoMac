@@ -1,10 +1,12 @@
 # Building OKVideoMac
 
-当前重建候选为 0.9.2（Build 198），Bridge 0.3.58（70）。仍使用 package-app.sh --mode distribution --notarize --crash-config FILE 及全部源码、SBOM、签名、公证、staple 与 Gatekeeper 门禁；见[本轮就绪记录](../../../../Docs/RELEASE_READINESS_0.9.2.md)。下文 0.9.1 记录为历史证据。
+**2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
-## 0.9.1 release verification
+当前正式版本为 0.9.2（Build 198），Bridge 0.3.58（70），tag `v0.9.2` 固定 `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`。从干净准确提交执行 `package-app.sh --mode distribution --notarize --crash-config FILE` 及全部既有源码、SBOM、签名、公证、staple、Gatekeeper 和安装门禁；Apple Accepted、CI 七项和 16 项公开下载通过，见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.9.2.md)。下文 0.9.1 记录为历史证据。
 
-The current stable release is **0.9.1 (Build 182)**. Tag `v0.9.1` pins
+## Historical 0.9.1 release verification
+
+The historical stable release was **0.9.1 (Build 182)**. Tag `v0.9.1` pins
 `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`; the existing distribution script
 performed a clean Release build from that exact commit. Developer ID / Hardened
 Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, final installation,

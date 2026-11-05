@@ -1,5 +1,7 @@
 # CI: coverage and local verification
 
+**2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
+
 [Workflow](../.github/workflows/ci.yml) · [Runs](https://github.com/yaolin-dev/OKVideoMac/actions/workflows/ci.yml) · [Contributing](../CONTRIBUTING.md)
 
 CI runs on pull requests targeting `main`, pushes to `main`, and manual dispatch.
@@ -10,7 +12,7 @@ fixtures, not installation of the CI toolchain.
 
 ## Checks and scope
 
-| Check | What runs | 0.9.2 Build 198 candidate scope |
+| Check | What runs | 0.9.2 Build 198 verified scope |
 | --- | --- | --- |
 | Core (debug), Core (release) | Entire `OKVideoKit` Core/Persistence XCTest suite, separately built and discovered for each configuration | Each: 1,266 discovered, 1,237 passed, 29 declared skips |
 | Node | All six `*.test.js` suites selected by `run_node.py`, using the Node test runner | 72 passed, no skips |
@@ -19,7 +21,7 @@ fixtures, not installation of the CI toolchain.
 | Main App Release compile and critical flows | Verify unsigned App/helpers, then build an isolated ad-hoc signed Release test host and execute the logical user-flow contract | Three executables and 151 critical tests passed; exact identities from `Tools/CI/critical-user-flows.json`; zero skips |
 | CI required | Aggregate the five job groups, including both Core matrix results | Only exact `success` for every group is accepted |
 
-The 198 candidate adds ten SourceAudit SBOM regression tests; final exact-commit CI remains pending and will be linked in the release validation. Business sources retain the 196 implementation; Build 198 also enforces visible/active fullscreen fixture prerequisites and waits for owned asynchronous episode feedback without changing assertions, timeouts or skips.
+Build 198 adds ten SourceAudit SBOM regression tests. [Exact-commit CI run 41863857063, attempt 3](https://github.com/yaolin-dev/OKVideoMac/actions/runs/41863857063) completed all seven jobs successfully for `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`; the downloaded machine reports match the counts above. Attempts 1 and 2 failed to acquire hosted macOS runners and remain recorded; no configuration or assertions were bypassed. Business sources retain the 196 implementation; Build 198 also enforces visible/active fullscreen fixture prerequisites and waits for owned asynchronous episode feedback without changing assertions, timeouts or skips.
 
 Counts describe the checked baseline, not a target used to suppress new tests.
 Discovery and generated reports are authoritative. Core skips must match the exact

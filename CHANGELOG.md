@@ -1,8 +1,12 @@
 # Changelog
 
+**2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](Docs/RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
+
 ## [Unreleased]
 
-## [0.9.2] - 2026-11-04
+## [0.9.2] - 2026-11-05
+
+- Publish Build 198 from `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc` after complete Release, Accepted, staple/Gatekeeper, exact-commit CI and 16 anonymous public-download checks. See [formal verification](Docs/RELEASE_VALIDATION_0.9.2.md).
 
 - Build 198: make the real fullscreen fixture explicitly unhide/activate and verify its visible native window; record render-readiness diagnostics. Wait for current-request asynchronous episode feedback before the existing assertion. Preserve failed Build 197 evidence and rebuild through every distribution gate.
 

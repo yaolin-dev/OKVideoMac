@@ -1,6 +1,8 @@
 # Native Reproducible Provenance — Phase 2C
 
-> Historical Phase 2C experiment report. Current 0.9.2 / Build 198 native inputs, uchardet, retained provenance exceptions and final hashes are bound by ThirdParty/native-lock.json and the generated source-release index. Replacement verification is tracked in [readiness](RELEASE_READINESS_0.9.2.md); dated experiments below retain their original scope.
+**2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
+
+> Historical Phase 2C experiment report. Current 0.9.2 / Build 198 native inputs, uchardet, retained provenance exceptions and final hashes are bound by ThirdParty/native-lock.json and the generated source-release index. Published verification is recorded in [formal validation](RELEASE_VALIDATION_0.9.2.md); dated experiments below retain their original scope.
 
 Date: 2026-08-13
 

@@ -1,8 +1,6 @@
 # OKVideoMac
 
-The current release candidate is **0.9.2 (Build 198)**. See [release notes](Docs/RELEASE_NOTES_0.9.2.md) and [readiness](Docs/RELEASE_READINESS_0.9.2.md). Signing, notarization and publication are pending this release run.
-
-The latest stable release is **0.9.1 (Build 182)** with cloud-drive seek recovery, original-resource history, stable TMDB matching, 20-way search, EPG cleanup and lighter playback controls. Developer ID, Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks passed. See [release notes](Docs/RELEASE_NOTES_0.9.1.md) and [formal verification](Docs/RELEASE_VALIDATION_0.9.1.md).
+The latest stable release is **0.9.2 (Build 198)** with original-resource history recovery, consistent episode navigation, compact controls, scoped Ali compatibility, subtitle encoding/CJK fallback and live programme summaries. Developer ID / Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation, all seven exact-commit CI jobs and all 16 anonymous public downloads passed. See [release notes](Docs/RELEASE_NOTES_0.9.2.md), [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.2.md) and [readiness](Docs/RELEASE_READINESS_0.9.2.md).
 
 English | [简体中文](README_zh-CN.md)
 
@@ -18,7 +16,7 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
-The latest stable release is **0.9.1 (Build 182)**, Developer ID signed and Apple-notarized.
+The latest stable release is **0.9.2 (Build 198)**, Developer ID signed and Apple-notarized.
 
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search · QuickJS/Node Spiders**
 
@@ -26,9 +24,9 @@ The latest stable release is **0.9.1 (Build 182)**, Developer ID signed and Appl
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.9.1 (Build 182)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
+**0.9.2 (Build 198)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
 
-Download the Developer ID signed and Apple-notarized [v0.9.1 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.1/OKVideoMac-0.9.1.dmg). Stapling, Gatekeeper, final DMG and fresh-install smoke checks passed.
+Download the Developer ID signed and Apple-notarized [v0.9.2 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.2/OKVideoMac-0.9.2.dmg). Stapling, Gatekeeper, final DMG, installation and startup smoke checks passed.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs and notices accompany the release.
 
@@ -36,7 +34,7 @@ Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disab
 
 ## New in 0.9.2
 
-- Build 198 derives Android SPDX/CycloneDX aggregate versions and package references from the current Bridge source and rejects stale metadata or APK hashes. The briefly published Build 196 is withdrawn; the replacement tag awaits final validation and user confirmation.
+- Build 198 derives Android SPDX/CycloneDX aggregate versions and package references from the current Bridge source and rejects stale metadata or APK hashes. Build 198 passed the complete release gates and was published after the requested tag confirmation; withdrawn Build 196 remains historical evidence.
 
 - Restore history through the original provider request locator and stable file identity; retain progress on failures and isolate bounded Java/Dex provider recovery.
 - Compact VOD/live controls and anchored status/recovery actions; keep native pointer input, hover volume and Picture in Picture behavior.
@@ -389,13 +387,13 @@ checks; a local Debug compile is not a public release artifact.
 
 ## Release integrity
 
-The 0.9.1 / Build 182 DMG passed Release packaging, Developer ID / Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks. Tag `v0.9.1` pins `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`. See [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.1.md). Later documentation commits preserve the tag, signed assets and build-time source snapshot.
+The 0.9.2 / Build 198 DMG passed Release packaging, Developer ID / Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation and all 16 public asset checks. Tag `v0.9.2` pins `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`. See [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.2.md). Later documentation commits preserve the tag, signed assets and build-time source snapshot.
 
 ## Documentation
 
-- [0.9.1 release notes](Docs/RELEASE_NOTES_0.9.1.md)
-- [0.9.1 release verification and checksums](Docs/RELEASE_VALIDATION_0.9.1.md)
-- [Release readiness](Docs/RELEASE_READINESS_0.9.1.md)
+- [0.9.2 release notes](Docs/RELEASE_NOTES_0.9.2.md)
+- [0.9.2 release verification and checksums](Docs/RELEASE_VALIDATION_0.9.2.md)
+- [Release readiness](Docs/RELEASE_READINESS_0.9.2.md)
 - [Corresponding-source release process](Docs/SOURCE_RELEASE_PROCESS.md)
 - [CI and test coverage](Docs/CI.md)
 - [Automatic updates](Docs/AUTOMATIC_UPDATES.md)

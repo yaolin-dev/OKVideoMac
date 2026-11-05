@@ -1,12 +1,14 @@
 # OKVideoMac Binary → Source Mapping
 
-0.9.2（Build 198）为本轮重建候选；正式分发仍须通过现有签名、公证 Accepted、staple、Gatekeeper 和公开资产门禁。Build 196 已撤回，标签更新等待最终验证及用户确认；见[就绪记录](RELEASE_READINESS_0.9.2.md)。既有历史记录保持原范围。
+**2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
-0.9.2（198）候选新增的 uchardet 静态输入与 Noto Sans CJK SC 字体分别由 native lock／构建配方和 SubtitleFonts/provenance.json 绑定，并随源码和许可证归档；精确发布提交与最终哈希待本轮正式验证后记录。
+当前正式版本为 0.9.2（Build 198），tag `v0.9.2` 固定 `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`。本轮撤回标签已按用户最终确认更新，16 项资产与公开下载全部一致；见[正式验证](RELEASE_VALIDATION_0.9.2.md)。
+
+0.9.2（198）的 uchardet 静态输入与 Noto Sans CJK SC 字体分别由 native lock／构建配方和 SubtitleFonts/provenance.json 绑定，并随源码和许可证归档。`OKVideoMac-0.9.2-build198-SOURCE_RELEASE_INDEX.json` 与对应 manifest 绑定准确提交、APK、四份 SBOM 和最终 DMG；文件及 SHA-256 见正式验证。
 
 ## Published 0.9.1 (Build 182)
 
-The current release is pinned by `v0.9.1` to
+The historical 0.9.1 release is pinned by `v0.9.1` to
 `e9acb58a0017dc9989de3bc4347d0c0ffd39be6c`. The public DMG,
 `OKVideoMac-0.9.1.dmg`, is hash-bound to the corresponding project source,
 third-party source, licenses, exact APK and SBOMs by
