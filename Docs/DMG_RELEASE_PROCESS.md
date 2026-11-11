@@ -1,8 +1,10 @@
 # DMG Release Process
 
+0.9.3（Build 204）已正式发布，标签 `v0.9.3` 固定构建提交 `5b3c2206fd77af20a1a207b0219846928a27e1a7`。最终 DMG SHA-256 为 `3656ac54490df7cd6778022e3f7bd7b454b86b49fcbb4598abe5578588807181`。见[正式验证](RELEASE_VALIDATION_0.9.3.md)。
+
 **2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
-当前正式版本为 0.9.2（Build 198），tag `v0.9.2` 固定 `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`。本轮撤回标签已按用户最终确认更新，16 项资产与公开下载全部一致；见[正式验证](RELEASE_VALIDATION_0.9.2.md)。
+上一个正式版本为 0.9.2（Build 198），tag `v0.9.2` 固定 `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`。本轮撤回标签已按用户最终确认更新，16 项资产与公开下载全部一致；见[正式验证](RELEASE_VALIDATION_0.9.2.md)。
 
 0.9.2（198）已从干净准确提交执行未修改的 `package-app.sh --mode distribution --notarize --crash-config FILE`。Apple **Accepted** `5f54c532-70f9-4a86-b3f4-1ee90dbdbc06`；公开 DMG SHA-256 `c16b3b9eae728e9d702e443aabbabc7b6f5a797e7b218e276e4589d90a11166e`。脚本对外层 DMG staple；只读盘内 App 验签与 Gatekeeper 通过，独立复制／安装 App 另行 staple 后验证。完整验证记录区分这两种票据载体。
 

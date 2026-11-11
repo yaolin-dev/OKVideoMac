@@ -2,7 +2,7 @@
 
 **2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
-当前正式版本为 0.9.2（Build 198），Bridge 0.3.58（70），tag `v0.9.2` 固定 `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`。从干净准确提交执行 `package-app.sh --mode distribution --notarize --crash-config FILE` 及全部既有源码、SBOM、签名、公证、staple、Gatekeeper 和安装门禁；Apple Accepted、CI 七项和 16 项公开下载通过，见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.9.2.md)。下文 0.9.1 记录为历史证据。
+当前正式版本为 0.9.3（Build 204），Bridge 0.3.59（71），tag `v0.9.3` 固定 `5b3c2206fd77af20a1a207b0219846928a27e1a7`。从干净提交执行 `package-app.sh --mode distribution --notarize --crash-config FILE`，通过签名、公证、staple、Gatekeeper、安装、CI 和公开资产检查。见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.9.3.md)。
 
 ## Historical 0.9.1 release verification
 

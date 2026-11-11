@@ -1,8 +1,6 @@
 # OKVideoMac
 
-当前发布候选为 **0.9.3（Build 204）**，包含播放解析、DASH 续传、详情页布局、直播交互和弹幕动画修复。见[发布说明](Docs/RELEASE_NOTES_0.9.3.md)。
-
-最新稳定版本为 **0.9.2（Build 198）**，包含原始资源历史恢复、分集导航、紧凑播放控制、阿狸原限定兼容、字幕编码与中文后备字体、直播节目摘要。Developer ID／Hardened Runtime、Apple Notarization **Accepted**、staple、Gatekeeper、安装、准确提交的七项 CI 及全部 16 项匿名公开下载均通过。见[发布说明](Docs/RELEASE_NOTES_0.9.2.md)、[正式验证及 SHA-256](Docs/RELEASE_VALIDATION_0.9.2.md)和[就绪记录](Docs/RELEASE_READINESS_0.9.2.md)。
+最新稳定版本为 **0.9.3（Build 204）**。本版改进播放解析、DASH 续传、详情布局、直播选台和弹幕运动。见[正式验证及 SHA-256](Docs/RELEASE_VALIDATION_0.9.3.md)。
 
 [English](README.md) | 简体中文
 
@@ -18,7 +16,7 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
-最新稳定版本为 **0.9.2（Build 198）**，已完成 Developer ID 签名和 Apple 公证。
+最新稳定版本为 **0.9.3（Build 204）**，已完成 Developer ID 签名和 Apple 公证。
 
 **原生 macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · 多站搜索 · QuickJS/Node Spider**
 
@@ -26,13 +24,17 @@
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.9.2（Build 198）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
+**0.9.3（Build 204）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
 
-下载已签名、公证的 [v0.9.2 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.2/OKVideoMac-0.9.2.dmg)，Staple、Gatekeeper、最终 DMG、安装与启动 smoke 均通过。
+下载已签名、公证的 [v0.9.3 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.3/OKVideoMac-0.9.3.dmg)，Staple、Gatekeeper、最终 DMG、安装与启动 smoke 均通过。
 
 打开 DMG，将 `OKVideoMac.app` 拖入 Applications，无需关闭 Gatekeeper 或 SIP。校验和、发布说明、源码、许可证、SBOM 随发布提供。
 
 > 本项目是播放器与源客户端，不内置第三方内容源、账号、Cookie、解析服务或 DRM 密钥。
+
+## 0.9.3 新增与修复
+
+[查看完整发布说明](Docs/RELEASE_NOTES_0.9.3.md)。
 
 ## 0.9.2 新增与修复
 
@@ -355,6 +357,8 @@ Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session �
 
 ## 文档
 
+- [0.9.3 发布说明](Docs/RELEASE_NOTES_0.9.3.md)
+- [0.9.3 正式验证及校验和](Docs/RELEASE_VALIDATION_0.9.3.md)
 - [0.9.2 发布说明](Docs/RELEASE_NOTES_0.9.2.md)
 - [0.9.2 正式验证及校验和](Docs/RELEASE_VALIDATION_0.9.2.md)
 - [发布就绪记录](Docs/RELEASE_READINESS_0.9.2.md)

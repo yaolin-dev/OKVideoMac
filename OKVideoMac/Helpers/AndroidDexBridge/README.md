@@ -17,6 +17,8 @@ apply. See `FONGMI_CATVOD_CHANGES.md` for the exact diff and
 
 ## Rebuilding the bundled APK
 
+OKVideoMac 0.9.3 bundles Bridge 0.3.59 (71). Supported static DASH transfers resume through bounded byte ranges after validating the resource identity and the returned range. The release APK and its SHA-256 are listed in [release validation](../../../Docs/RELEASE_VALIDATION_0.9.3.md).
+
 Requirements: JDK 17, Android SDK 35/build-tools 35, and network access to the
 repositories fixed in `settings.gradle`. The Gradle 8.9 wrapper distribution
 hash is fixed in `gradle-wrapper.properties`; `app/gradle.lockfile` fixes the

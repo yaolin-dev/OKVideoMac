@@ -2,7 +2,7 @@
 
 **2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
-> Historical Phase 2C experiment report. Current 0.9.2 / Build 198 native inputs, uchardet, retained provenance exceptions and final hashes are bound by ThirdParty/native-lock.json and the generated source-release index. Published verification is recorded in [formal validation](RELEASE_VALIDATION_0.9.2.md); dated experiments below retain their original scope.
+> Historical Phase 2C experiment report. The 0.9.3 Build 204 native inputs, subtitle dependencies and retained provenance exceptions are recorded in ThirdParty/native-lock.json and the generated source-release index. See [release validation](RELEASE_VALIDATION_0.9.3.md) for the published artifacts.
 
 Date: 2026-08-13
 

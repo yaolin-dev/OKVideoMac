@@ -2,9 +2,9 @@
 
 **2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
-Date: 2026-11-05
+Date: 2026-11-11
 
-Current published release: OKVideoMac 0.9.2 (Build 198), Android Bridge 0.3.58 (70). Both Android formats now derive their aggregate versions and purls from the actual Bridge source and verify the exact packaged APK hash; ten regression tests cover stale, duplicate and missing metadata. Build 196 is withdrawn; Build 198 publication and all 16 anonymous asset hashes are verified. See [formal verification](RELEASE_VALIDATION_0.9.2.md). Historical hashes below remain unchanged.
+Current published release: OKVideoMac 0.9.3 (Build 204), Android Bridge 0.3.59 (71). The Android SBOMs derive their aggregate versions and package URLs from the Bridge source and verify the packaged APK hash. Build 204 passed macOS and Android SBOM verification. See [release validation](RELEASE_VALIDATION_0.9.3.md) for the four public SBOM checksums.
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:
@@ -16,7 +16,7 @@ Every packaged release contains four machine-readable documents under
 
 `Tools/SourceAudit/generate_sbom.py` inventories the built App, not a static
 expected-file list. It refuses unknown or missing executables by comparing the exact approved Mach-O
-path set in `ThirdParty/approved-macho-paths.json`. The 0.9.2 package contains
+path set in `ThirdParty/approved-macho-paths.json`. The 0.9.3 package contains
 38 arm64 Mach-O components, including five Sparkle executables; the count is
 derived from that exact path set and is not a lower-bound allowance. Every nested Mach-O has a final post-signing SHA-256.
 The main executable deliberately has no embedded-SBOM hash because signing the

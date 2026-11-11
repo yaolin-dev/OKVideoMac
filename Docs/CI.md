@@ -12,16 +12,18 @@ fixtures, not installation of the CI toolchain.
 
 ## Checks and scope
 
-| Check | What runs | 0.9.2 Build 198 verified scope |
+[Build 204 CI run 43029952922](https://github.com/yaolin-dev/OKVideoMac/actions/runs/43029952922) passed all seven jobs for `5b3c2206fd77af20a1a207b0219846928a27e1a7`. Its downloaded machine reports confirm the results below. The local Release host passed 181 App cases and 15 real-media cases. See [release validation](RELEASE_VALIDATION_0.9.3.md).
+
+| Check | What runs | 0.9.3 Build 204 verified scope |
 | --- | --- | --- |
-| Core (debug), Core (release) | Entire `OKVideoKit` Core/Persistence XCTest suite, separately built and discovered for each configuration | Each: 1,266 discovered, 1,237 passed, 29 declared skips |
-| Node | All six `*.test.js` suites selected by `run_node.py`, using the Node test runner | 72 passed, no skips |
+| Core (debug), Core (release) | Entire `OKVideoKit` Core/Persistence XCTest suite, separately built and discovered for each configuration | Each: 1,278 discovered, 1,249 passed, 29 declared skips |
+| Node | All six `*.test.js` suites selected by `run_node.py`, using the Node test runner | 79 passed, no skips |
 | Offline audits and static checks | SourceAudit synthetic tests, crash configuration tests, tiny Mach-O/dSYM symbol gates, CI validator tests, static checks | 62 audit tests (including 7 native launcher cases), 15 crash configuration tests, 7 symbol cases; no skips |
-| Android Release JVM and unsigned bridge | Existing locked Gradle Release build and JVM tests in a fresh source copy; verify APK is unsigned | 77 JVM tests, no skips; compile-only APK |
-| Main App Release compile and critical flows | Verify unsigned App/helpers, then build an isolated ad-hoc signed Release test host and execute the logical user-flow contract | Three executables and 151 critical tests passed; exact identities from `Tools/CI/critical-user-flows.json`; zero skips |
+| Android Release JVM and unsigned bridge | Existing locked Gradle Release build and JVM tests in a fresh source copy; verify APK is unsigned | 85 JVM tests, no skips; compile-only APK |
+| Main App Release compile and critical flows | Verify unsigned App/helpers, then build an isolated ad-hoc signed Release test host and execute the logical user-flow contract | Three executables and 161 critical tests passed; exact identities from `Tools/CI/critical-user-flows.json`; zero skips |
 | CI required | Aggregate the five job groups, including both Core matrix results | Only exact `success` for every group is accepted |
 
-Build 198 adds ten SourceAudit SBOM regression tests. [Exact-commit CI run 41863857063, attempt 3](https://github.com/yaolin-dev/OKVideoMac/actions/runs/41863857063) completed all seven jobs successfully for `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`; the downloaded machine reports match the counts above. Attempts 1 and 2 failed to acquire hosted macOS runners and remain recorded; no configuration or assertions were bypassed. Business sources retain the 196 implementation; Build 198 also enforces visible/active fullscreen fixture prerequisites and waits for owned asynchronous episode feedback without changing assertions, timeouts or skips.
+Build 198 adds ten SourceAudit SBOM regression tests. [Exact-commit CI run 41863857063, attempt 3](https://github.com/yaolin-dev/OKVideoMac/actions/runs/41863857063) completed all seven jobs successfully for `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`; the downloaded machine reports match the historical Build 198 release validation. Attempts 1 and 2 failed to acquire hosted macOS runners and remain recorded; no configuration or assertions were bypassed. Business sources retain the 196 implementation; Build 198 also enforces visible/active fullscreen fixture prerequisites and waits for owned asynchronous episode feedback without changing assertions, timeouts or skips.
 
 Counts describe the checked baseline, not a target used to suppress new tests.
 Discovery and generated reports are authoritative. Core skips must match the exact

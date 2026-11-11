@@ -1,8 +1,6 @@
 # OKVideoMac
 
-The current release candidate is **0.9.3 (Build 204)**. It improves playback preparation, DASH stream recovery, detail layout, live controls and danmaku motion. See [release notes](Docs/RELEASE_NOTES_0.9.3.md).
-
-The latest stable release is **0.9.2 (Build 198)** with original-resource history recovery, consistent episode navigation, compact controls, scoped Ali compatibility, subtitle encoding/CJK fallback and live programme summaries. Developer ID / Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation, all seven exact-commit CI jobs and all 16 anonymous public downloads passed. See [release notes](Docs/RELEASE_NOTES_0.9.2.md), [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.2.md) and [readiness](Docs/RELEASE_READINESS_0.9.2.md).
+The latest stable release is **0.9.3 (Build 204)**, with playback preparation, DASH recovery, stable detail shelves, grouped live channels and danmaku fixes. See [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.3.md).
 
 English | [简体中文](README_zh-CN.md)
 
@@ -18,7 +16,7 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
-The latest stable release is **0.9.2 (Build 198)**, Developer ID signed and Apple-notarized.
+The latest stable release is **0.9.3 (Build 204)**, Developer ID signed and Apple-notarized.
 
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search · QuickJS/Node Spiders**
 
@@ -26,13 +24,17 @@ The latest stable release is **0.9.2 (Build 198)**, Developer ID signed and Appl
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.9.2 (Build 198)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
+**0.9.3 (Build 204)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
 
-Download the Developer ID signed and Apple-notarized [v0.9.2 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.2/OKVideoMac-0.9.2.dmg). Stapling, Gatekeeper, final DMG, installation and startup smoke checks passed.
+Download the Developer ID signed and Apple-notarized [v0.9.3 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.3/OKVideoMac-0.9.3.dmg). Stapling, Gatekeeper, final DMG, installation and startup smoke checks passed.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs and notices accompany the release.
 
 > OKVideoMac is a player and provider client. It does not include third-party video sources, accounts, cookies, parsing services or DRM keys.
+
+## New in 0.9.3
+
+[Read the complete release notes](Docs/RELEASE_NOTES_0.9.3.md).
 
 ## New in 0.9.2
 
@@ -393,6 +395,8 @@ The 0.9.2 / Build 198 DMG passed Release packaging, Developer ID / Hardened Runt
 
 ## Documentation
 
+- [0.9.3 release notes](Docs/RELEASE_NOTES_0.9.3.md)
+- [0.9.3 release verification and checksums](Docs/RELEASE_VALIDATION_0.9.3.md)
 - [0.9.2 release notes](Docs/RELEASE_NOTES_0.9.2.md)
 - [0.9.2 release verification and checksums](Docs/RELEASE_VALIDATION_0.9.2.md)
 - [Release readiness](Docs/RELEASE_READINESS_0.9.2.md)
