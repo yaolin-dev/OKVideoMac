@@ -206,16 +206,26 @@ struct DetailPlaybackSpecifications: View {
 /// Display only the selected resource's original name below the cast.
 struct DetailResourceFooter: View {
     let originalName: String?
+    var reservesSpace = false
     var body: some View {
-        if let name = PlaybackMediaInfo.safeFileName(originalName) {
-            Text(name).font(.system(size: 12)).foregroundStyle(.secondary)
-                .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.horizontal, 28).padding(.top, 6).padding(.bottom, 12)
-                .accessibilityIdentifier("detail.original-resource.name")
-                .contextMenu {
-                    Button(L10n.string("detail.resource.copy-name", fallback: "Copy Original Name")) { PlaybackInfoPresentation.copy(name) }
+        if reservesSpace {
+            // Keep the document size unchanged for absent or long late names.
+            Color.clear.frame(height: 16).overlay(alignment: .leading) {
+                if let name = PlaybackMediaInfo.safeFileName(originalName) {
+                    resourceName(name).lineLimit(1).truncationMode(.middle).help(name)
                 }
+            }.padding(.horizontal, 28).padding(.top, 6).padding(.bottom, 12)
+        } else if let name = PlaybackMediaInfo.safeFileName(originalName) {
+            resourceName(name).fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 28).padding(.top, 6).padding(.bottom, 12)
         }
+    }
+    private func resourceName(_ name: String) -> some View {
+        Text(name).font(.system(size: 12)).foregroundStyle(.secondary)
+            .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+            .accessibilityIdentifier("detail.original-resource.name")
+            .contextMenu {
+                Button(L10n.string("detail.resource.copy-name", fallback: "Copy Original Name")) { PlaybackInfoPresentation.copy(name) }
+            }
     }
 }

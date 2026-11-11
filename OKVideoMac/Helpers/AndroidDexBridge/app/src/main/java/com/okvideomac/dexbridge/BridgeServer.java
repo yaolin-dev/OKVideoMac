@@ -843,6 +843,7 @@ final class BridgeServer {
                             "Media relay ended after response started"
                                     + " category=" + committed.category
                                     + " bytes=" + committed.bytesWritten
+                                    + " cause=" + DashResumingInputStream.cause(cause instanceof MediaRelay.Failure ? cause.getCause() : cause)
                                     + " error="
                                     + (cause == null
                                     ? error.getClass().getSimpleName()
@@ -1314,7 +1315,7 @@ final class BridgeServer {
         // response. Monitor only capabilities explicitly prepared by our mpv
         // host, and only body-free requests handled by cancellable HTTP calls.
         boolean watch = session != null && session.cancelOnDisconnect && !headersOnly
-                && providerProxyURI(session.upstreamURL) == null
+                && (sessionID.contains("/dash/") || providerProxyURI(session.upstreamURL) == null)
                 && !clientHeaders.containsKey("transfer-encoding")
                 && parseLength(clientHeaders.get("content-length")) == 0;
         try (MediaRequestLifetime lifetime = new MediaRequestLifetime(client, input, watch)) {
@@ -1346,6 +1347,7 @@ final class BridgeServer {
             return;
         }
         String upstreamURL = upstreamURLs.get(0);
+        boolean resumeDASH = dashChild && session.staticDASH;
         MediaRequestNetworkPolicy networkPolicy = session.networkPolicy;
         String requestID = UUID.randomUUID().toString().substring(0, 8);
         LinkedHashMap<String, String> forwarded = new LinkedHashMap<>();
@@ -1454,7 +1456,7 @@ final class BridgeServer {
             response[2] = session.guardStream((InputStream) response[2]);
             if ((Integer) response[0] == 200 && DashManifest.isDASH((String) response[1])) {
                 byte[] manifest = DashManifest.rewrite((InputStream) response[2], upstreamURL,
-                        url -> session.registerDashResource(url, sessionFingerprint));
+                        url -> session.registerDashResource(url, sessionFingerprint), value -> session.staticDASH = value);
                 // Rewritten bytes have new framing; upstream byte ranges and
                 // Content-Length no longer describe the downstream manifest.
                 response = new Object[]{200, "application/dash+xml", session.guardStream(new java.io.ByteArrayInputStream(manifest))};
@@ -1480,14 +1482,14 @@ final class BridgeServer {
             for (String candidate : upstreamURLs) {
                 lifetime.checkConnected();
                 try {
-                    selected = executeSessionMedia(requireSessionMediaURI(candidate), forwarded, headersOnly, networkPolicy, lifetime);
+                    selected = executeSessionMedia(requireSessionMediaURI(candidate), forwarded, headersOnly, networkPolicy, lifetime, resumeDASH);
                     int status = selected.response.code();
                     if (dashChild && status == 403) {
                         Map<String, String> compatibility = DashManifest.forbiddenCDNHeaders(candidate, forwarded, sessionHeaders);
                         if (compatibility != null) {
                             selected.response.close();
                             selected = null;
-                            selected = executeSessionMedia(requireSessionMediaURI(candidate), compatibility, headersOnly, networkPolicy, lifetime);
+                            selected = executeSessionMedia(requireSessionMediaURI(candidate), compatibility, headersOnly, networkPolicy, lifetime, resumeDASH);
                             status = selected.response.code();
                         }
                     }
@@ -1519,7 +1521,7 @@ final class BridgeServer {
         try (Response response = mediaResponse.response) {
             if (!headersOnly && response.code() == 200 && DashManifest.isDASH(response.header("Content-Type")) && response.body() != null) {
                 byte[] manifest = DashManifest.rewrite(session.guardStream(response.body().byteStream()),
-                        mediaResponse.upstream.toString(), url -> session.registerDashResource(url, sessionFingerprint));
+                        mediaResponse.upstream.toString(), url -> session.registerDashResource(url, sessionFingerprint), value -> session.staticDASH = value);
                 writeProxy(output, new Object[]{200, "application/dash+xml", session.guardStream(new java.io.ByteArrayInputStream(manifest))}, false);
                 return;
             }
@@ -1563,10 +1565,9 @@ final class BridgeServer {
                                     mediaResponse.headers
                             )
             );
-            // Preserve the upstream response boundary. If a cloud CDN closes
-            // a range early, libmpv must observe that EOF and issue its own
-            // next Range request. Reassembling ranges inside the bridge can
-            // deadlock playback when a signed CDN rejects a continuation.
+            // Ordinary provider streams retain their upstream EOF boundary.
+            // Only recognized static DASH representations use the
+            // bounded, identity-checked continuation below.
             try {
                 Log.i(TAG, "MediaRead request=" + requestID
                         + " session=" + shortHash(session.id)
@@ -1580,7 +1581,12 @@ final class BridgeServer {
                         + " outputFraming=chunked");
                 MEDIA_READ_REQUEST.set(requestID);
                 try {
-                    writeMediaResponse(output, response, headersOnly, normalizedRange, session);
+                    if (resumeDASH && !headersOnly && response.code() == 206) {
+                        writeResumableDASH(output, mediaResponse, session, sessionFingerprint,
+                                upstreamURLs, range, networkPolicy, lifetime, requestID);
+                    } else {
+                        writeMediaResponse(output, response, headersOnly, normalizedRange, session);
+                    }
                 } finally {
                     MEDIA_READ_REQUEST.remove();
                 }
@@ -1620,6 +1626,13 @@ final class BridgeServer {
             boolean headersOnly,
             MediaRequestNetworkPolicy networkPolicy, MediaRequestLifetime lifetime
     ) throws IOException {
+        return executeSessionMedia(initialUpstream, initialHeaders, headersOnly, networkPolicy, lifetime, false);
+    }
+
+    private static SessionMediaResponse executeSessionMedia(
+            URI initialUpstream, Map<String, String> initialHeaders, boolean headersOnly,
+            MediaRequestNetworkPolicy networkPolicy, MediaRequestLifetime lifetime,
+            boolean boundedDASHRead) throws IOException {
         URI upstream = initialUpstream;
         LinkedHashMap<String, String> headers = new LinkedHashMap<>(
                 initialHeaders
@@ -1636,7 +1649,10 @@ final class BridgeServer {
             request.header("Accept-Encoding", "identity");
             if (headersOnly) request.head(); else request.get();
 
-            Call call = networkPolicy.client(SESSION_MEDIA_CLIENT).newCall(request.build());
+            OkHttpClient mediaClient = networkPolicy.client(SESSION_MEDIA_CLIENT);
+            if (boundedDASHRead) mediaClient = mediaClient.newBuilder()
+                    .connectTimeout(8, TimeUnit.SECONDS).readTimeout(12, TimeUnit.SECONDS).build();
+            Call call = mediaClient.newCall(request.build());
             lifetime.attach(call::cancel);
             lifetime.checkConnected();
             Response response = call.execute();
@@ -1677,6 +1693,52 @@ final class BridgeServer {
             }
             upstream = redirected;
         }
+    }
+
+    private static DashResumingInputStream.Segment dashSegment(SessionMediaResponse media,
+            long requestedStart, long requestedEnd) throws IOException {
+        Response response = media.response;
+        long[] range = VirtualMediaRange.contentRange(response.header("Content-Range"));
+        if (response.code() != 206 || response.body() == null || range == null
+                || range[0] != requestedStart || range[1] != (requestedEnd < 0 ? range[2]-1 : Math.min(requestedEnd, range[2]-1))
+                || response.body().contentLength() != range[1]-range[0]+1)
+            throw new DashResumingInputStream.InvalidRange();
+        String etag = response.header("ETag");
+        if (etag != null && etag.startsWith("W/")) etag = null;
+        return new DashResumingInputStream.Segment(range[0], range[1], range[2], etag,
+                media.upstream.toString(), response.body().byteStream(), () -> { media.call.cancel(); response.close(); });
+    }
+
+    private static void writeResumableDASH(BufferedOutputStream output, SessionMediaResponse initial,
+            BridgeMediaSessionRegistry.Session session, String fingerprint, java.util.List<String> upstreams,
+            String requestedRange, MediaRequestNetworkPolicy policy, MediaRequestLifetime lifetime,
+            String requestID) throws IOException {
+        long[] requested = VirtualMediaRange.requestedRange(requestedRange == null ? "bytes=0-" : requestedRange);
+        if (requested == null) throw new DashResumingInputStream.InvalidRange();
+        java.util.List<String> candidates = new java.util.ArrayList<>();
+        candidates.add(initial.upstream.toString());
+        for (String url : upstreams) if (!candidates.contains(url)) candidates.add(url);
+        DashResumingInputStream.Guard guard = () -> {
+            lifetime.checkConnected();
+            synchronized (session) {
+                if (!session.isCurrent() || BridgeMediaSessionRegistry.get(session.id) != session
+                        || !fingerprint.equals(session.upstreamFingerprint)) throw new ProviderMediaEpoch.Changed();
+            }
+        };
+        DashResumingInputStream stream = new DashResumingInputStream(
+                dashSegment(initial, requested[0], requested[1]), (offset, end, attempt) -> {
+                    guard.check();
+                    URI candidate = requireSessionMediaURI(candidates.get((attempt-1) % candidates.size()));
+                    Map<String, String> headers = new LinkedHashMap<>(initial.headers);
+                    if (!sameOrigin(initial.upstream, candidate)) stripCrossOriginProviderHeaders(headers);
+                    putHeaderIgnoreCase(headers, "Range", "bytes=" + offset + "-" + end);
+                    SessionMediaResponse next = executeSessionMedia(candidate, headers, false, policy, lifetime, true);
+                    try { return dashSegment(next, offset, end); }
+                    catch (IOException invalid) { next.call.cancel(); next.response.close(); throw invalid; }
+                }, guard, (attempt, offset, cause) -> Log.i(TAG, "DashResume request=" + requestID
+                    + " session=" + shortHash(session.id) + " attempt=" + attempt + " offset=" + offset + " cause=" + cause));
+        writeProxy(output, new Object[]{206, initial.response.header("Content-Type", "application/octet-stream"),
+                stream, mediaResponseHeaders(initial.response)}, false);
     }
 
     private static boolean isRedirect(int status) {

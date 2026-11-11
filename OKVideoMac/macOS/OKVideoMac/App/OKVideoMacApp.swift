@@ -393,6 +393,8 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
     private let explicitGeometryKey = UUID()
     private let userFrameKey = UUID()
     private var overlayHostingView: PlayerOverlayHostingView<AnyView>?
+    private var danmakuHostingView: PlayerOverlayHostingView<AnyView>?
+    private var playerDanmakuContainer: PlayerDanmakuViewport?
     private var playerOverlayContainer: PlayerFullscreenOverlayView?
     private let fullscreenPresentation = PlayerFullscreenPresentation()
     private var snapshotGeometryCancellable: AnyCancellable?
@@ -580,6 +582,16 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
             hostedView.autoresizingMask = [.width, .height]
             container.addSubview(hostedView)
             self.hostingController = hostingController
+            if let viewport = playerDanmakuContainer {
+                let host = PlayerOverlayHostingView(rootView: AnyView(
+                    PlayerPlaybackDanmakuRoot(appState: appState)
+                ))
+                if #available(macOS 13.0, *) { host.sizingOptions = [] }
+                host.frame = viewport.bounds
+                host.autoresizingMask = [.width, .height]
+                viewport.addSubview(host)
+                danmakuHostingView = host
+            }
             if let overlay = playerOverlayContainer {
                 let host = PlayerOverlayHostingView(rootView: AnyView(
                     PlayerPlaybackOverlayRoot(appState: appState).environmentObject(appState)
@@ -638,6 +650,9 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
             let composition = PlayerFullscreenContentView(frame: content.bounds)
             content.addSubview(composition)
             playerContentContainer = composition
+            let danmaku = PlayerDanmakuViewport(frame: content.bounds)
+            content.addSubview(danmaku)
+            playerDanmakuContainer = danmaku
             let overlay = PlayerFullscreenOverlayView(frame: content.bounds)
             content.addSubview(overlay)
             playerOverlayContainer = overlay
@@ -808,7 +823,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
               fullscreenPresentation.prepareToEnter(window: window,
                 surface: videoSurface(in: window.contentView),
                 aspectRatio: currentEffectiveAspectRatio(),
-                presentationView: playerContentContainer) else { return nil }
+                presentationView: playerContentContainer, danmakuView: playerDanmakuContainer) else { return nil }
         return [window]
     }
 
@@ -1226,6 +1241,7 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         appState?.setPlayerWindowKey(false)
         hostingController?.view.removeFromSuperview()
         overlayHostingView?.removeFromSuperview()
+        danmakuHostingView?.removeFromSuperview()
         if let window {
             WindowTransitionCoordinator.state(for: window).cancel(explicitGeometryKey)
             WindowTransitionCoordinator.state(for: window).cancel(userFrameKey)
@@ -1234,6 +1250,8 @@ final class PlayerPlaybackWindowController: NSObject, NSWindowDelegate {
         window = nil
         playerContentContainer = nil
         playerOverlayContainer = nil
+        playerDanmakuContainer = nil
+        danmakuHostingView = nil
         overlayHostingView = nil
         hostingController = nil
         lastProgrammaticFrame = nil
@@ -1678,6 +1696,19 @@ struct PlayerPlaybackWindowRoot: View {
                 .allowsHitTesting(false)
             }
 
+
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black)
+
+    }
+}
+
+struct PlayerPlaybackDanmakuRoot: View {
+    @ObservedObject var appState: AppState
+
+    var body: some View {
+        ZStack {
             if appState.isPlayerPresented, !appState.isLivePlayback, !appState.pictureInPicture.isPresented {
                 PlayerDanmakuLayer(coordinator: appState.danmaku, snapshotState: appState.playerSnapshotState)
                     .ignoresSafeArea()
@@ -1685,8 +1716,6 @@ struct PlayerPlaybackWindowRoot: View {
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.black)
-
     }
 }
 

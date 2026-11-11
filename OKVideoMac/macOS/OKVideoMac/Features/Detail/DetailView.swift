@@ -195,6 +195,8 @@ struct DetailView: View {
     @State private var preparedPresentations: [EpisodePresentation] = []
     @State private var preparedRangeOptions: [EpisodeRangeOption] = []
     @State private var isPreparingEpisodes = false
+    @State private var preparedSource: PlaySource?
+    @State private var showsPlaybackStatus = false
     @State private var showsAllActors = false
     @State private var showsFullSynopsis = false
     @ObservedObject private var tmdbRuntime: TMDBNetworkRuntime
@@ -232,7 +234,7 @@ struct DetailView: View {
                         detailHero(availableWidth: min(viewport.size.width, DetailPageLayout.maximumContentWidth))
                     }
 
-                    if !detail.playSources.isEmpty, state.detailLoadState.message != nil {
+                    if !usesTMDBLayout, !detail.playSources.isEmpty, state.detailLoadState.message != nil {
                         DetailRequestStatusView(streamsOnly: usesTMDBLayout).padding(.horizontal, 28).padding(.vertical, 12)
                     }
                     if !usesTMDBLayout && !detailFacts.isEmpty {
@@ -242,15 +244,10 @@ struct DetailView: View {
 
                     if !usesTMDBLayout { Divider().padding(.horizontal, DetailPageLayout.horizontalPadding) }
 
-                    if detail.playSources.isEmpty, state.detailLoadState == .loading || state.detailLoadState.message != nil {
-                        if usesTMDBLayout {
-                            VStack(alignment: .leading, spacing: 18) {
-                                DetailRequestStatusView(streamsOnly: true).frame(height: viewport.size.width < 650 ? 112 : 72, alignment: .topLeading)
-                                if state.detailLoadState == .loading { TMDBEpisodeSkeleton() }
-                            }.padding(.horizontal, 28).padding(.top, 7).padding(.bottom, 18)
-                        } else {
-                            DetailRequestStatusView().padding(.horizontal, 28).frame(minHeight: 160)
-                        }
+                    if usesTMDBLayout {
+                        tmdbPlaybackBrowser(width: viewport.size.width)
+                    } else if detail.playSources.isEmpty, state.detailLoadState == .loading || state.detailLoadState.message != nil {
+                        DetailRequestStatusView().padding(.horizontal, 28).frame(minHeight: 160)
                     } else if detail.playSources.isEmpty {
                         EmptyStateView(
                             systemImage: "play.slash",
@@ -259,11 +256,11 @@ struct DetailView: View {
                         )
                         .frame(minHeight: 260)
                     } else {
-                        if usesTMDBLayout { tmdbPlaybackBrowser(width: viewport.size.width) } else { playbackBrowser }
+                        playbackBrowser
                     }
                     if usesTMDBLayout {
                         TMDBCastView(metadata: tmdb, source: detail.summary)
-                        DetailResourceFooter(originalName: primaryEpisode?.name)
+                        DetailResourceFooter(originalName: primaryEpisode?.name, reservesSpace: true)
                     }
                 }
                 .frame(maxWidth: !usesTMDBLayout ? DetailPageLayout.maximumContentWidth : .infinity)
@@ -331,6 +328,7 @@ struct DetailView: View {
             selectedRangeID = nil
             preparedPresentations = []
             preparedRangeOptions = []
+            preparedSource = nil
             isPreparingEpisodes = true
         }
     }
@@ -482,8 +480,12 @@ struct DetailView: View {
     @ViewBuilder private var tmdbSourceControls: some View {
         Picker(L10n.string("detail.streams", fallback: "Streams"), selection: $selectedSourceIndex) {
             ForEach(detail.playSources.indices, id: \.self) { index in Text(detail.playSources[index].name).tag(index) }
-        }.labelsHidden().frame(maxWidth: 170).accessibilityIdentifier("tmdb.source-picker")
-        if tmdb.selection?.reference.type == .tv { tmdbSeasonPicker.labelsHidden().frame(maxWidth: 180) }
+        }.labelsHidden().frame(width: 170).accessibilityIdentifier("tmdb.source-picker")
+        // Metadata can identify a TV series after the source controls appear.
+        // Its reserved slot must not move the existing source/search controls.
+        Color.clear.frame(width: 180, height: 32).overlay(alignment: .leading) {
+            if tmdb.selection?.reference.type == .tv { tmdbSeasonPicker.labelsHidden().frame(width: 180) }
+        }
     }
     private var tmdbSearchControls: some View {
         HStack(spacing: 8) {
@@ -499,7 +501,59 @@ struct DetailView: View {
         }
     }
 
-    @ViewBuilder private func tmdbPlaybackBrowser(width: CGFloat) -> some View {
+    private func tmdbPlaybackBrowser(width: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            // Every phase uses the same shell, including no streams and errors.
+            // Changing document height can clamp an NSClipView near its bottom.
+            Color.clear.frame(height: width < 650 ? 72 : 32).overlay(alignment: .topLeading) {
+                if !detail.playSources.isEmpty { tmdbPlaybackControls(width: width) }
+                else if state.detailLoadState == .loading { DetailRequestStatusView(streamsOnly: true) }
+            }
+            HStack(spacing: 8) {
+                Color.clear.frame(height: 32).overlay(alignment: .leading) {
+                    if !detail.playSources.isEmpty, rangeOptions.count > 1 {
+                        EpisodeRangePicker(options: rangeOptions, selectedID: $selectedRangeID).frame(height: 32)
+                    }
+                }
+                Color.clear.frame(width: 32, height: 32).overlay {
+                    if !detail.playSources.isEmpty, hasTMDBPlaybackStatus {
+                        Button { showsPlaybackStatus = true } label: { Image(systemName: "exclamationmark.circle") }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel(tmdbPlaybackStatusText)
+                            .help(tmdbPlaybackStatusText)
+                            .popover(isPresented: $showsPlaybackStatus) { tmdbPlaybackStatus.padding(16).frame(width: 340) }
+                    }
+                }
+            }.padding(.top, 8)
+            Color.clear.frame(height: TMDBEpisodeLayout.shelfHeight).overlay(alignment: .topLeading) {
+                tmdbEpisodeContent
+            }.padding(.top, 18).padding(.bottom, 18)
+        }
+        .padding(.horizontal, 28).padding(.top, 7)
+    }
+
+    private var hasTMDBPlaybackStatus: Bool {
+        state.detailLoadState.message != nil || tmdb.seasonError != nil || tmdb.actionError != nil
+    }
+    private var tmdbPlaybackStatusText: String {
+        [state.detailLoadState.message, tmdb.seasonError, tmdb.actionError].compactMap { $0 }.joined(separator: "\n")
+    }
+    private var tmdbPlaybackStatus: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 12) {
+                if state.detailLoadState.message != nil { DetailRequestStatusView(streamsOnly: true) }
+                if let error = tmdb.seasonError {
+                    Text(error).font(.caption).foregroundStyle(.secondary)
+                    Button(L10n.string("common.retry", fallback: "Retry")) {
+                        Task { await tmdb.loadSeason(source: selectedSource, category: detail.summary.categoryName) }
+                    }
+                }
+                if let error = tmdb.actionError { Text(error).font(.caption).foregroundStyle(.secondary) }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+        }.frame(maxHeight: 200)
+    }
+
+    private func tmdbPlaybackControls(width: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             if width < 650 {
                 HStack(spacing: 8) { tmdbSourceControls; Spacer(minLength: 0) }.frame(minHeight: 32)
@@ -508,17 +562,37 @@ struct DetailView: View {
                 HStack(spacing: 8) { tmdbSourceControls; Spacer(minLength: 0); tmdbSearchControls }.frame(minHeight: 32)
             }
 
-            if rangeOptions.count > 1 {
-                EpisodeRangePicker(options: rangeOptions, selectedID: $selectedRangeID).frame(height: 32)
+        }
+    }
+
+    @ViewBuilder private var tmdbEpisodeContent: some View {
+        if detail.playSources.isEmpty {
+            if state.detailLoadState == .loading { TMDBEpisodeSkeleton() }
+            else {
+                ScrollView {
+                    if state.detailLoadState.message != nil { DetailRequestStatusView(streamsOnly: true) }
+                    else {
+                        EmptyStateView(systemImage: "play.slash",
+                            title: L10n.string("detail.no-streams.title", fallback: "No Streams"),
+                            message: L10n.string("detail.no-streams.message", fallback: "This provider did not return any playable episodes."))
+                    }
+                }.frame(height: TMDBEpisodeLayout.shelfHeight)
             }
-            if let error = tmdb.seasonError {
-                HStack { Text(error).font(.caption).foregroundStyle(.secondary)
-                    Button(L10n.string("common.retry", fallback: "Retry")) { Task { await tmdb.loadSeason(source: selectedSource, category: detail.summary.categoryName) } }
-                }
-            }
-            if let error = tmdb.actionError { Text(error).font(.caption).foregroundStyle(.secondary) }
-        }.frame(minHeight: width < 650 ? 72 : 32, alignment: .topLeading).padding(.horizontal, 28).padding(.top, 7).padding(.bottom, 10)
-        episodeContent
+        } else if preparedSource != selectedSource || isPreparingEpisodes {
+            // The provider can publish its source before the preparation task
+            // starts. That frame is loading, not a completed empty search.
+            TMDBEpisodeSkeleton()
+        } else if filteredPresentations.isEmpty {
+            ScrollView {
+                EmptyStateView(systemImage: "magnifyingglass",
+                    title: L10n.string("detail.no-matching-episodes.title", fallback: "No Matching Episodes"),
+                    message: L10n.string("detail.no-matching-episodes.message", fallback: "Try another search term or episode range."))
+            }.frame(height: TMDBEpisodeLayout.shelfHeight)
+        } else {
+            TMDBEpisodeCards(metadata: tmdb, episodes: filteredPresentations, sourceIdentity: selectedSource.map { sourceIdentities.identity($0) } ?? "", sourceEpisodes: selectedSource?.episodes ?? [], sourceName: selectedSource?.name ?? "", sourceReferenceIdentity: selectedSource?.referenceIdentity, category: detail.summary.categoryName,
+                selectedID: primaryEpisode?.id, fallbackURL: detail.summary.posterURL,
+                onSelect: { selectedTMDBEpisodeID = $0.episode.id }, onPlay: playSelectedEpisode)
+        }
     }
 
     private var detailDescription: some View {
@@ -702,9 +776,7 @@ struct DetailView: View {
         let visible = filteredPresentations
         let regular = visible.filter { $0.episodeNumber != nil }
         let other = visible.filter { $0.episodeNumber == nil }
-        if isPreparingEpisodes && usesTMDBLayout {
-            TMDBEpisodeSkeleton().padding(.horizontal, 28).padding(.vertical, 18)
-        } else if isPreparingEpisodes {
+        if isPreparingEpisodes {
             VStack(spacing: 10) {
                 ProgressView().progressViewStyle(.circular).controlSize(.small)
                 Text(L10n.string("detail.organizing-episodes", fallback: "Organizing %d episodes…", selectedSource?.episodes.count ?? 0))
@@ -719,12 +791,6 @@ struct DetailView: View {
                 message: L10n.string("detail.no-matching-episodes.message", fallback: "Try another search term or episode range.")
             )
         } else {
-            if usesTMDBLayout {
-                TMDBEpisodeCards(metadata: tmdb, episodes: visible, sourceIdentity: selectedSource.map { sourceIdentities.identity($0) } ?? "", sourceEpisodes: selectedSource?.episodes ?? [], sourceName: selectedSource?.name ?? "", sourceReferenceIdentity: selectedSource?.referenceIdentity, category: detail.summary.categoryName,
-                    selectedID: primaryEpisode?.id, fallbackURL: detail.summary.posterURL,
-                    onSelect: { selectedTMDBEpisodeID = $0.episode.id }, onPlay: playSelectedEpisode)
-                    .padding(.horizontal, DetailPageLayout.horizontalPadding).padding(.vertical, 18)
-            } else {
             VStack(alignment: .leading, spacing: 18) {
                 if !regular.isEmpty {
                     EpisodeSection(
@@ -749,7 +815,6 @@ struct DetailView: View {
             .padding(.horizontal, DetailPageLayout.horizontalPadding)
             .padding(.top, 18)
             .padding(.bottom, 24)
-            }
         }
     }
 
@@ -877,6 +942,7 @@ struct DetailView: View {
         guard let source = selectedSource else {
             preparedPresentations = []
             preparedRangeOptions = []
+            preparedSource = nil
             isPreparingEpisodes = false
             return
         }
@@ -893,6 +959,7 @@ struct DetailView: View {
         guard !Task.isCancelled, selectedSource?.id == sourceID else { return }
         preparedPresentations = snapshot.values
         preparedRangeOptions = snapshot.rangeOptions
+        preparedSource = source
         if let rangeID = selectedRangeID,
            !snapshot.rangeOptions.contains(where: { $0.id == rangeID }) {
             selectedRangeID = nil

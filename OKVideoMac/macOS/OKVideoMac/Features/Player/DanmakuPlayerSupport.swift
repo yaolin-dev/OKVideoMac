@@ -484,8 +484,9 @@ final class DanmakuDisplayDriver {
             let targetTime = self.targetTime
             if self.pending == ticket { self.pending = nil }
             self.lock.unlock()
-            // An expired deadline cannot produce a frame for that refresh.
-            if deliver, targetTime > ProcessInfo.processInfo.systemUptime { self.frame(targetTime) }
+            // This callback admits/reclaims comments; Core Animation owns motion.
+            // Consume the newest time even after a main-loop stall, never a backlog.
+            if deliver { self.frame(max(targetTime, ProcessInfo.processInfo.systemUptime)) }
         }
     }
     func stop() {
@@ -631,6 +632,7 @@ final class DanmakuOverlayNSView: NSView {
     private var timeline = DanmakuTimeline(comments: [])
     private var timelineRevision: UInt64?
     private var clock = DanmakuClock()
+    private var animationTimebase = DanmakuAnimationTimebase()
     private var generation: UInt64 = 1
     private var lastPresentedMediaTime: TimeInterval?
     private var active: [ActiveComment] = []
@@ -645,6 +647,7 @@ final class DanmakuOverlayNSView: NSView {
     private var displayArea: DanmakuDisplayArea = .upperHalf
     private var density: DanmakuDensity = .medium
     private let spriteRoot = CALayer()
+    static let scrollingAnimationKey = "com.okvideomac.danmaku.scroll"
     var rasterizationCount: Int { rasters.rasterizationCount }
     var preparedRasterBytes: Int { rasters.bytes }
     private(set) var renderedFrameCount = 0
@@ -726,7 +729,13 @@ final class DanmakuOverlayNSView: NSView {
             isBuffering: snapshot.isPausedForCache || snapshot.status == .buffering,
             isSeeking: snapshot.isSeeking, generation: generation)
         reset = reset || discontinuity
-        if reset { resetPresentation(at: clock.currentTime(at: now)) }
+        // With no visible trajectory there is nothing to preserve. A cold start
+        // or resume must admit already prepared comments at the latest media time.
+        synchronizeAnimationTime(at: now, reset: reset || active.isEmpty)
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        spriteRoot.opacity = Float(commentOpacity)
+        CATransaction.commit()
+        if reset { resetPresentation(at: animationTimebase.currentTime(at: now)) }
         refreshDriver()
         prepareRasters(at: clock.currentTime(at: now))
         if !isDisplayDriverRunning { renderFrame(at: now) }
@@ -735,12 +744,39 @@ final class DanmakuOverlayNSView: NSView {
         super.layout()
         CATransaction.begin(); CATransaction.setDisableActions(true)
         spriteRoot.frame = bounds
+        for item in active { positionFixedComment(item) }
         CATransaction.commit()
         scrollingScheduler.resize(laneCount: scrollingLaneCount)
         refreshDriver()
         if !isDisplayDriverRunning { renderFrame(at: ProcessInfo.processInfo.systemUptime) }
     }
-    /// Main-thread frame entry shared by the display link and deterministic rendering tests.
+    private func synchronizeAnimationTime(at uptime: TimeInterval, reset: Bool) {
+        guard animationTimebase.synchronize(mediaTime: clock.currentTime(at: uptime), at: uptime,
+            rate: clock.rate, advancing: clock.isAdvancing, reset: reset) else { return }
+        let hostNow = ProcessInfo.processInfo.systemUptime
+        let parentNow = layer?.convertTime(CACurrentMediaTime(), from: nil) ?? CACurrentMediaTime()
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        spriteRoot.beginTime = parentNow
+        spriteRoot.timeOffset = animationTimebase.currentTime(at: hostNow)
+        spriteRoot.speed = Float(animationTimebase.rate)
+        CATransaction.commit()
+    }
+
+    private func positionFixedComment(_ item: ActiveComment) {
+        guard item.mode != .scrolling else { return }
+        let y = item.mode == .bottom
+            ? max(0, bounds.height * displayArea.fraction - CGFloat(item.lane + 1) * item.laneHeight)
+            : CGFloat(item.lane) * item.laneHeight
+        item.layer.position = CGPoint(x: max(0, (bounds.width - item.width) / 2), y: y)
+    }
+
+    #if DEBUG || OKVIDEO_PERFORMANCE_TEST
+    func animationMediaTime(at uptime: TimeInterval) -> TimeInterval { animationTimebase.currentTime(at: uptime) }
+    func stopSchedulingForTesting() { displayDriver?.stop() }
+    #endif
+
+    /// Admission, reclamation and backing-scale refresh only. Existing scrolling
+    /// layers keep one explicit animation, independent of main-thread frame work.
     func renderFrame(at uptime: TimeInterval) {
         guard !timeline.comments.isEmpty, bounds.width > 0 else { return }
         #if DEBUG || OKVIDEO_PERFORMANCE_TEST
@@ -748,7 +784,7 @@ final class DanmakuOverlayNSView: NSView {
         #endif
         // The previous frame may have targeted a refresh just after a pause
         // observation. Do not move visible glyphs backwards during that handoff.
-        let mediaTime = max(lastFrameMediaTime ?? 0, clock.currentTime(at: uptime))
+        let mediaTime = max(lastFrameMediaTime ?? 0, animationTimebase.currentTime(at: uptime))
         lastFrameMediaTime = mediaTime
         renderedFrameCount += 1
         CATransaction.begin(); CATransaction.setDisableActions(true)
@@ -776,15 +812,6 @@ final class DanmakuOverlayNSView: NSView {
                 active[index].layer.contents = raster.image
                 active[index].layer.contentsScale = CGFloat(replacementKey.scale)
             }
-            let item = active[index]
-            let y = item.mode == .bottom
-                ? max(0, bounds.height * displayArea.fraction - CGFloat(item.lane + 1) * item.laneHeight)
-                : CGFloat(item.lane) * item.laneHeight
-            let elapsed = CGFloat(max(0, mediaTime - item.startTime))
-            let x = item.mode == .scrolling ? item.originX - elapsed * item.velocity
-                : max(0, (bounds.width - item.width) / 2)
-            item.layer.position = CGPoint(x: x, y: y)
-            item.layer.opacity = Float(commentOpacity)
         }
     }
     private func presentComments(through mediaTime: TimeInterval) {
@@ -857,8 +884,22 @@ final class DanmakuOverlayNSView: NSView {
         let sprite = CALayer()
         sprite.anchorPoint = .zero; sprite.bounds = CGRect(x: 0, y: 0, width: width, height: height)
         sprite.contents = raster.image; sprite.contentsScale = CGFloat(rasterKey(comment).scale)
-        sprite.opacity = Float(commentOpacity)
+        sprite.position = CGPoint(x: comment.mode == .scrolling ? -width : max(0, (bounds.width - width) / 2),
+            y: comment.mode == .bottom
+                ? max(0, bounds.height * displayArea.fraction - CGFloat(lane + 1) * laneHeight)
+                : CGFloat(lane) * laneHeight)
         spriteRoot.addSublayer(sprite)
+        if comment.mode == .scrolling {
+            let movement = CABasicAnimation(keyPath: "position.x")
+            movement.fromValue = bounds.width
+            movement.toValue = -width
+            movement.beginTime = time == 0 ? 0.000_000_001 : time
+            movement.duration = lifetime
+            movement.timingFunction = CAMediaTimingFunction(name: .linear)
+            movement.fillMode = .both
+            movement.isRemovedOnCompletion = false
+            sprite.add(movement, forKey: Self.scrollingAnimationKey)
+        }
         rasterBytes += bytes
         active.append(ActiveComment(lane: lane, startTime: time, width: width, laneHeight: laneHeight,
             lifetime: lifetime, mode: comment.mode, layer: sprite, bytes: bytes,
@@ -942,14 +983,9 @@ struct PlayerDanmakuPanel: View {
                             .foregroundColor(.white.opacity(0.84))
                             .padding(.horizontal, 9)
                             .frame(height: 30)
-                            .background(
-                                coordinator.selectedSource?.id == source.id
-                                    ? Color.accentColor.opacity(0.30)
-                                    : Color.white.opacity(0.055),
-                                in: RoundedRectangle(cornerRadius: 6)
-                            )
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(PlayerPanelButtonStyle(selected: coordinator.selectedSource?.id == source.id,
+                            cornerRadius: 6, restingOpacity: 0.055))
                     }
                 }
             }

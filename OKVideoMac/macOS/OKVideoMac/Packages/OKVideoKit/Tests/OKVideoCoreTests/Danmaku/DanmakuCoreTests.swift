@@ -1,6 +1,42 @@
 import XCTest
 @testable import OKVideoCore
 
+final class DanmakuAnimationTimebaseTests: XCTestCase {
+    func testRefreshRatesAndPlaybackRatesShareOneContinuousTrajectory() {
+        for hz in [24, 30, 60, 90, 120, 144, 165, 240] {
+            for rate in [0.25, 0.5, 1.0, 1.5, 2.0] {
+                var timebase = DanmakuAnimationTimebase()
+                timebase.synchronize(mediaTime: 10, at: 100, rate: rate, advancing: true, reset: true)
+                for frame in 1...(hz * 5) {
+                    let elapsed = Double(frame) / Double(hz)
+                    XCTAssertEqual(timebase.currentTime(at: 100 + elapsed), 10 + elapsed * rate, accuracy: 0.000_001)
+                }
+            }
+        }
+    }
+
+    func testObservationsNeverJumpAndPauseResumePreservePosition() {
+        var timebase = DanmakuAnimationTimebase()
+        timebase.synchronize(mediaTime: 10, at: 100, rate: 1, advancing: true, reset: true)
+        for tick in 1...100 {
+            let now = 100 + Double(tick) / 10
+            let before = timebase.currentTime(at: now)
+            timebase.synchronize(mediaTime: 10 + now - 100 + (tick % 2 == 0 ? 0.05 : -0.05),
+                at: now, rate: 1, advancing: true, reset: false)
+            XCTAssertEqual(timebase.currentTime(at: now), before, accuracy: 0.000_001)
+            XCTAssertTrue((0.98...1.02).contains(timebase.rate))
+        }
+        let beforePause = timebase.currentTime(at: 110)
+        timebase.synchronize(mediaTime: beforePause - 0.02, at: 110, rate: 1, advancing: false, reset: false)
+        XCTAssertEqual(timebase.currentTime(at: 120), beforePause)
+        timebase.synchronize(mediaTime: beforePause, at: 120, rate: 2, advancing: true, reset: false)
+        XCTAssertEqual(timebase.currentTime(at: 120), beforePause)
+        XCTAssertEqual(timebase.currentTime(at: 121), beforePause + 2, accuracy: 0.000_001)
+        timebase.synchronize(mediaTime: 3, at: 121, rate: 2, advancing: false, reset: true)
+        XCTAssertEqual(timebase.currentTime(at: 122), 3)
+    }
+}
+
 final class DanmakuCoreTests: XCTestCase {
     func testPlayerDecoderReadsNestedCatPawDanmaku() throws {
         let site = SiteConfiguration(

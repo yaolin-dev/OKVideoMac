@@ -228,11 +228,18 @@ import OKVideoPersistence
         XCTAssertEqual(state.isLivePlayback, live)
         let player = try MPVPlayerClient(teardownMode: .fullDestroy, audioPreference: .init(muted: true), mediaProxyResolver: { _ in .direct })
         var latest = PlayerSnapshot(), errors: [String] = []
+        var danmakuProbe: DanmakuOverlayNSView?
+        let danmakuTimeline = DanmakuTimeline(comments: (0..<500).map {
+            .init(id: "fullscreen-\($0)", time: 0.05 + Double($0) * 0.04, mode: .scrolling,
+                  fontSize: 25, color: 0xFFFFFF, text: "全屏连续运动验证 \($0)")
+        })
         let reader = Task { @MainActor in
             for await event in player.events {
                 if case .snapshot(let snapshot, _) = event {
                     latest = snapshot
                     state.playerSnapshotState.update(snapshot)
+                    danmakuProbe?.update(timeline: danmakuTimeline, timelineRevision: 1, snapshot: snapshot,
+                        offset: 0, fontScale: 1, opacity: 0.86, displayArea: .upperHalf, density: .medium)
                 }
             }
         }
@@ -243,6 +250,13 @@ import OKVideoPersistence
         let content = try XCTUnwrap(window.contentView)
         let composition = try XCTUnwrap(content.subviews.compactMap { $0 as? PlayerFullscreenContentView }.first)
         let overlay = try XCTUnwrap(content.subviews.compactMap { $0 as? PlayerFullscreenOverlayView }.first)
+        if !live {
+            let viewport = try XCTUnwrap(content.subviews.compactMap { $0 as? PlayerDanmakuViewport }.first)
+            let probe = DanmakuOverlayNSView(frame: viewport.bounds)
+            probe.autoresizingMask = [.width, .height]
+            viewport.addSubview(probe); danmakuProbe = probe
+            XCTAssertFalse(probe.isDescendant(of: composition))
+        }
         // Match the production window's finite AppKit container and retained
         // hosting controller, including the SwiftUI-owned render host.
         let videoController = NSHostingController(rootView: ZStack {
@@ -426,6 +440,13 @@ import OKVideoPersistence
                 XCTAssertEqual(window.frame.height, originalFrame.height, accuracy: 1)
                 XCTAssertTrue(errors.isEmpty, "Render errors: \(errors)")
             }
+            if let danmakuProbe {
+                XCTAssertGreaterThan(danmakuProbe.activeCommentCount, 0, "Real playback must continue admitting comments after fullscreen cycles")
+                let sprites = try XCTUnwrap(danmakuProbe.layer?.sublayers?.first?.sublayers)
+                XCTAssertTrue(sprites.allSatisfy { $0.animation(forKey: DanmakuOverlayNSView.scrollingAnimationKey) != nil })
+                XCTAssertTrue(CATransform3DIsIdentity(try XCTUnwrap(danmakuProbe.superview?.layer).transform))
+                XCTAssertLessThanOrEqual(danmakuProbe.rasterBytes + danmakuProbe.preparedRasterBytes, DanmakuOverlayNSView.maximumRasterBytes)
+            }
             withExtendedLifetime(videoController) {}
             surface.tearDown(); controller.dismiss(); reader.cancel(); await player.shutdown(); await state.closePlayer()
         } catch {
@@ -470,6 +491,8 @@ import OKVideoPersistence
         let host = NSHostingView(rootView: root)
         host.frame = container.bounds; host.autoresizingMask = [.width, .height]
         container.addSubview(host)
+        let danmaku = PlayerDanmakuViewport(frame: container.frame)
+        window.contentView?.addSubview(danmaku)
         let overlay = PlayerFullscreenOverlayView(frame: container.frame)
         window.contentView?.addSubview(overlay)
         let controls = PlayerOverlayHostingView(rootView: VStack {
@@ -507,7 +530,9 @@ import OKVideoPersistence
             let original = window.frame
             let originalOpaque = window.isOpaque
             let originalShadow = window.hasShadow
-            XCTAssertTrue(presentation.prepareToEnter(window: window, surface: surface, aspectRatio: 4.0/3, presentationView: container))
+            let danmaku = try XCTUnwrap(window.contentView?.subviews.compactMap { $0 as? PlayerDanmakuViewport }.first)
+            XCTAssertTrue(presentation.prepareToEnter(window: window, surface: surface, aspectRatio: 4.0/3,
+                presentationView: container, danmakuView: danmaku))
             let transition = WindowTransitionCoordinator.state(for: window)
             transition.beginFullScreen(entering: true)
             presentation.startEntering(window: window, screen: try XCTUnwrap(window.screen), duration: 2)
@@ -524,6 +549,11 @@ import OKVideoPersistence
             XCTAssertGreaterThan(from.m11, 0); XCTAssertLessThan(from.m11, 1)
             XCTAssertEqual(from.m11, from.m22, accuracy: 0.000001)
             XCTAssertTrue(surface.isDescendant(of: container))
+            XCTAssertFalse(danmaku.isDescendant(of: container))
+            let textMovement = try XCTUnwrap(danmaku.layer?.animation(forKey: PlayerDanmakuViewport.animationKey) as? CABasicAnimation)
+            let textStart = try XCTUnwrap(textMovement.fromValue as? NSValue).caTransform3DValue
+            XCTAssertEqual(textStart.m11, 1); XCTAssertEqual(textStart.m22, 1)
+            XCTAssertNil(danmaku.hitTest(.zero))
             let overlay = try XCTUnwrap(button.superview as? PlayerFullscreenOverlayView)
             XCTAssertFalse(overlay.isDescendant(of: container), "Controls must not inherit video scaling")
             XCTAssertTrue(CATransform3DIsIdentity(overlay.layer!.transform))
@@ -634,6 +664,7 @@ import OKVideoPersistence
         controller.prewarm(); defer { controller.dismiss() }
         let content = try XCTUnwrap(controller.windowForTesting?.contentView)
         XCTAssertEqual(content.subviews.filter { $0 is PlayerFullscreenContentView }.count, 1)
+        XCTAssertEqual(content.subviews.filter { $0 is PlayerDanmakuViewport }.count, 1)
         XCTAssertEqual(content.subviews.filter { $0 is PlayerFullscreenOverlayView }.count, 1)
     }
 }

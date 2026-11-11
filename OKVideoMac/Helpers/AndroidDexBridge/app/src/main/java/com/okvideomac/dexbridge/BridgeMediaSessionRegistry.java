@@ -488,6 +488,7 @@ final class BridgeMediaSessionRegistry {
         final MediaRequestNetworkPolicy networkPolicy;
         final boolean aliOriginalFileCompatibility;
         volatile boolean cancelOnDisconnect;
+        volatile boolean staticDASH;
         final Map<String, String> headers;
         final Map<String, DashManifest.Resource> dashResources = new LinkedHashMap<>();
         final Map<List<String>, String> dashResourceIDs = new LinkedHashMap<>();

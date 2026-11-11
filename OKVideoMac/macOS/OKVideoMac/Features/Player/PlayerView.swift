@@ -13,6 +13,7 @@ struct PlayerView: View {
     @State private var scrubRevision = UUID()
     @State private var controlsVisible = true
     @StateObject private var liveInfo = PlayerLiveInfoInteraction()
+    @StateObject private var channelPickerMemory = PlayerChannelPickerMemory()
     @State private var playbackStatusActionsHeight: CGFloat = 44
     @StateObject private var controlTooltip = PlayerControlTooltipState()
     @State private var controlsHovering = false
@@ -191,7 +192,7 @@ struct PlayerView: View {
         .background(Color.clear)
         .modifier(PlayerProgressPreviewOverlay(
             fraction: progressPreviewFraction,
-            text: progressPreviewFraction.flatMap { PlayerProgressHoverPolicy.time(fraction: $0, duration: state.playerSnapshot.duration) }.map(formatTime)
+            text: progressPreviewFraction.flatMap { PlayerProgressHoverPolicy.time(fraction: $0, duration: playerSnapshotState.displayedDuration) }.map(formatTime)
         ))
         .modifier(PlayerControlTooltipOverlay(model: controlTooltip))
         .onChange(of: controlsVisible) { visible in
@@ -546,6 +547,7 @@ struct PlayerView: View {
                 }
 
                 if (isFailed || liveLoadingSlow), state.canRetryCurrentPlayback,
+                   state.playbackPreparationIssue != .missingParser,
                    !state.canRetryHistoryPlayback, !state.canOpenNodeConfigurationForPlaybackFailure {
                     HStack(spacing: 12) {
                         Button(L10n.string("common.retry", fallback: "Try Again")) {
@@ -557,6 +559,19 @@ struct PlayerView: View {
                                 Task { await state.switchLiveChannel(by: 1) }
                             }
                             .buttonStyle(.bordered)
+                        }
+                    }
+                }
+
+                if isFailed, state.playbackPreparationIssue == .missingParser {
+                    HStack(spacing: 12) {
+                        Button(L10n.string("player.parsing.settings", fallback: "Playback Configuration")) {
+                            Task { await state.openPlaybackConfigurationSettings() }
+                        }
+                        .buttonStyle(.bordered)
+                        if let url = state.playbackOriginalPageURL {
+                            Link(L10n.string("player.parsing.open-page", fallback: "Open Original Page"), destination: url)
+                                .buttonStyle(.bordered)
                         }
                     }
                 }
@@ -730,7 +745,7 @@ struct PlayerView: View {
     }
 
     private var playbackTimeText: String {
-        "\(formatTime(displayedPosition)) / \(formatTime(state.playerSnapshot.duration))"
+        "\(formatTime(displayedPosition)) / \(formatTime(playerSnapshotState.displayedDuration))"
     }
 
     private var playbackTimeWidth: CGFloat {
@@ -861,7 +876,7 @@ struct PlayerView: View {
     private var progressPreviewFraction: Double? {
         guard controlsVisible, state.isPlayerWindowKey, !isFullScreenTransitioning, state.canSeekPlayback else { return nil }
         if let scrubPosition {
-            return PlayerTimelinePolicy.fraction(value: scrubPosition, total: state.playerSnapshot.duration)
+            return PlayerTimelinePolicy.fraction(value: scrubPosition, total: playerSnapshotState.displayedDuration)
         }
         return shouldShowStatusOverlay ? nil : progressHoverFraction
     }
@@ -877,7 +892,7 @@ struct PlayerView: View {
                 get: { displayedPosition },
                 set: { scrubRevision = UUID(); scrubPosition = $0 }
             ),
-            total: max(state.playerSnapshot.duration, 1),
+            total: max(playerSnapshotState.displayedDuration, 1),
             bufferedPercent: state.playerSnapshot.bufferedPercent,
             accentColor: playerAccentColor,
             isEmphasized: isProgressHovering,
@@ -1017,7 +1032,7 @@ struct PlayerView: View {
                 .foregroundStyle(.white)
                 .frame(width: 36, height: 36)
                 .contentShape(Rectangle())
-                .modifier(PlayerControlHoverEffect(enabled: !disabled, cornerRadius: 10))
+                .modifier(PlayerControlHoverEffect(enabled: !disabled))
         }
         .buttonStyle(PlayerTransportButtonStyle())
         .opacity(disabled ? 0.30 : 1)
@@ -1081,7 +1096,8 @@ struct PlayerView: View {
         panel: PlayerUtilityPanel,
         help: String
     ) -> some View {
-        let isActive = activeUtilityPanel == panel
+        let isActive = activeUtilityPanel == panel || (panel == .settings &&
+            [.audio, .danmaku, .information, .playbackOptions].contains(where: { $0 == activeUtilityPanel }))
         return Button {
             if isActive || panel != .episodes {
                 inspectedPlayerEpisode = nil
@@ -1100,6 +1116,7 @@ struct PlayerView: View {
                 .foregroundStyle(Color.white.opacity(isActive ? 1 : 0.96))
                 .frame(width: utilityButtonSize, height: utilityButtonSize)
                 .contentShape(Rectangle())
+                .background(Circle().fill(Color.white.opacity(isActive ? 0.10 : 0)))
                 .modifier(PlayerControlHoverEffect())
         }
         .buttonStyle(.plain)
@@ -1131,13 +1148,20 @@ struct PlayerView: View {
             playerPanel(width: 420, maximumSize: maximumSize) {
                 PlaybackInformationPanel(info: state.playerSnapshot.mediaInfo,
                     originalName: state.playerSnapshot.mediaInfo == nil ? nil : state.currentPlayerEpisodePresentation?.originalName,
-                    duration: state.playerSnapshot.duration,
+                    duration: playerSnapshotState.displayedDuration,
                     selectedAudioTrack: state.playerSnapshot.tracks.first { $0.type == .audio && $0.isSelected },
                     networkRoute: state.playerSnapshot.mediaNetworkRoute,
                     networkSpeed: state.playerNetworkSpeedDescription)
             }
         case .settings:
             playbackSettingsPanel(maximumSize: maximumSize)
+        case .playbackOptions:
+            playerPanel(width: 370, maximumSize: maximumSize) {
+                VStack(alignment: .leading, spacing: 12) {
+                    panelHeader(title: L10n.string("player.picture-sound", fallback: "Picture & Sound"), detail: nil)
+                    pictureAndSoundSettings
+                }
+            }
         }
     }
 
@@ -1151,11 +1175,12 @@ struct PlayerView: View {
     }
 
     private func channelPanel(maximumSize: CGSize) -> some View {
-        playerPanel(width: 370, maximumSize: maximumSize, scrollContent: false) {
-            PlayerChannelPicker(channels: state.playerLiveChannels, currentID: state.livePlaybackChannel?.id,
-                title: resourceControlTitle, select: { id in
+        playerPanel(width: 570, maximumSize: maximumSize, scrollContent: false) {
+            PlayerChannelPicker(directory: state.playerChannelDirectory, currentID: state.livePlaybackChannel?.id,
+                title: resourceControlTitle, memory: channelPickerMemory, initialGroup: state.playerInitialChannelGroup, epg: state.liveEPG,
+                source: state.livePlaybackSourceID, select: { id, group in
                     guard let source = state.livePlaybackSourceID else { return }
-                    Task { await state.selectPlayerLiveChannel(id, source: source) }
+                    Task { await state.selectPlayerLiveChannel(id, source: source, group: group) }
                     activeUtilityPanel = nil
                     scheduleControlsHide()
                 }, close: {
@@ -1163,6 +1188,7 @@ struct PlayerView: View {
                     scheduleControlsHide()
                 })
                 .frame(height: min(490, max(1, maximumSize.height - 64)))
+
         }
     }
 
@@ -1582,191 +1608,204 @@ struct PlayerView: View {
                     settingsDestination(.audio, symbol: "waveform", title: L10n.string("player.audio-tracks", fallback: "Audio Tracks"))
                     settingsDestination(.danmaku, symbol: "text.bubble", title: L10n.string("player.danmaku", fallback: "Danmaku"))
                     settingsDestination(.information, symbol: "info.circle", title: L10n.string("player.info.title", fallback: "Playback Information"))
-                    panelDivider
+                    if state.livePlaybackChannel == nil {
+                        panelDivider
 
-                    HStack {
-                        Text(L10n.string("player.autoplay-next", fallback: "Autoplay Next Episode"))
-                        Spacer()
-                        Toggle(
-                            "",
-                            isOn: Binding(
-                                get: { state.autoPlayNextEpisode },
-                                set: { enabled in
+                        HStack {
+                            Text(L10n.string("player.autoplay-next", fallback: "Autoplay Next Episode"))
+                            Spacer()
+                            Toggle(
+                                "",
+                                isOn: Binding(
+                                    get: { state.autoPlayNextEpisode },
+                                    set: { enabled in
+                                        Task {
+                                            await state.setAutoPlayNextEpisode(enabled)
+                                        }
+                                    }
+                                )
+                            )
+                            .labelsHidden()
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                        }
+
+                        panelDivider
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text(
+                                L10n.string(
+                                    "player.skip.title",
+                                    fallback: "Skip Opening and Ending"
+                                )
+                            )
+                            .font(.system(size: 13, weight: .semibold))
+
+                            Toggle(
+                                L10n.string(
+                                    "player.skip.all-episodes",
+                                    fallback: "Apply to All Episodes on This Line"
+                                ),
+                                isOn: Binding(
+                                    get: {
+                                        state.playbackSkipAppliesToAllEpisodes
+                                    },
+                                    set: {
+                                        state.setPlaybackSkipAppliesToAllEpisodes($0)
+                                    }
+                                )
+                            )
+                            .toggleStyle(.checkbox)
+
+                            playbackSkipEditorRow(
+                                title: L10n.string(
+                                    "player.skip.opening",
+                                    fallback: "Opening"
+                                ),
+                                value: state.playbackSkipOpeningEnd,
+                                enabled: state.playbackSkipOpeningEnabled,
+                                setTitle: L10n.string(
+                                    "player.skip.set-opening",
+                                    fallback: "Set Current Position as Opening End"
+                                ),
+                                canMark: state.canMarkPlaybackOpening,
+                                setEnabled: { enabled in
                                     Task {
-                                        await state.setAutoPlayNextEpisode(enabled)
+                                        await state.setPlaybackOpeningSkipEnabled(
+                                            enabled
+                                        )
+                                    }
+                                },
+                                adjust: { delta in
+                                    Task {
+                                        await state.adjustPlaybackOpening(by: delta)
+                                    }
+                                },
+                                mark: {
+                                    Task {
+                                        await state.markPlaybackOpeningAtCurrentPosition()
                                     }
                                 }
                             )
-                        )
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                    }
 
-                    panelDivider
-
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text(
-                            L10n.string(
-                                "player.skip.title",
-                                fallback: "Skip Opening and Ending"
-                            )
-                        )
-                        .font(.system(size: 13, weight: .semibold))
-
-                        Toggle(
-                            L10n.string(
-                                "player.skip.all-episodes",
-                                fallback: "Apply to All Episodes on This Line"
-                            ),
-                            isOn: Binding(
-                                get: {
-                                    state.playbackSkipAppliesToAllEpisodes
+                            playbackSkipEditorRow(
+                                title: L10n.string(
+                                    "player.skip.ending",
+                                    fallback: "Ending"
+                                ),
+                                value: state.playbackSkipEndingDuration,
+                                enabled: state.playbackSkipEndingEnabled,
+                                setTitle: L10n.string(
+                                    "player.skip.set-ending",
+                                    fallback: "Set Current Position as Ending Start"
+                                ),
+                                canMark: state.canMarkPlaybackEnding,
+                                setEnabled: { enabled in
+                                    Task {
+                                        await state.setPlaybackEndingSkipEnabled(
+                                            enabled
+                                        )
+                                    }
                                 },
-                                set: {
-                                    state.setPlaybackSkipAppliesToAllEpisodes($0)
+                                adjust: { delta in
+                                    Task {
+                                        await state.adjustPlaybackEnding(by: delta)
+                                    }
+                                },
+                                mark: {
+                                    Task {
+                                        await state.markPlaybackEndingAtCurrentPosition()
+                                    }
                                 }
                             )
-                        )
-                        .toggleStyle(.checkbox)
 
-                        playbackSkipEditorRow(
-                            title: L10n.string(
-                                "player.skip.opening",
-                                fallback: "Opening"
-                            ),
-                            value: state.playbackSkipOpeningEnd,
-                            enabled: state.playbackSkipOpeningEnabled,
-                            setTitle: L10n.string(
-                                "player.skip.set-opening",
-                                fallback: "Set Current Position as Opening End"
-                            ),
-                            canMark: state.canMarkPlaybackOpening,
-                            setEnabled: { enabled in
+                            Button(
+                                L10n.string(
+                                    "player.skip.clear",
+                                    fallback: "Clear These Skip Points"
+                                )
+                            ) {
                                 Task {
-                                    await state.setPlaybackOpeningSkipEnabled(
-                                        enabled
-                                    )
-                                }
-                            },
-                            adjust: { delta in
-                                Task {
-                                    await state.adjustPlaybackOpening(by: delta)
-                                }
-                            },
-                            mark: {
-                                Task {
-                                    await state.markPlaybackOpeningAtCurrentPosition()
+                                    await state.clearSelectedPlaybackSkipRule()
                                 }
                             }
-                        )
-
-                        playbackSkipEditorRow(
-                            title: L10n.string(
-                                "player.skip.ending",
-                                fallback: "Ending"
-                            ),
-                            value: state.playbackSkipEndingDuration,
-                            enabled: state.playbackSkipEndingEnabled,
-                            setTitle: L10n.string(
-                                "player.skip.set-ending",
-                                fallback: "Set Current Position as Ending Start"
-                            ),
-                            canMark: state.canMarkPlaybackEnding,
-                            setEnabled: { enabled in
-                                Task {
-                                    await state.setPlaybackEndingSkipEnabled(
-                                        enabled
-                                    )
-                                }
-                            },
-                            adjust: { delta in
-                                Task {
-                                    await state.adjustPlaybackEnding(by: delta)
-                                }
-                            },
-                            mark: {
-                                Task {
-                                    await state.markPlaybackEndingAtCurrentPosition()
-                                }
-                            }
-                        )
-
-                        Button(
-                            L10n.string(
-                                "player.skip.clear",
-                                fallback: "Clear These Skip Points"
-                            )
-                        ) {
-                            Task {
-                                await state.clearSelectedPlaybackSkipRule()
-                            }
+                            .buttonStyle(.link)
+                            .font(.caption)
                         }
-                        .buttonStyle(.link)
-                        .font(.caption)
+
                     }
 
-                    panelDivider
-                    panelOptionGrid(
-                        title: L10n.string("player.speed", fallback: "Playback Speed"),
-                        values: speeds.map(formatPlaybackSpeed),
-                        selected: formatPlaybackSpeed(state.playerSnapshot.speed)
-                    ) { selectedSpeed in
-                        guard let index = speeds.map(formatPlaybackSpeed)
-                            .firstIndex(of: selectedSpeed) else { return }
-                        Task { await state.setPlayerSpeed(speeds[index]) }
-                    }
-
-                    panelOptionGrid(
-                        title: L10n.string("player.aspect-ratio", fallback: "Aspect Ratio"),
-                        values: ["automatic", "16:9", "4:3", "2.35:1"],
-                        selected: state.playerAspectRatio ?? "automatic",
-                        displayTitle: { value in
-                            value == "automatic"
-                                ? L10n.string("common.automatic", fallback: "Automatic")
-                                : value
+                    if !state.isLivePlayback {
+                        panelDivider
+                        panelOptionGrid(
+                            title: L10n.string("player.speed", fallback: "Playback Speed"),
+                            values: speeds.map(formatPlaybackSpeed),
+                            selected: formatPlaybackSpeed(state.playerSnapshot.speed)
+                        ) { selectedSpeed in
+                            guard let index = speeds.map(formatPlaybackSpeed)
+                                .firstIndex(of: selectedSpeed) else { return }
+                            Task { await state.setPlayerSpeed(speeds[index]) }
                         }
-                    ) { ratio in
-                        Task {
-                            await state.setPlayerAspectRatio(
-                                ratio == "automatic" ? nil : ratio
-                            )
-                        }
+
                     }
 
-                    HStack {
-                        Text(L10n.string("player.hardware-decoding", fallback: "Hardware Decoding"))
-                        Spacer()
-                        Toggle(
-                            "",
-                            isOn: Binding(
-                                get: { state.playerHardwareDecoding },
-                                set: { _ in
-                                    Task { await state.togglePlayerHardwareDecoding() }
-                                }
-                            )
-                        )
-                        .labelsHidden()
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                    }
+                    settingsDestination(.playbackOptions, symbol: "slider.horizontal.3",
+                        title: L10n.string("player.picture-sound", fallback: "Picture & Sound"))
+                }
+            }
+        }
+    }
 
-                    panelStepperRow(
-                        title: L10n.string("player.audio-delay", fallback: "Audio Delay"),
-                        value: L10n.string("player.seconds", fallback: "%.1f sec", state.playerAudioDelay),
-                        decrease: {
-                            Task { await state.adjustPlayerAudioDelay(by: -0.1) }
-                        },
-                        increase: {
-                            Task { await state.adjustPlayerAudioDelay(by: 0.1) }
+    private var pictureAndSoundSettings: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            panelOptionGrid(
+                title: L10n.string("player.aspect-ratio", fallback: "Aspect Ratio"),
+                values: ["automatic", "16:9", "4:3", "2.35:1"],
+                selected: state.playerAspectRatio ?? "automatic",
+                displayTitle: { value in
+                    value == "automatic"
+                        ? L10n.string("common.automatic", fallback: "Automatic")
+                        : value
+                }
+            ) { ratio in
+                Task {
+                    await state.setPlayerAspectRatio(
+                        ratio == "automatic" ? nil : ratio
+                    )
+                }
+            }
+
+            HStack {
+                Text(L10n.string("player.hardware-decoding", fallback: "Hardware Decoding"))
+                Spacer()
+                Toggle(
+                    "",
+                    isOn: Binding(
+                        get: { state.playerHardwareDecoding },
+                        set: { _ in
+                            Task { await state.togglePlayerHardwareDecoding() }
                         }
                     )
+                )
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+            }
 
-                    panelDivider
-                    panelActionButton(L10n.string("player.save-screenshot", fallback: "Save Screenshot…")) {
-                        chooseScreenshotLocation()
-                    }
+            panelStepperRow(
+                title: L10n.string("player.audio-delay", fallback: "Audio Delay"),
+                value: L10n.string("player.seconds", fallback: "%.1f sec", state.playerAudioDelay),
+                decrease: {
+                    Task { await state.adjustPlayerAudioDelay(by: -0.1) }
+                },
+                increase: {
+                    Task { await state.adjustPlayerAudioDelay(by: 0.1) }
                 }
+            )
+
+            panelDivider
+            panelActionButton(L10n.string("player.save-screenshot", fallback: "Save Screenshot…")) {
+                chooseScreenshotLocation()
             }
         }
     }
@@ -1885,10 +1924,11 @@ struct PlayerView: View {
                 Spacer()
                 Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
             }
-            .padding(.vertical, 7)
+            .padding(.horizontal, 10)
+            .frame(height: 38)
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PlayerPanelButtonStyle())
         .accessibilityIdentifier("player.settings.\(panel)")
         #if OKVIDEO_PERFORMANCE_TEST
         .background(PlayerPanelPresenterBoundary(name: "settings.\(panel)"))
@@ -1903,7 +1943,7 @@ struct PlayerView: View {
     ) -> some View {
         VStack(spacing: 8) {
             HStack {
-                if activeUtilityPanel == .audio || activeUtilityPanel == .danmaku || activeUtilityPanel == .information {
+                if activeUtilityPanel == .audio || activeUtilityPanel == .danmaku || activeUtilityPanel == .information || activeUtilityPanel == .playbackOptions {
                     Button {
                         activeUtilityPanel = .settings
                         keepControlsVisible()
@@ -1911,7 +1951,7 @@ struct PlayerView: View {
                         Label(L10n.string("player.settings", fallback: "Playback Settings"), systemImage: "chevron.left")
                             .font(.system(size: 12, weight: .medium))
                     }
-                    .buttonStyle(.plain)
+                    .buttonStyle(PlayerPanelButtonStyle())
                     .accessibilityIdentifier("player.settings.back")
                     #if OKVIDEO_PERFORMANCE_TEST
                     .background(PlayerPanelPresenterBoundary(name: "settings.back"))
@@ -1926,7 +1966,7 @@ struct PlayerView: View {
                         .frame(width: 28, height: 28)
                         .contentShape(Rectangle())
                 }
-                .buttonStyle(.plain)
+                .buttonStyle(PlayerPanelButtonStyle())
                 .playerControlHelp(L10n.string("common.close", fallback: "Close"))
                 .accessibilityLabel(L10n.string("common.close", fallback: "Close"))
                 #if OKVIDEO_PERFORMANCE_TEST
@@ -1941,19 +1981,7 @@ struct PlayerView: View {
         }
             .padding(14)
             .frame(width: min(width, maximumSize.width))
-            .background {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(.ultraThinMaterial)
-                    RoundedRectangle(cornerRadius: 14, style: .continuous)
-                        .fill(Color.black.opacity(0.38))
-                }
-            }
-            .overlay {
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .stroke(Color.white.opacity(0.07), lineWidth: 1)
-            }
-            .shadow(color: .black.opacity(0.25), radius: 16, y: 6)
+            .background(PlayerGlassBackground())
             .background(PlayerPanelDismissalBoundary {
                 inspectedPlayerEpisode = nil
                 activeUtilityPanel = nil
@@ -2006,13 +2034,9 @@ struct PlayerView: View {
             .foregroundColor(.white.opacity(selected ? 0.96 : 0.78))
             .padding(.horizontal, 10)
             .frame(height: 34)
-            .background(
-                selected ? Color.white.opacity(0.075) : .clear,
-                in: RoundedRectangle(cornerRadius: 7)
-            )
             .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PlayerPanelButtonStyle(selected: selected))
     }
 
     private var panelDivider: some View {
@@ -2053,7 +2077,7 @@ struct PlayerView: View {
                     in: RoundedRectangle(cornerRadius: 6)
                 )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PlayerPanelButtonStyle())
         .foregroundColor(.white.opacity(0.82))
     }
 
@@ -2072,7 +2096,7 @@ struct PlayerView: View {
                     in: RoundedRectangle(cornerRadius: 7)
                 )
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PlayerPanelButtonStyle())
     }
 
     private func panelOptionGrid(
@@ -2092,17 +2116,13 @@ struct PlayerView: View {
             ) {
                 ForEach(values, id: \.self) { value in
                     let isSelected = selected == value
-                    Button(displayTitle(value)) { action(value) }
-                        .buttonStyle(.plain)
+                    Button { action(value) } label: {
+                        Text(displayTitle(value))
                         .font(.system(size: 12, weight: .medium))
                         .foregroundColor(.white.opacity(isSelected ? 1 : 0.76))
                         .frame(maxWidth: .infinity, minHeight: 28)
-                        .background(
-                            isSelected
-                                ? playerAccentColor.opacity(0.46)
-                                : Color.white.opacity(0.055),
-                            in: RoundedRectangle(cornerRadius: 6)
-                        )
+                    }
+                    .buttonStyle(PlayerPanelButtonStyle(selected: isSelected, cornerRadius: 6, restingOpacity: 0.055))
                 }
             }
         }
@@ -2223,7 +2243,7 @@ struct PlayerView: View {
     private var displayedPosition: Double {
         min(
             max(scrubPosition ?? playerSnapshotState.displayedPosition, 0),
-            max(state.playerSnapshot.duration, 1)
+            max(playerSnapshotState.displayedDuration, 1)
         )
     }
 
@@ -2947,6 +2967,7 @@ private enum PlayerUtilityPanel: Equatable {
     case subtitles
     case danmaku
     case settings
+    case playbackOptions
 }
 
 private extension View {
@@ -4509,100 +4530,6 @@ enum PlayerChannelSearch {
     }
 }
 
-struct PlayerChannelPicker: View {
-    let channels: [LiveChannel]
-    let currentID: LiveChannel.ID?
-    let title: String
-    let select: (LiveChannel.ID) -> Void
-    let close: () -> Void
-    @State private var query = ""
-    @State private var highlightedID: LiveChannel.ID?
-
-    private var results: [LiveChannel] { PlayerChannelSearch.results(channels, query: query) }
-
-    var body: some View {
-        let matches = results
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text(title).font(.system(size: 15, weight: .semibold))
-                Spacer()
-                Text("\(matches.count)").font(.caption).foregroundStyle(.secondary)
-            }
-            PlayerChannelSearchField(text: $query, move: { move($0, in: matches) },
-                submit: { if let id = highlightedID, matches.contains(where: { $0.id == id }) { select(id) } },
-                escape: { if query.isEmpty { close() } else { query = "" } })
-                .frame(height: 30)
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 4) {
-                        ForEach(matches) { channel in
-                            Button { select(channel.id) } label: {
-                                HStack(spacing: 8) {
-                                    VStack(alignment: .leading, spacing: 3) {
-                                        Text(channel.name).font(.callout).lineLimit(1)
-                                        Text([channel.number, channel.groupName].compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · "))
-                                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                                    }
-                                    Spacer(minLength: 4)
-                                    if channel.id == currentID {
-                                        Label(L10n.string("player.channel.playing", fallback: "Playing"), systemImage: "checkmark")
-                                            .font(.caption2).foregroundStyle(.secondary)
-                                    }
-                                }
-                                .padding(.horizontal, 10).padding(.vertical, 8)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .background(RoundedRectangle(cornerRadius: 7).fill(.white.opacity(channel.id == highlightedID ? 0.13 : 0)))
-                                .contentShape(Rectangle())
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityIdentifier("player.channel.\(channel.id)")
-                            .id(channel.id)
-                        }
-                    }
-                }
-                .overlay {
-                    if matches.isEmpty {
-                        VStack(spacing: 12) {
-                            Text(L10n.string("player.channel.no-results", fallback: "No matching channels"))
-                                .foregroundStyle(.secondary)
-                            if !query.isEmpty {
-                                Button(L10n.string("player.channel.clear", fallback: "Clear Search")) { query = "" }
-                                    .buttonStyle(.plain)
-                            }
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    }
-                }
-                .onAppear {
-                    highlightedID = matches.first(where: { $0.id == currentID })?.id ?? matches.first?.id
-                    if let highlightedID { proxy.scrollTo(highlightedID, anchor: .center) }
-                }
-                .onChange(of: query) { value in
-                    highlightedID = value.isEmpty ? matches.first(where: { $0.id == currentID })?.id ?? matches.first?.id : matches.first?.id
-                    if let highlightedID { proxy.scrollTo(highlightedID, anchor: .center) }
-                }
-                .onChange(of: matches.map(\.id)) { ids in
-                    if query.isEmpty {
-                        highlightedID = ids.first(where: { $0 == currentID }) ?? ids.first
-                    } else if !ids.contains(highlightedID ?? "") {
-                        highlightedID = ids.first
-                    }
-                }
-                .onChange(of: highlightedID) { id in
-                    if let id { proxy.scrollTo(id, anchor: .center) }
-                }
-            }
-        }
-        .accessibilityIdentifier("player.channel-picker")
-    }
-
-    private func move(_ offset: Int, in matches: [LiveChannel]) {
-        guard !matches.isEmpty else { return }
-        let index = matches.firstIndex { $0.id == highlightedID } ?? (offset > 0 ? -1 : matches.count)
-        highlightedID = matches[min(max(index + offset, 0), matches.count - 1)].id
-    }
-}
-
 /// The native field editor owns typing and IME composition. The application's
 /// playback key monitor already yields to an editable NSTextView.
 struct PlayerChannelSearchField: NSViewRepresentable {
@@ -4610,6 +4537,7 @@ struct PlayerChannelSearchField: NSViewRepresentable {
     let move: (Int) -> Void
     let submit: () -> Void
     let escape: () -> Void
+    var horizontal: (Int) -> Void = { _ in }
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeNSView(context: Context) -> Field {
@@ -4659,6 +4587,12 @@ struct PlayerChannelSearchField: NSViewRepresentable {
             switch command {
             case #selector(NSResponder.moveDown(_:)): parent.move(1)
             case #selector(NSResponder.moveUp(_:)): parent.move(-1)
+            case #selector(NSResponder.moveLeft(_:)):
+                guard parent.text.isEmpty else { return false }
+                parent.horizontal(-1)
+            case #selector(NSResponder.moveRight(_:)):
+                guard parent.text.isEmpty else { return false }
+                parent.horizontal(1)
             case #selector(NSResponder.insertNewline(_:)): parent.submit()
             case #selector(NSResponder.cancelOperation(_:)): parent.escape()
             default: return false

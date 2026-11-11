@@ -265,6 +265,66 @@ final class PlayerFullscreenContentView: NSView {
     required init?(coder: NSCoder) { super.init(coder: coder); wantsLayer = true }
 }
 
+/// A separate viewport preserves danmaku's point sizes during video zooming.
+/// Existing layers stay mounted and only follow the window's translation.
+final class PlayerDanmakuViewport: NSView {
+    static let animationKey = "com.okvideomac.danmaku.fullscreen"
+    private struct Transition {
+        let entering: Bool
+        let windowedFrame: NSRect
+        let expectedFrame: NSRect
+        let deadline: TimeInterval
+    }
+    private var transition: Transition?
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        autoresizingMask = [.width, .height]
+    }
+    required init?(coder: NSCoder) { nil }
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    func beginFullscreen(entering: Bool, windowedFrame: NSRect, expectedFrame: NSRect, duration: TimeInterval) {
+        finishFullscreen()
+        transition = Transition(entering: entering, windowedFrame: windowedFrame,
+            expectedFrame: expectedFrame, deadline: ProcessInfo.processInfo.systemUptime + max(0, duration))
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        guard let request = transition, let window, let layer,
+              abs(window.frame.width - request.expectedFrame.width) < 1,
+              abs(window.frame.height - request.expectedFrame.height) < 1,
+              abs(bounds.width - request.expectedFrame.width) < 1 else { return }
+        transition = nil
+        // The AppKit container points upward; preserve the old top-left anchor.
+        let translation = CATransform3DMakeTranslation(
+            request.windowedFrame.minX - request.expectedFrame.minX,
+            request.windowedFrame.maxY - request.expectedFrame.maxY, 0)
+        let start = request.entering ? translation : CATransform3DIdentity
+        let end = request.entering ? CATransform3DIdentity : translation
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        layer.transform = end
+        let movement = CABasicAnimation(keyPath: "transform")
+        movement.fromValue = NSValue(caTransform3D: start)
+        movement.toValue = NSValue(caTransform3D: end)
+        movement.duration = max(0, request.deadline - ProcessInfo.processInfo.systemUptime)
+        movement.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        layer.add(movement, forKey: Self.animationKey)
+        CATransaction.commit()
+    }
+
+    func finishFullscreen() {
+        transition = nil
+        CATransaction.begin(); CATransaction.setDisableActions(true)
+        layer?.removeAnimation(forKey: Self.animationKey)
+        layer?.transform = CATransform3DIdentity
+        CATransaction.commit()
+    }
+}
+
 /// The overlay's own finite viewport defines its layout, including while it
 /// occupies a subrectangle of the temporary fullscreen-sized window.
 final class PlayerOverlayHostingView<Content: View>: NSHostingView<Content> {
@@ -434,12 +494,13 @@ final class PlayerFullscreenPresentation {
     private weak var window: NSWindow?
     private weak var surface: MPVOpenGLView?
     private weak var presentationView: NSView?
+    private weak var danmakuView: PlayerDanmakuViewport?
     private var windowedFrame: NSRect?
     private var windowedSurfaceFrame: NSRect?
     private var aspectRatio = 1.0
 
     func prepareToEnter(window: NSWindow, surface: MPVOpenGLView?, aspectRatio: Double,
-                        presentationView: NSView? = nil) -> Bool {
+                        presentationView: NSView? = nil, danmakuView: PlayerDanmakuViewport? = nil) -> Bool {
         guard let surface, surface.canAnimateFullscreen,
               surface.window === window, aspectRatio.isFinite, aspectRatio > 0,
               !WindowTransitionCoordinator.state(for: window).isClosing,
@@ -449,6 +510,7 @@ final class PlayerFullscreenPresentation {
               surface === composition || surface.isDescendant(of: composition) else { return false }
         cancel()
         self.presentationView = composition
+        self.danmakuView = danmakuView
         self.window = window
         self.surface = surface
         windowedFrame = window.frame
@@ -470,6 +532,8 @@ final class PlayerFullscreenPresentation {
         guard self.window === window,
               !WindowTransitionCoordinator.state(for: window).isClosing else { return }
         if let windowedSurfaceFrame {
+            danmakuView?.beginFullscreen(entering: true, windowedFrame: windowedSurfaceFrame,
+                expectedFrame: screen.frame, duration: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : duration)
             surface?.beginFullscreenPresentation(entering: true, duration: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : duration,
                 windowedSurfaceFrame: windowedSurfaceFrame, aspectRatio: aspectRatio,
                 expectedWindowFrame: screen.frame, presentationView: presentationView)
@@ -477,11 +541,15 @@ final class PlayerFullscreenPresentation {
         // Keep one full-sized drawable throughout the animation. Only the
         // live composition is uniformly transformed; video pixels keep changing.
         window.setFrame(screen.frame, display: false)
+        danmakuView?.layoutSubtreeIfNeeded()
     }
 
     func startExiting(window: NSWindow, duration: TimeInterval) {
         guard self.window === window, let windowedSurfaceFrame,
               !WindowTransitionCoordinator.state(for: window).isClosing else { return }
+        danmakuView?.beginFullscreen(entering: false, windowedFrame: windowedSurfaceFrame,
+            expectedFrame: window.frame, duration: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : duration)
+        danmakuView?.layoutSubtreeIfNeeded()
         surface?.beginFullscreenPresentation(entering: false, duration: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion ? 0 : duration,
             windowedSurfaceFrame: windowedSurfaceFrame, aspectRatio: aspectRatio,
             expectedWindowFrame: window.frame, presentationView: presentationView)
@@ -491,6 +559,7 @@ final class PlayerFullscreenPresentation {
         guard self.window === window else { return }
         guard !WindowTransitionCoordinator.state(for: window).isClosing else { cancel(); return }
         CATransaction.begin(); CATransaction.setDisableActions(true)
+        danmakuView?.finishFullscreen()
         surface?.finishFullscreenPresentation()
         if !isFullScreen, let windowedFrame {
             let visibleFrames = NSScreen.screens.map(\.visibleFrame)
@@ -508,6 +577,8 @@ final class PlayerFullscreenPresentation {
     }
 
     func cancel() {
+        danmakuView?.finishFullscreen()
+        danmakuView = nil
         surface?.finishFullscreenPresentation()
         surface = nil
         presentationView = nil

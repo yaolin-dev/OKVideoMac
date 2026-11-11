@@ -3,6 +3,34 @@ import Network
 @testable import OKVideoCore
 
 final class HTTPClientTests: XCTestCase {
+    func testMediaPrefixStopsIgnoredRangeAndLeavesFollowingRequestUsable() async throws {
+        let server = try BoundedKeepAliveServer(); defer { server.stop() }
+        let port = try await server.port()
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.connectionProxyDictionary = ["HTTPEnable": 0, "HTTPSEnable": 0, "SOCKSEnable": 0]
+        let client = URLSessionHTTPClient(isolatedConfiguration: configuration, reusesBoundedConnections: true)
+        for path in ["large-media", "large-html"] {
+            var request = server.request(port: port, path: path, limit: 128 * 1024)
+            request.responsePrefixBytes = 16384
+            request.headers["Range"] = "bytes=0-16383"
+            let response = try await client.send(request)
+            XCTAssertEqual(response.statusCode, 200)
+            XCTAssertEqual(response.body.count, 16384)
+            let url = request.url
+            let valid = try await DefaultMediaProbe(httpClient: client).validateParsingFallback(url: url, headers: [:])
+            XCTAssertEqual(valid, path == "large-media")
+            let next = try await client.send(server.request(port: port, path: "after-prefix"))
+            XCTAssertEqual(try next.text(), "after-prefix")
+        }
+        do {
+            _ = try await client.send(server.request(port: port, path: "large-media", limit: 32))
+            XCTFail("Full response limits must remain enforced")
+        } catch {
+            guard case HTTPClientError.responseTooLarge(let limit, _) = error else { return XCTFail("Unexpected error: \(error)") }
+            XCTAssertEqual(limit, 32)
+        }
+    }
+
     func testTotalDeadlineCancelsActiveNetworkAndLeavesSessionUsable() async throws {
         let server = try BoundedKeepAliveServer()
         defer { server.stop() }
@@ -616,7 +644,12 @@ private final class BoundedKeepAliveServer: @unchecked Sendable {
             let path = header.components(separatedBy: " ").dropFirst().first?.dropFirst().description ?? ""
             self.lock.lock(); self.requests += 1; self.lock.unlock()
             let response: String
-            if path == "redirect" { response = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/forbidden\r\nContent-Length: 0\r\n\r\n" }
+            if path == "large-media" || path == "large-html" {
+                let prefix = path == "large-media" ? "0000ftypisom" : "<!doctype html><html>upstream error"
+                let body = prefix + String(repeating: "x", count: 256 * 1024)
+                response = "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: \(body.utf8.count)\r\n\r\n\(body)"
+            }
+            else if path == "redirect" { response = "HTTP/1.1 302 Found\r\nLocation: http://127.0.0.1:1/forbidden\r\nContent-Length: 0\r\n\r\n" }
             else if path == "oversize" { response = "HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n12345678901" }
             else if path == "chunked-oversize" { response = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nB\r\n12345678901\r\n0\r\n\r\n" }
             else { response = "HTTP/1.1 200 OK\r\nContent-Length: \(path.utf8.count)\r\n\r\n\(path)" }

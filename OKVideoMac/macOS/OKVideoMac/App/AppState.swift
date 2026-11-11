@@ -4117,13 +4117,27 @@ struct NodePlaybackRecoveryCheckpoint: Equatable, Sendable {
     }
 }
 
-enum BilibiliPlaybackPolicy {
+enum DASHPlaybackPolicy {
     static func isMediaURL(_ url: URL) -> Bool {
         guard url.scheme == "http", ["127.0.0.1", "localhost", "::1"].contains(url.host ?? "") else { return false }
+        if url.path.hasPrefix("/__okvideo/dash/") { return true }
         let parts = url.path.split(separator: "/")
-        return parts.count >= 8 && parts[0] == "spider" && parts[2] == "3"
+        return parts.count >= 6 && parts[0] == "spider" && parts[2] == "3"
             && parts[3] == "proxy" && parts[4] == "mpd"
-            && parts[5...7].allSatisfy { !$0.isEmpty && $0.allSatisfy(\.isNumber) }
+    }
+
+    static func supportsRecovery(mediaURL: URL, container: String? = nil) -> Bool {
+        // Source-independent capability: either the host's static DASH route,
+        // the Node MPD protocol route, or a decoder-confirmed network DASH.
+        if isMediaURL(mediaURL) { return true }
+        return ["http", "https"].contains(mediaURL.scheme ?? "") && container?.lowercased() == "dash"
+    }
+
+    static func restored(snapshot: PlayerSnapshot, target: TimeInterval, paused: Bool) -> Bool {
+        guard snapshot.position.isFinite, snapshot.seekTarget == nil,
+              !snapshot.isPausedForCache else { return false }
+        if paused { return snapshot.status == .paused && abs(snapshot.position-target) <= 1.5 }
+        return snapshot.status == .playing && snapshot.position >= target + 0.2
     }
 
     static func selectableQualities(_ qualities: [PlaybackQuality]) -> [PlaybackQuality] {
@@ -4135,7 +4149,7 @@ enum BilibiliPlaybackPolicy {
     }
 }
 
-struct BilibiliPlaybackRecoveryBudget {
+struct DASHPlaybackRecoveryBudget {
     private var sessionID: UUID?
     private var attempts = 0
     mutating func reset() { sessionID = nil; attempts = 0 }
@@ -4367,7 +4381,7 @@ struct PlaybackResolutionAttemptContext: Equatable, Sendable {
         // must not consume the retry budget that belongs to the provider's
         // same-resource refresh. `providerPreflight` still validates bytes in
         // PlaybackResolver; it merely forbids unrelated parser rewriting.
-        let eligibleParsers = result.validationPolicy == .preflight
+        let eligibleParsers = result.needsParsing || result.validationPolicy == .preflight
             ? configuredParsers
             : []
         return PlaybackResolutionRequest(
@@ -4861,7 +4875,7 @@ enum LiveSourceEPGStatus: Equatable {
 private final class LivePlaybackNavigationContext {
     let flowID = UUID()
     let sourceID: LiveSourceID
-    let channels: [LiveChannel]
+    var channels: [LiveChannel]
     let importedCatalog: AcceptedImportedCatalog?
     var attemptedTransports = Set<ImportedRouteTransport>()
     let catchupProgramme: EPGProgramme?
@@ -5251,7 +5265,18 @@ final class PlayerSnapshotState: ObservableObject {
         return requestedSeek?.target
     }
 
-    var displayedPosition: TimeInterval { pendingSeekTarget ?? snapshot.position }
+    private var recoveryDisplay: (NodePlaybackRecoveryCheckpoint, TimeInterval)?
+    var displayedPosition: TimeInterval { pendingSeekTarget ?? recoveryDisplay?.0.position ?? snapshot.position }
+    var displayedDuration: TimeInterval { recoveryDisplay?.1 ?? snapshot.duration }
+    func beginRecovery(_ checkpoint: NodePlaybackRecoveryCheckpoint, duration: TimeInterval) {
+        resetSeek()
+        objectWillChange.send()
+        recoveryDisplay = (checkpoint, duration)
+    }
+    func endRecovery() {
+        guard recoveryDisplay != nil else { return }
+        objectWillChange.send(); recoveryDisplay = nil
+    }
 
     func beginSeek(id: UUID, target: TimeInterval) {
         objectWillChange.send()
@@ -5267,8 +5292,8 @@ final class PlayerSnapshotState: ObservableObject {
     }
 
     func resetSeek() {
-        guard requestedSeek != nil else { return }
-        objectWillChange.send(); requestedSeek = nil
+        guard requestedSeek != nil || recoveryDisplay != nil else { return }
+        objectWillChange.send(); requestedSeek = nil; recoveryDisplay = nil
     }
 
     init(snapshot: PlayerSnapshot = PlayerSnapshot()) {
@@ -5510,6 +5535,10 @@ final class AppState: ObservableObject {
     @Published private(set) var isRecoveringLivePlayback = false
     @Published private(set) var hasExhaustedLivePlayback = false
     @Published private(set) var livePlaybackNotice: String?
+    // Session-only, source-scoped identities; never persist stream URLs or
+    // record private-mode playback. Bound memory across source switches.
+    @Published private var playerRecentChannelIDs: [LiveSourceID: [LiveChannel.ID]] = [:]
+    private var playerRecentSourceOrder: [LiveSourceID] = []
     let liveValidationActivity = LiveValidationActivityModel()
     var liveSourceValidationStatuses: [UUID: LiveSourceValidationStatus] { liveValidationActivity.statuses }
     @Published private(set) var selectedDetail: VideoDetail? {
@@ -5591,7 +5620,16 @@ final class AppState: ObservableObject {
         PlaybackEndingSkipPrompt?
     @Published private(set) var playbackResolutionState: PlaybackResolutionState = .idle
     @Published private(set) var currentPlaybackAttempt: PlaybackAttempt?
-    @Published private(set) var playbackFailureSummary: String?
+    @Published private(set) var playbackPreparationIssue: PlaybackPreparationIssue?
+    @Published private(set) var playbackOriginalPageURL: URL?
+    @Published private(set) var playbackFailureSummary: String? {
+        didSet {
+            if playbackFailureSummary == nil {
+                playbackPreparationIssue = nil
+                playbackOriginalPageURL = nil
+            }
+        }
+    }
     @Published private(set) var playbackQualities: [PlaybackQuality] = []
     @Published private(set) var selectedPlaybackQualityID: String?
     @Published private(set) var isSwitchingPlaybackQuality = false
@@ -6178,9 +6216,9 @@ final class AppState: ObservableObject {
     private var pendingNodePlaybackConfigurationFallback:
         PendingNodePlaybackConfigurationFallback?
     private var nodePlaybackRecoveryGate = NodePlaybackRecoveryGate()
-    private var biliPlaybackRecoveryBudget = BilibiliPlaybackRecoveryBudget()
-    private var biliPlaybackRecoveryTask: Task<Void, Never>?
-    private var biliPlaybackRecoveryID: UUID?
+    private var dashPlaybackRecoveryBudget = DASHPlaybackRecoveryBudget()
+    private var dashPlaybackRecoveryTask: Task<Void, Never>?
+    private var dashPlaybackRecoveryID: UUID?
     private var nodePlaybackRecoveryTask: Task<Void, Never>? {
         get { playbackSessions.nodeRecoveryTask }
         set { playbackSessions.nodeRecoveryTask = newValue }
@@ -6270,6 +6308,23 @@ final class AppState: ObservableObject {
     #if DEBUG || OKVIDEO_PERFORMANCE_TEST
     var playbackDiagnosticRecordsForTesting: [PlaybackDiagnostics.Record] { playbackDiagnostics.snapshot() }
     func startPlaybackEventsForTesting() { startPlayerEventLoop() }
+    var dashRecoveryLoadForTesting: ((NodePlaybackRecoveryCheckpoint) async -> Void)?
+    func seedBiliRecoveryForTesting(provider: SiteProvider, url: URL, position: Double, paused: Bool = false) {
+        let source = PlaySource(name: "B站", episodes: [.init(name: "episode", url: "BV1et411i7iy@38210110")])
+        let detail = VideoDetail(summary: VideoSummary(siteKey: provider.site.key, siteName: "Bili",
+            videoID: "BV1et411i7iy", title: "Fixture"), playSources: [source])
+        let request = UUID(); playbackSessionID = request; activePlayerRequestID = request
+        providers[provider.site.key] = provider
+        activePlayback = ActivePlaybackContext(configurationID: UUID(), detail: detail, source: source,
+            episode: source.episodes[0], media: ResolvedMedia(url: url, headers: [:], siteKey: provider.site.key,
+            sourceName: source.name, episodeName: "episode"), requestID: request)
+        isPlayerPresented = true; hasCurrentPlaybackStarted = true
+        playerSnapshot = PlayerSnapshot(status: paused ? .paused : .playing, position: position, duration: 231)
+        playerSnapshot.mediaInfo = PlaybackMediaInfo(properties: ["file-format": "dash"], includeStatistics: false, isNetwork: true, includesFileSize: false)
+        nodePlaybackLastCheckpoint = (request, NodePlaybackRecoveryCheckpoint(position: position, paused: paused))
+    }
+    func failBiliRecoveryForTesting() { handlePlayerEventFailure("fixture truncation", requestID: activePlayerRequestID) }
+
     var playerCloseSuspensionForTesting: (() async -> Void)?
     var resolvedPlaybackStageForTesting: ((String) async throws -> Void)?
     var resolvedPlaybackMediaLoadForTesting: (() async throws -> Void)?
@@ -13679,10 +13734,10 @@ final class AppState: ObservableObject {
             return
         }
         if continuingRequestID == nil {
-            biliPlaybackRecoveryTask?.cancel()
-            biliPlaybackRecoveryTask = nil
-            biliPlaybackRecoveryID = nil
-            biliPlaybackRecoveryBudget.reset()
+            dashPlaybackRecoveryTask?.cancel()
+            dashPlaybackRecoveryTask = nil
+            dashPlaybackRecoveryID = nil
+            dashPlaybackRecoveryBudget.reset()
             playbackAuthorizationResumeGate.resetForNewPlayback()
             nodePlaybackRecoveryGate.reset()
             nodePlaybackRecoveryTask?.cancel()
@@ -13771,9 +13826,15 @@ final class AppState: ObservableObject {
             resetPlaybackSkipSession()
         }
         captureHistoryBeforePlaybackTransition()
+        let recoveryDuration = playerSnapshotState.displayedDuration
         clearPlayerEpisodeListRecovery()
         playbackSessionID = sessionID
         activePlayerRequestID = sessionID
+        // A decoder reload has a new seek generation even when it continues
+        // the same logical playback request. Retire the old UI seek filter.
+        if let recoveryCheckpoint {
+            playerSnapshotState.beginRecovery(recoveryCheckpoint, duration: recoveryDuration)
+        } else { playerSnapshotState.resetSeek() }
         playbackDiagnostics.begin(sessionID: sessionID, requestID: sessionID, kind: .onDemand,
             retry: authorizationRetry ? .authorization : isAutomaticRecovery ? .recovery : diagnosticRetryFrom != nil ? .user : nil,
             continuingFrom: diagnosticRetryFrom)
@@ -14037,7 +14098,7 @@ final class AppState: ObservableObject {
                     redactedURL: L10n.string("player.url.resolving", fallback: "<resolving playback URL>"),
                     number: completedAttempts + 1
                 )
-                playbackResolutionState = completedAttempts == 0
+                playbackResolutionState = completedAttempts == 0 && !isAutomaticRecovery
                     ? .resolving
                     : .retrying
 
@@ -14051,7 +14112,7 @@ final class AppState: ObservableObject {
                             flag: candidateSource.name,
                             episodeURL: candidateEpisode.url,
                             sessionID: sessionID,
-                            refreshPlayback: isRefreshAttempt,
+                            refreshPlayback: isRefreshAttempt || isAutomaticRecovery || recoveryCheckpoint != nil,
                             transferContext: nodeTransferContext
                         )
                     }
@@ -14207,8 +14268,11 @@ final class AppState: ObservableObject {
                         )
                         continue
                     }
-                    failures.append(L10n.string("player.resolve.same-result.source", fallback: "%@: resolving again returned the same URL and request context", candidateSource.name))
-                    playbackFailureSummary = L10n.string("player.resolve.same-result", fallback: "Resolving again returned the same URL and request context")
+                    if failures.isEmpty {
+                        let message = L10n.string("player.resolve.same-result.source", fallback: "%@: resolving again returned the same URL and request context", candidateSource.name)
+                        failures.append(message)
+                        playbackFailureSummary = message
+                    }
                     continue
                 }
                 let currentMediaFingerprint = result.mediaSession?
@@ -14241,6 +14305,7 @@ final class AppState: ObservableObject {
                 let remainingAttempts = isQuarkPlayback ? 1 : max(1, 8 - completedAttempts)
                 var attemptsInCandidate = 0
                 var candidateFailure: String?
+                var candidatePreparationIssue: PlaybackPreparationIssue?
                 var candidateMediaFailure: NodeCloudMediaFailure?
                 var checkedLateNodeAuthorization = false
                 let lateNodeAuthorizationNotBefore = Date()
@@ -14279,6 +14344,11 @@ final class AppState: ObservableObject {
                         throw CancellationError()
                     }
                     switch event {
+                    case .preparationIssue(let issue):
+                        candidatePreparationIssue = issue
+                        playbackPreparationIssue = issue
+                        playbackOriginalPageURL = issue == .missingParser
+                            ? Self.originalPlaybackPage(result.url) : nil
                     case .state(let resolutionState):
                         playbackResolutionState = resolutionState
                     case .attempting(var attempt):
@@ -14291,6 +14361,7 @@ final class AppState: ObservableObject {
                         currentPlaybackAttempt = attempt
                         if historyRelinkResumeIssue?.requestID != sessionID,
                            !checkedLateNodeAuthorization,
+                           candidatePreparationIssue == nil,
                            result.validationPolicy == .playerAuthoritative {
                             checkedLateNodeAuthorization = true
                             let pending = PendingCloudPlayback(
@@ -14342,6 +14413,7 @@ final class AppState: ObservableObject {
                     case .failed(let message):
                         if historyRelinkResumeIssue?.requestID != sessionID,
                            !checkedLateNodeAuthorization,
+                           candidatePreparationIssue == nil,
                            result.validationPolicy == .playerAuthoritative {
                             checkedLateNodeAuthorization = true
                             let pending = PendingCloudPlayback(
@@ -14400,6 +14472,7 @@ final class AppState: ObservableObject {
                     playbackFailureSummary = candidateFailure
                 }
                 if historyRelinkResumeIssue?.requestID == sessionID
+                    || candidatePreparationIssue?.allowsAutomaticRefresh == false
                     || candidateMediaFailure?.allowsAutomaticRecovery == false || completedAttempts >= 8 {
                     break
                 }
@@ -16021,6 +16094,9 @@ final class AppState: ObservableObject {
                 guard liveFlowMayLoad(context) else { throw CancellationError() }
                 isRecoveringLivePlayback = false
                 hasExhaustedLivePlayback = false
+                if context.catchupProgramme == nil && !incognitoMode {
+                    recordRecentPlayerChannel(candidate.channel.id, source: sourceID)
+                }
                 if skippedCount > 0 || isAutomaticRecovery {
                     showLivePlaybackNotice(
                         L10n.string("live.skipped-invalid-stream", fallback: "Skipped an invalid stream and started playing %@", candidate.channel.name)
@@ -17401,6 +17477,9 @@ final class AppState: ObservableObject {
 #endif
         let finalHistoryWrite = playbackHistoryWrite(position: playerSnapshot.position, duration: playerSnapshot.duration)
         isShutdownRequested = true
+        dashPlaybackRecoveryTask?.cancel()
+        dashPlaybackRecoveryTask = nil
+        dashPlaybackRecoveryID = nil
         cancelSearch()
         invalidateAndroidRuntimeCheck()
         pictureInPicture.end()
@@ -17602,6 +17681,9 @@ final class AppState: ObservableObject {
 
     func closePlayer() async {
         guard !isShutdownRequested else { return }
+        dashPlaybackRecoveryTask?.cancel()
+        dashPlaybackRecoveryTask = nil
+        dashPlaybackRecoveryID = nil
         pictureInPicture.end()
         clearPlayerEpisodeListRecovery()
         // Capabilities expire before any close-time suspension.
@@ -17960,7 +18042,7 @@ final class AppState: ObservableObject {
     }
 
     var selectablePlaybackQualities: [PlaybackQuality] {
-        BilibiliPlaybackPolicy.selectableQualities(playbackQualities)
+        DASHPlaybackPolicy.selectableQualities(playbackQualities)
     }
 
     var hasPlaybackQualityChoices: Bool { selectablePlaybackQualities.count > 1 }
@@ -17980,9 +18062,9 @@ final class AppState: ObservableObject {
             return
         }
 
-        biliPlaybackRecoveryTask?.cancel()
-        biliPlaybackRecoveryTask = nil
-        biliPlaybackRecoveryID = nil
+        dashPlaybackRecoveryTask?.cancel()
+        dashPlaybackRecoveryTask = nil
+        dashPlaybackRecoveryID = nil
         let switchSessionID = UUID()
         playbackQualitySwitchSessionID = switchSessionID
         let owningPlaybackSessionID = playbackSessionID
@@ -18033,6 +18115,7 @@ final class AppState: ObservableObject {
                     throw CancellationError()
                 }
                 switch event {
+                case .preparationIssue: break
                 case .state(let state):
                     playbackResolutionState = state
                 case .attempting(let attempt):
@@ -19024,12 +19107,44 @@ final class AppState: ObservableObject {
         }
     }
 
-    func selectPlayerLiveChannel(_ id: LiveChannel.ID, source: LiveSourceID) async {
-        guard !isShutdownRequested, isPlayerPresented, source == livePlaybackSourceID,
-              let context = livePlaybackNavigationContext, context.sourceID == source,
-              id != livePlaybackChannel?.id else { return }
+    var playerChannelDirectory: PlayerChannelDirectory {
         let channels = playerLiveChannels
+        let favorites = livePlaybackSourceID.map { source in
+            Set(channels.filter { isLiveFavorite(sourceID: source, channel: $0) }.map(\.id))
+        } ?? []
+        return PlayerChannelDirectory(channels: channels, favoriteIDs: favorites,
+            recentIDs: livePlaybackSourceID.flatMap { playerRecentChannelIDs[$0] } ?? [])
+    }
+
+    var playerInitialChannelGroup: PlayerChannelGroupID {
+        playerChannelDirectory.initialGroup(navigationIDs: livePlaybackNavigationContext?.channels.map(\.id) ?? [],
+                                            currentID: livePlaybackChannel?.id)
+    }
+
+    private func recordRecentPlayerChannel(_ id: LiveChannel.ID, source: LiveSourceID) {
+        var ids = playerRecentChannelIDs[source] ?? []
+        ids.removeAll { $0 == id }; ids.insert(id, at: 0)
+        playerRecentChannelIDs[source] = Array(ids.prefix(40))
+        playerRecentSourceOrder.removeAll { $0 == source }; playerRecentSourceOrder.insert(source, at: 0)
+        while playerRecentSourceOrder.count > 8 {
+            playerRecentChannelIDs.removeValue(forKey: playerRecentSourceOrder.removeLast())
+        }
+    }
+
+    func selectPlayerLiveChannel(_ id: LiveChannel.ID, source: LiveSourceID,
+                                 group: PlayerChannelGroupID = .all) async {
+        guard !isShutdownRequested, isPlayerPresented, source == livePlaybackSourceID,
+              let context = livePlaybackNavigationContext, context.sourceID == source else { return }
+        // Search only changes the displayed matches. Channel +/- retains the
+        // complete selected group, checked again against the playing snapshot.
+        guard let selectedGroup = playerChannelDirectory.groups.first(where: { $0.id == group }) else { return }
+        let channels = selectedGroup.channels
         guard let channel = channels.first(where: { $0.id == id }), let stream = channel.streams.first else { return }
+        if id == livePlaybackChannel?.id {
+            objectWillChange.send()
+            context.channels = channels
+            return
+        }
         if let catalog = context.importedCatalog {
             guard liveFlowMayLoad(context), let selection = catalog.selections(for: channel).first else { return }
             await beginImportedLive(selection, navigationChannels: channels, windowActivation: .preserveFocus)
@@ -22618,7 +22733,10 @@ final class AppState: ObservableObject {
                         snapshot.seekTarget = snapshot.seekTarget.map { XtreamArchivePolicy.programmePosition(mediaPosition: $0,
                             offset: context.catchupOffset, leadIn: context.catchupLeadIn, duration: duration) }
                     }
-                    if snapshot.status == .playing || snapshot.status == .paused,
+                    let checkpointIsConfirmed = self.pendingPlayback?.recoveryCheckpoint.map {
+                        DASHPlaybackPolicy.restored(snapshot: snapshot, target: $0.position, paused: $0.paused)
+                    } ?? true
+                    if (snapshot.status == .playing || snapshot.status == .paused), checkpointIsConfirmed,
                        let requestID {
                         self.nodePlaybackLastCheckpoint = (requestID,
                             NodePlaybackRecoveryCheckpoint(position: snapshot.position,
@@ -22891,7 +23009,7 @@ final class AppState: ObservableObject {
             playbackFailureSummary = message
             return
         }
-        if let requestID, recoverBilibiliPlayback(requestID: requestID) { return }
+        if let requestID, recoverDASHPlayback(requestID: requestID) { return }
         if let requestID, requestID == activePlayerRequestID,
            let playback = activePlayback,
            let provider = providers[playback.detail.summary.siteKey] as? NodeHTTPSpiderSiteProvider,
@@ -22937,37 +23055,43 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func recoverBilibiliPlayback(requestID: UUID) -> Bool {
+    private func recoverDASHPlayback(requestID: UUID) -> Bool {
         guard requestID == activePlayerRequestID, isPlayerPresented, !isClosingPlayer,
               !isShutdownRequested, !isSwitchingPlaybackQuality, hasCurrentPlaybackStarted,
               let playback = activePlayback,
-              providers[playback.detail.summary.siteKey] is NodeHTTPSpiderSiteProvider,
-              BilibiliPlaybackPolicy.isMediaURL(playback.media.url) else { return false }
-        if biliPlaybackRecoveryTask != nil { return true }
+              DASHPlaybackPolicy.supportsRecovery(
+                mediaURL: playback.media.url, container: playerSnapshot.mediaInfo?.container) else { return false }
+        if dashPlaybackRecoveryTask != nil { return true }
         let owner = playbackSessionID
-        guard let attempt = biliPlaybackRecoveryBudget.claim(owner) else { return false }
+        guard let attempt = dashPlaybackRecoveryBudget.claim(owner) else { return false }
+        NSLog("[DASH-RECOVERY] attempt=%d request=%@ position=%.3f", attempt, requestID.uuidString, playerSnapshot.position)
         let previous = nodePlaybackLastCheckpoint.flatMap { $0.0 == requestID ? $0.1 : nil }
         let checkpoint = NodePlaybackRecoveryCheckpoint(
-            position: previous?.position ?? playerSnapshot.position,
+            position: playerSnapshot.position.isFinite && playerSnapshot.position > 0
+                ? playerSnapshot.position : (previous?.position ?? 0),
             paused: previous?.paused ?? false, qualityName: selectedPlaybackQualityName)
+        playerSnapshotState.beginRecovery(checkpoint, duration: playerSnapshotState.displayedDuration)
         let ticket = UUID()
-        biliPlaybackRecoveryID = ticket
+        dashPlaybackRecoveryID = ticket
         playbackFailureSummary = nil
         playbackResolutionState = .retrying
         playerSnapshot.status = .loading
-        biliPlaybackRecoveryTask = Task { @MainActor [weak self] in
+        dashPlaybackRecoveryTask = Task { @MainActor [weak self] in
             guard let self else { return }
             defer {
-                if self.biliPlaybackRecoveryID == ticket {
-                    self.biliPlaybackRecoveryTask = nil
-                    self.biliPlaybackRecoveryID = nil
+                if self.dashPlaybackRecoveryID == ticket {
+                    self.dashPlaybackRecoveryTask = nil
+                    self.dashPlaybackRecoveryID = nil
                 }
             }
             do { try await Task.sleep(nanoseconds: UInt64(attempt) * 500_000_000) }
             catch { return }
-            guard !Task.isCancelled, self.biliPlaybackRecoveryID == ticket,
+            guard !Task.isCancelled, self.dashPlaybackRecoveryID == ticket,
                   self.playbackSessionID == owner, self.activePlayerRequestID == requestID,
                   self.isPlayerPresented, !self.isClosingPlayer, !self.isShutdownRequested else { return }
+            #if DEBUG || OKVIDEO_PERFORMANCE_TEST
+            if let load = self.dashRecoveryLoadForTesting { await load(checkpoint); return }
+            #endif
             await self.startPlayback(detail: playback.detail, source: playback.source,
                 episode: playback.episode, configurationID: playback.configurationID,
                 continuingRequestID: owner, windowActivation: .preserveFocus,
@@ -23194,6 +23318,21 @@ final class AppState: ObservableObject {
         playerPresentedError = nil
     }
 
+    static func originalPlaybackPage(_ value: String) -> URL? {
+        guard let url = URL(string: value), ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
+              let host = url.host, !host.isEmpty, url.user == nil, url.password == nil,
+              !["127.0.0.1", "localhost", "::1", "[::1]"].contains(host.lowercased()),
+              !MediaURLClassifier.isDirectMediaURL(value) else { return nil }
+        return url
+    }
+
+    func openPlaybackConfigurationSettings() async {
+        guard playbackPreparationIssue == .missingParser else { return }
+        await closePlayer()
+        selectedSection = .settings
+        selectedSettingsPane = .configurations
+    }
+
     var canRetryCurrentPlayback: Bool {
         isPlayerPresented && !isShutdownRequested && !isClosingPlayer
             && (livePlaybackNavigationContext != nil || activePlayback != nil || pendingPlayback != nil)
@@ -23215,11 +23354,12 @@ final class AppState: ObservableObject {
                 origin: pendingPlayback?.origin ?? .direct,
                 configurationID: configurationID, windowActivation: .preserveFocus,
                 recoveryCheckpoint: activePlayback.flatMap { playback in
-                    guard preserveProgress || BilibiliPlaybackPolicy.isMediaURL(playback.media.url) else { return nil }
+                    guard preserveProgress || DASHPlaybackPolicy.supportsRecovery(
+                        mediaURL: playback.media.url, container: playerSnapshot.mediaInfo?.container) else { return nil }
                     return NodePlaybackRecoveryCheckpoint(position: playerSnapshot.position,
                         paused: preserveProgress ? playerSnapshot.status == .paused : (nodePlaybackLastCheckpoint?.1.paused ?? false),
                         qualityName: selectedPlaybackQualityName)
-                }, diagnosticRetryFrom: diagnosticParent)
+                } ?? pendingPlayback?.recoveryCheckpoint, diagnosticRetryFrom: diagnosticParent)
         }
     }
 
@@ -23449,6 +23589,22 @@ final class AppState: ObservableObject {
                     try execution.checkOwnership()
                 }
             }
+            if let checkpoint = recoveryCheckpoint,
+               DASHPlaybackPolicy.supportsRecovery(mediaURL: scopedMedia.url, container: playerSnapshot.mediaInfo?.container) {
+                var restored = false
+                for _ in 0..<100 {
+                    try execution.checkOwnership()
+                    if DASHPlaybackPolicy.restored(snapshot: playerSnapshot, target: checkpoint.position,
+                                                       paused: checkpoint.paused) { restored = true; break }
+                    if case .failed = playerSnapshot.status { break }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+                guard restored else {
+                    throw AppError.playback(L10n.string("player.recovery.position-unconfirmed",
+                        fallback: "Playback could not resume at the saved position. Your watch progress is preserved. Please retry."))
+                }
+                NSLog("[DASH-RECOVERY] restored request=%@ position=%.3f", sessionID.uuidString, playerSnapshot.position)
+            }
             if historyOrigin?.isHistory == true, historyOrigin?.startsFromBeginning == false,
                let record = authoritativeHistoryRecord,
                let savedPosition = Self.historyResumePosition(from: record) {
@@ -23471,6 +23627,7 @@ final class AppState: ObservableObject {
             #endif
             try execution.checkOwnership()
             activePlayback = playback
+            playerSnapshotState.endRecovery()
             danmaku.begin(
                 context: scopedMedia.danmakuContext,
                 playbackSessionID: sessionID,

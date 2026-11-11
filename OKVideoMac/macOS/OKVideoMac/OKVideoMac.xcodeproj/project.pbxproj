@@ -22,6 +22,7 @@
 		195449ECEC9D9787554618E1 /* NodeRuntimeContract.swift in Sources */ = {isa = PBXBuildFile; fileRef = E497EB47C4C1AD4047675EFC /* NodeRuntimeContract.swift */; };
 		1A6C66F63EBD6B13926C0FA2 /* AppRestartGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 77B0B0BD06A8BDB742EBA198 /* AppRestartGate.swift */; };
 		1D6071FF2EABE097F03A3E8B /* NativeLiveChannelPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF7C514F1DF97F4D957CDFAD /* NativeLiveChannelPage.swift */; };
+		217D27E1ABEB9E6F340600E0 /* PlayerChannelGroupsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70FC6A47DBF2F1C0A37718F0 /* PlayerChannelGroupsTests.swift */; };
 		23F3274D09AD9ABB49C2870B /* PlayerInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 303F9D189B3E37ACA85D261E /* PlayerInteractionTests.swift */; };
 		2626ECCA6E7B2154476D426C /* LiveSettingsPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF84766163A2D4D0B363B57B /* LiveSettingsPane.swift */; };
 		2685130620C85C8863F08882 /* AppStartupControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 579EA0116028BFAB72EEFC1F /* AppStartupControllerTests.swift */; };
@@ -30,6 +31,7 @@
 		2E40BCFCE09756B119CF2553 /* InfoPlist.xcstrings in Resources */ = {isa = PBXBuildFile; fileRef = 46B22CA70719023FAD0BBE29 /* InfoPlist.xcstrings */; };
 		30B2634E951AC346F431C249 /* FavoritesNativeRepairTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 670FEFE746E5D3B95EE9D347 /* FavoritesNativeRepairTests.swift */; };
 		34371EDE931B9801A8A600C0 /* MediaProxyPreference.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0B2234B67DAD4521E4623DC2 /* MediaProxyPreference.swift */; };
+		3463796DA3549E1BF1057544 /* PlayerChannelPicker.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6DD313C5865427E529137DDF /* PlayerChannelPicker.swift */; };
 		34E5D648D9127134BBCC6933 /* PlayerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 689F4F5C0C244BA810946A34 /* PlayerView.swift */; };
 		34E606A00CCFD969B84B8FBE /* OKVideoPersistence in Frameworks */ = {isa = PBXBuildFile; productRef = 40F5E74826FFC180B7D5D2FD /* OKVideoPersistence */; };
 		35C639B6C08DFB9F379D88D8 /* SearchBrowseState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8D3A03DBF332ECA425E9F035 /* SearchBrowseState.swift */; };
@@ -77,6 +79,7 @@
 		73AA9E59E830DC2124835934 /* BrowserPlaybackActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = 36C13E551F5AC7B9570A3EBC /* BrowserPlaybackActivity.swift */; };
 		73CF17501E9AEFB3A17831B8 /* TMDBDetailViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 97CBBB3FC79FC7628E5B20D9 /* TMDBDetailViews.swift */; };
 		743A880401BD7F0D45A31298 /* PlayerSeekStabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79757F9220FDF932CCD34B2E /* PlayerSeekStabilityTests.swift */; };
+		759511EC9307B02EDBD21A5D /* PlayerChromeStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5858CB68D7C287485AA36082 /* PlayerChromeStyle.swift */; };
 		76C7406EE21C7E2C68369E2D /* AboutSettingsPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDB5CCC10B454B60D80A387A /* AboutSettingsPane.swift */; };
 		77968CB64C9218E58540BB7D /* RelaunchParentExitMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0CE64294B74CF614CE6543 /* RelaunchParentExitMonitor.swift */; };
 		7830FC967FAF3053714C732B /* catpaw-range-stream.js in Resources */ = {isa = PBXBuildFile; fileRef = E05C1716F85D0CF2097B2FC6 /* catpaw-range-stream.js */; };
@@ -147,6 +150,7 @@
 		D8B5CD68B6C2E81A2E1B7BFA /* SystemMediaProxyResolver.swift in Sources */ = {isa = PBXBuildFile; fileRef = D70C6CE807C3203AE860D23C /* SystemMediaProxyResolver.swift */; };
 		DC4A5F6740E30611013F079E /* PlayerEpisodeNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EAE534A1AE9A12B967D27EF /* PlayerEpisodeNavigationTests.swift */; };
 		DDC3654BD2AB1D9A828B4173 /* SettingsNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10607081FB6C2AF318D6D6B /* SettingsNavigation.swift */; };
+		DDD189FABF44F72B9EE3886E /* PlayerGlassRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C100ED7FF3D6E94DD79DAD0 /* PlayerGlassRenderingTests.swift */; };
 		E2DEA74B241320B8961DD695 /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4ACA134A51B5EAC0085C4BDA /* HistoryView.swift */; };
 		E388E75481C841C7C655C950 /* QuarkSeekRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6B89B96A1C16BEAA46613D8 /* QuarkSeekRecoveryTests.swift */; };
 		E52889A73B1E20D6D311931C /* SeekAcceptanceHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3673D60112EC33FB72415BC4 /* SeekAcceptanceHarness.swift */; };
@@ -269,7 +273,9 @@
 		561F02AD6119C246533E68FC /* TMDBDetailModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TMDBDetailModel.swift; sourceTree = "<group>"; };
 		5707873F641B0221D67B9CBC /* VideoGrid.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoGrid.swift; sourceTree = "<group>"; };
 		579EA0116028BFAB72EEFC1F /* AppStartupControllerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppStartupControllerTests.swift; sourceTree = "<group>"; };
+		5858CB68D7C287485AA36082 /* PlayerChromeStyle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerChromeStyle.swift; sourceTree = "<group>"; };
 		589C3DDFE98C3D2DC30D5704 /* CrashSparkleDriver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashSparkleDriver.swift; sourceTree = "<group>"; };
+		5C100ED7FF3D6E94DD79DAD0 /* PlayerGlassRenderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerGlassRenderingTests.swift; sourceTree = "<group>"; };
 		5C6055A4D0EC00D86134284B /* AndroidRuntimeMaintenance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AndroidRuntimeMaintenance.swift; sourceTree = "<group>"; };
 		5D1F0D067D24D12F1C1B3FA8 /* PlayerSubtitleSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerSubtitleSupport.swift; sourceTree = "<group>"; };
 		6090A546B2B362215C6FFC65 /* StartupNewWindowGateTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StartupNewWindowGateTests.swift; sourceTree = "<group>"; };
@@ -283,6 +289,8 @@
 		68D330153433BDD9D021F5E7 /* SettingsComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsComponents.swift; sourceTree = "<group>"; };
 		6B20B4DAB5A642C051700C4C /* PlaybackInformation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackInformation.swift; sourceTree = "<group>"; };
 		6C46BA484BEA09A1EFD0BA2A /* OKVideoKit */ = {isa = PBXFileReference; lastKnownFileType = folder; name = OKVideoKit; path = Packages/OKVideoKit; sourceTree = SOURCE_ROOT; };
+		6DD313C5865427E529137DDF /* PlayerChannelPicker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerChannelPicker.swift; sourceTree = "<group>"; };
+		70FC6A47DBF2F1C0A37718F0 /* PlayerChannelGroupsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerChannelGroupsTests.swift; sourceTree = "<group>"; };
 		722C3E335092A8EB2A0A682B /* PlayerTrackPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerTrackPresentationTests.swift; sourceTree = "<group>"; };
 		74E4C0C02476DCF9A568D763 /* PlayerPictureInPicture.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerPictureInPicture.swift; sourceTree = "<group>"; };
 		75B64DF2F947BB2B8EE678A5 /* LEGAL_AND_SECURITY.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = LEGAL_AND_SECURITY.md; sourceTree = "<group>"; };
@@ -495,7 +503,9 @@
 				B7E0B9BADB3F5D30D3F44205 /* PlaybackMediaJourneyTests.swift */,
 				DDA9CADE98280B575F6C4F78 /* PlaybackSessionCoordinatorTests.swift */,
 				E8204E5D35CBB5DA2827D9E4 /* PlaybackUserFlowTests.swift */,
+				70FC6A47DBF2F1C0A37718F0 /* PlayerChannelGroupsTests.swift */,
 				8EAE534A1AE9A12B967D27EF /* PlayerEpisodeNavigationTests.swift */,
+				5C100ED7FF3D6E94DD79DAD0 /* PlayerGlassRenderingTests.swift */,
 				303F9D189B3E37ACA85D261E /* PlayerInteractionTests.swift */,
 				28348EC64725ED7F0C350E6A /* PlayerPanelDismissalTests.swift */,
 				79757F9220FDF932CCD34B2E /* PlayerSeekStabilityTests.swift */,
@@ -562,6 +572,8 @@
 				3FD1A1CF62D7058E978234DE /* DanmakuPlayerSupport.swift */,
 				F5B08056D2E2717298553A98 /* NativeLivePlaybackButton.swift */,
 				6B20B4DAB5A642C051700C4C /* PlaybackInformation.swift */,
+				6DD313C5865427E529137DDF /* PlayerChannelPicker.swift */,
+				5858CB68D7C287485AA36082 /* PlayerChromeStyle.swift */,
 				ABC2C46AF8821960214D8BB7 /* PlayerLiveProgrammeCard.swift */,
 				CE3D91F64F2DD9020FD048E8 /* PlayerPanelDismissal.swift */,
 				D62C79A71198E016181A1ED7 /* PlayerPlaybackStatus.swift */,
@@ -1155,7 +1167,9 @@
 				06DD8B485E5427FD657907C9 /* PlaybackMediaJourneyTests.swift in Sources */,
 				B7090A70D943498D2069F17F /* PlaybackSessionCoordinatorTests.swift in Sources */,
 				D5F432BA54BD349C90A21596 /* PlaybackUserFlowTests.swift in Sources */,
+				217D27E1ABEB9E6F340600E0 /* PlayerChannelGroupsTests.swift in Sources */,
 				DC4A5F6740E30611013F079E /* PlayerEpisodeNavigationTests.swift in Sources */,
+				DDD189FABF44F72B9EE3886E /* PlayerGlassRenderingTests.swift in Sources */,
 				23F3274D09AD9ABB49C2870B /* PlayerInteractionTests.swift in Sources */,
 				F86D749293AD7BF25695BA65 /* PlayerPanelDismissalTests.swift in Sources */,
 				743A880401BD7F0D45A31298 /* PlayerSeekStabilityTests.swift in Sources */,
@@ -1262,6 +1276,8 @@
 				10A23FD15DC02981FF52D046 /* PlaybackLoadExecutor.swift in Sources */,
 				09A48BFC8F4DE8E2BDF609AC /* PlaybackSessionCoordinator.swift in Sources */,
 				39C0FA9C30712B8DBAF6A7F7 /* PlaybackSettingsPane.swift in Sources */,
+				3463796DA3549E1BF1057544 /* PlayerChannelPicker.swift in Sources */,
+				759511EC9307B02EDBD21A5D /* PlayerChromeStyle.swift in Sources */,
 				373A913C9D6DC3E3FBE14529 /* PlayerEpisodeNavigation.swift in Sources */,
 				8E6005EB93A29C6D0EADCABD /* PlayerLiveProgrammeCard.swift in Sources */,
 				374B758C1C25091A51C32188 /* PlayerPanelDismissal.swift in Sources */,
@@ -1368,7 +1384,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 198;
+				CURRENT_PROJECT_VERSION = 204;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -1387,7 +1403,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.9.2;
+				MARKETING_VERSION = 0.9.3;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				OKVIDEOMAC_APP_BUNDLE_IDENTIFIER = com.okvideomac.OKVideoMac;
@@ -1595,7 +1611,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 198;
+				CURRENT_PROJECT_VERSION = 204;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -1608,7 +1624,7 @@
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
 				MACOSX_DEPLOYMENT_TARGET = 12.0;
-				MARKETING_VERSION = 0.9.2;
+				MARKETING_VERSION = 0.9.3;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
 				OKVIDEOMAC_APP_BUNDLE_IDENTIFIER = com.okvideomac.OKVideoMac;

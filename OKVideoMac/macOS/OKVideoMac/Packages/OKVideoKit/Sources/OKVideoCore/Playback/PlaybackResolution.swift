@@ -161,7 +161,32 @@ public struct PlaybackAttempt: Equatable, Sendable {
     }
 }
 
+public enum PlaybackPreparationIssue: Error, Equatable, LocalizedError, Sendable {
+    case missingParser
+    case httpStatus(Int)
+    case nonMedia
+
+    public var allowsAutomaticRefresh: Bool {
+        if case .httpStatus(let status) = self { return [401, 403, 404, 408, 410, 429].contains(status) || status >= 500 }
+        return false
+    }
+
+    public var errorDescription: String? {
+        switch self {
+        case .missingParser: return "该线路需要解析，但当前配置没有可用解析器。请检查播放配置或打开原网页。"
+        case .httpStatus(let status):
+            switch status {
+            case 401, 403: return "上游拒绝了媒体请求（HTTP \(status)）。请检查上游服务或授权状态。"
+            case 404, 410: return "媒体地址不可用（HTTP \(status)）。请更换线路或等待上游恢复。"
+            default: return "媒体线路返回 HTTP 状态码 \(status)"
+            }
+        case .nonMedia: return "该地址返回了网页或错误数据，未取得可播放的媒体。"
+        }
+    }
+}
+
 public enum PlaybackResolutionEvent: Equatable, Sendable {
+    case preparationIssue(PlaybackPreparationIssue?)
     case state(PlaybackResolutionState)
     case attempting(PlaybackAttempt)
     case attemptFailed(PlaybackAttempt, message: String)
@@ -192,6 +217,13 @@ public protocol ParseExecutor {
 
 public protocol MediaProbe {
     func validate(url: URL, headers: HTTPHeaders) async throws -> Bool
+    func validateParsingFallback(url: URL, headers: HTTPHeaders) async throws -> Bool
+}
+
+public extension MediaProbe {
+    func validateParsingFallback(url: URL, headers: HTTPHeaders) async throws -> Bool {
+        try await validate(url: url, headers: headers)
+    }
 }
 
 public typealias PlaybackMediaLoader = (
@@ -207,6 +239,14 @@ public struct DefaultMediaProbe: MediaProbe {
     }
 
     public func validate(url: URL, headers: HTTPHeaders) async throws -> Bool {
+        try await validate(url: url, headers: headers, requiresMediaSignature: false)
+    }
+
+    public func validateParsingFallback(url: URL, headers: HTTPHeaders) async throws -> Bool {
+        try await validate(url: url, headers: headers, requiresMediaSignature: true)
+    }
+
+    private func validate(url: URL, headers: HTTPHeaders, requiresMediaSignature: Bool) async throws -> Bool {
         if url.isFileURL {
             return FileManager.default.fileExists(atPath: url.path)
         }
@@ -221,7 +261,7 @@ public struct DefaultMediaProbe: MediaProbe {
         // length. libmpv handles this server correctly, so let the player do
         // the authoritative load check for this one controlled loopback
         // endpoint instead of rejecting every original-quality line here.
-        if Self.isAndroidCloudOriginalProxy(url) {
+        if !requiresMediaSignature && Self.isAndroidCloudOriginalProxy(url) {
             return true
         }
 
@@ -240,7 +280,9 @@ public struct DefaultMediaProbe: MediaProbe {
                     headers: probeHeaders,
                     timeout: 8,
                     maximumResponseBytes: 128 * 1_024,
+                    responsePrefixBytes: 16_384,
                     maximumRedirects: 4,
+                    redirectedHeaderFields: ["Range", "Referer", "User-Agent"],
                     retryPolicy: .none,
                     allowsNonSuccessfulStatus: true
                 )
@@ -253,31 +295,34 @@ public struct DefaultMediaProbe: MediaProbe {
             switch response.statusCode {
             case 200...299:
                 break
-            case 401, 403:
-                throw AppError.playback("媒体授权已失效，请重新登录网盘")
-            case 404, 410:
-                throw AppError.playback("临时播放地址或分享已失效，请重新解析")
             default:
-                throw AppError.playback(
-                    "媒体线路返回 HTTP 状态码 \(response.statusCode)"
-                )
+                throw PlaybackPreparationIssue.httpStatus(response.statusCode)
             }
             let valid = Self.looksLikeMediaBytes(response)
+                && (!requiresMediaSignature || Self.hasMediaSignature(response.body))
             if !valid, isNodeRuntimeProxy || isAndroidBridgeSession {
-                throw AppError.playback(
-                    "网盘播放地址没有返回真实媒体数据"
-                )
+                throw PlaybackPreparationIssue.nonMedia
             }
             return valid
-        } catch HTTPClientError.responseTooLarge
-                    where MediaURLClassifier.isDirectMediaURL(url.absoluteString)
-                        || isAndroidBridgeSession
-                        || isNodeRuntimeProxy {
-            // Some VOD providers ignore Range and return a complete, very large
-            // media playlist. Receiving more than the probe limit still proves
-            // that the direct media endpoint is reachable.
-            return true
+        } catch HTTPClientError.responseTooLarge {
+            throw PlaybackPreparationIssue.nonMedia
         }
+    }
+
+    static func hasMediaSignature(_ data: Data) -> Bool {
+        let b = [UInt8](data.prefix(512))
+        guard b.count >= 4 else { return false }
+        if b.count >= 8, let atom = String(bytes: b[4..<8], encoding: .ascii),
+           ["ftyp", "moov", "mdat", "wide", "free", "styp"].contains(atom) { return true }
+        if b.starts(with: [0x1a, 0x45, 0xdf, 0xa3]) || b.starts(with: [0x4f, 0x67, 0x67, 0x53])
+            || b.starts(with: [0x46, 0x4c, 0x56]) || b.starts(with: [0x49, 0x44, 0x33])
+            || b.starts(with: [0x52, 0x49, 0x46, 0x46]) || b.starts(with: [0x66, 0x4c, 0x61, 0x43]) { return true }
+        if b.count > 188, b[0] == 0x47, b[188] == 0x47 { return true }
+        if b[0] == 0xff, b[1] & 0xe0 == 0xe0 { return true }
+        let text = String(decoding: b, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines.union(CharacterSet(charactersIn: "\u{feff}")))
+        return text.hasPrefix("#EXTM3U")
+            || text.range(of: "<(?:[A-Za-z_][A-Za-z0-9_.-]*:)?MPD(?:[ >\\t\\r\\n])", options: .regularExpression) != nil
     }
 
     private static func androidBridgeFailure(
@@ -333,7 +378,7 @@ public struct DefaultMediaProbe: MediaProbe {
             || text.hasPrefix("<html") {
             return false
         }
-        return looksLikeMedia(response)
+        return hasMediaSignature(response.body) || looksLikeMedia(response)
             || response.statusCode == 206
             || contentType.isEmpty
     }
@@ -506,15 +551,16 @@ public struct PlaybackResolver {
 
             let parserOrder = orderedParsers(for: candidate.result, all: request.parsers)
             var options: [(ParseConfiguration?, String)] = []
-            if !candidate.result.needsParsing
-                || MediaURLClassifier.isDirectMediaURL(candidate.result.url) {
+            if !candidate.result.needsParsing { options.append((nil, candidate.result.url)) }
+            options.append(contentsOf: parserOrder.map { ($0, candidate.result.url) })
+            // Legacy scripts can mark real media as parse=1. Parsers have
+            // priority; only bounded byte evidence may admit a direct fallback.
+            if candidate.result.needsParsing && MediaURLClassifier.isDirectMediaURL(candidate.result.url) {
                 options.append((nil, candidate.result.url))
             }
-            options.append(contentsOf: parserOrder.map { ($0, candidate.result.url) })
             if options.isEmpty, candidate.result.needsParsing {
-                failureMessages.append(
-                    "\(candidate.sourceName)/解析：线路返回待解析地址，但当前配置没有可用解析器"
-                )
+                continuation.yield(.preparationIssue(.missingParser))
+                failureMessages.append("\(candidate.sourceName)：\(PlaybackPreparationIssue.missingParser.localizedDescription)")
             }
 
             for (parser, inputURL) in options {
@@ -538,6 +584,7 @@ public struct PlaybackResolver {
                 ].joined(separator: "|")
                 guard attempted.insert(identity).inserted else { continue }
 
+                continuation.yield(.preparationIssue(nil))
                 attemptNumber += 1
                 let attempt = PlaybackAttempt(
                     siteName: candidate.siteName,
@@ -576,15 +623,19 @@ public struct PlaybackResolver {
                         )
                     }
                     continuation.yield(.state(.validating))
-                    let requiresPreflight = parser != nil
+                    let requiresPreflight = parser != nil || candidate.result.needsParsing
                         || candidate.result.validationPolicy
                             != .playerAuthoritative
                     if requiresPreflight {
-                        guard try await mediaProbe.validate(
-                            url: parsed.url,
-                            headers: parsed.headers
-                        ) else {
-                            throw AppError.parsing("媒体探测未通过")
+                        let valid: Bool
+                        if parser == nil && candidate.result.needsParsing {
+                            valid = try await mediaProbe.validateParsingFallback(url: parsed.url, headers: parsed.headers)
+                        } else {
+                            valid = try await mediaProbe.validate(url: parsed.url, headers: parsed.headers)
+                        }
+                        guard valid else {
+                            throw candidate.result.needsParsing && parserOrder.isEmpty
+                                ? PlaybackPreparationIssue.missingParser : PlaybackPreparationIssue.nonMedia
                         }
                     }
                     let resolved = ResolvedMedia(
@@ -639,6 +690,7 @@ public struct PlaybackResolver {
                     continuation.finish()
                     return
                 } catch {
+                    continuation.yield(.preparationIssue(error as? PlaybackPreparationIssue))
                     let message = error.localizedDescription
                     failureMessages.append(
                         "\(candidate.sourceName)/\(parser?.name ?? "直链")：\(message)"
@@ -669,6 +721,9 @@ public struct PlaybackResolver {
                 let url = String(playURL.dropFirst("json:".count))
                 let synthetic = ParseConfiguration(name: "指定 JSON 解析", type: 1, url: url)
                 return [synthetic] + supported.filter { $0.url != url }
+            } else if let url = URL(string: playURL), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil {
+                let synthetic = ParseConfiguration(name: "指定网页解析", type: 0, url: playURL)
+                return [synthetic] + supported.filter { $0.url != playURL }
             }
         }
         let matching = supported.filter {

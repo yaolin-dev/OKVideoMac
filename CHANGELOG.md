@@ -1,5 +1,16 @@
 # Changelog
 
+## [Unreleased]
+
+## [0.9.3] - 2026-11-11
+
+- Respect provider parser requirements, retain upstream errors, and validate ambiguous direct URLs with a bounded media probe.
+- Recover supported static DASH transfers in Node and Android Java/Dex, including byte range and media identity verification and position recovery.
+- Keep TMDB detail controls, episode shelves and resource labels stable during asynchronous loading.
+- Refine live playback panels and add grouped channel selection with favorites, session recents and a now-playing locator.
+- Drive scrolling danmaku with media time through seeks, fullscreen and display changes.
+- Bundle Android Bridge 0.3.59 (71). See [release notes](Docs/RELEASE_NOTES_0.9.3.md).
+
 **2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](Docs/RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
 ## [Unreleased]

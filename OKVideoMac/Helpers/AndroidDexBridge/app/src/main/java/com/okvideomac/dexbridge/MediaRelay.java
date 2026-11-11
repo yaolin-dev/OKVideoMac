@@ -45,7 +45,8 @@ final class MediaRelay {
                         count = stream.read(buffer, 0, limit);
                         if (count == -1 && expectedBytes >= 0) throw new EOFException("Incomplete media range");
                     } catch (IOException error) {
-                        throw new Failure(error, bytes, "truncated_upstream");
+                        throw new Failure(error, bytes, error instanceof ProviderMediaEpoch.Changed
+                                ? "session_changed" : "truncated_upstream");
                     } finally {
                         long elapsed = System.nanoTime() - readStarted;
                         reads += elapsed;

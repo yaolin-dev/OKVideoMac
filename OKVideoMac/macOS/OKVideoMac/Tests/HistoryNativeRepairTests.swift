@@ -458,6 +458,13 @@ final class BrowserHoverSurfaceTests: XCTestCase {
 
 @MainActor
 final class DanmakuSmoothRenderingTests: XCTestCase {
+    private func positionX(_ layer: CALayer, in view: DanmakuOverlayNSView, at uptime: TimeInterval) throws -> CGFloat {
+        let animation = try XCTUnwrap(layer.animation(forKey: DanmakuOverlayNSView.scrollingAnimationKey) as? CABasicAnimation)
+        let from = try XCTUnwrap(animation.fromValue as? NSNumber).doubleValue
+        let to = try XCTUnwrap(animation.toValue as? NSNumber).doubleValue
+        return from + (to - from) * max(0, view.animationMediaTime(at: uptime) - animation.beginTime) / animation.duration
+    }
+
     private func timeline() -> DanmakuTimeline {
         .init(comments: (0..<60).map { i in .init(id: "\(i)", time: 1,
             mode: i % 3 == 0 ? .scrolling : (i % 3 == 1 ? .top : .bottom),
@@ -483,7 +490,7 @@ final class DanmakuSmoothRenderingTests: XCTestCase {
         view.update(timeline: timeline, timelineRevision: revision, snapshot: snapshot, offset: 0,
                     fontScale: 1, opacity: opacity, displayArea: .full, density: .high)
     }
-    func testFramesOnlyMoveCachedSpritesAndRemainMemoryBounded() async throws {
+    func testFrameMaintenancePreservesSubmittedAnimationsAndRasterBudget() async throws {
         let (view, window) = makeView(); defer { window.close() }
         let timeline = timeline()
         let now = ProcessInfo.processInfo.systemUptime
@@ -496,20 +503,24 @@ final class DanmakuSmoothRenderingTests: XCTestCase {
         update(view, timeline: timeline, snapshot: snapshot)
         let rasterizations = view.rasterizationCount, bytes = view.rasterBytes
         let layers = try XCTUnwrap(view.layer?.sublayers?.first?.sublayers)
-        let original = layers[0].position
+        let original = try positionX(layers[0], in: view, at: now)
+        let submitted = try XCTUnwrap(layers[0].animation(forKey: DanmakuOverlayNSView.scrollingAnimationKey) as? CABasicAnimation)
         let start = ProcessInfo.processInfo.systemUptime
         for frame in 1...240 { view.renderFrame(at: now + Double(frame) / 120) }
         let elapsed = ProcessInfo.processInfo.systemUptime - start
-        XCTAssertLessThan(layers[0].position.x, original.x)
+        XCTAssertLessThan(try positionX(layers[0], in: view, at: now + 2), original)
         XCTAssertEqual(view.rasterizationCount, rasterizations)
         XCTAssertEqual(view.rasterBytes, bytes)
         XCTAssertLessThanOrEqual(bytes, DanmakuOverlayNSView.maximumRasterBytes)
-        XCTAssertNil(layers[0].animationKeys(), "No implicit per-frame animation may fight media time")
+        let retained = try XCTUnwrap(layers[0].animation(forKey: DanmakuOverlayNSView.scrollingAnimationKey) as? CABasicAnimation)
+        XCTAssertEqual(retained.beginTime, submitted.beginTime)
+        XCTAssertEqual(retained.duration, submitted.duration)
+        XCTAssertEqual(layers[0].animationKeys(), [DanmakuOverlayNSView.scrollingAnimationKey], "Only the original explicit movement may own position")
         // A same-snapshot appearance update changes compositing, not the cached text.
         update(view, timeline: timeline, snapshot: snapshot, opacity: 0.5)
         XCTAssertEqual(view.rasterizationCount, rasterizations)
-        XCTAssertEqual(layers[0].opacity, 0.5)
-        let output = "60 comments, 240 position-only frames: \(elapsed * 1000) ms total; rasterizations=\(rasterizations); bytes=\(bytes)\n"
+        XCTAssertEqual(layers[0].superlayer?.opacity, 0.5)
+        let output = "60 comments, 240 maintenance frames: \(elapsed * 1000) ms total; rasterizations=\(rasterizations); bytes=\(bytes)\n"
         try output.write(toFile: "/private/tmp/ok128-danmaku-render-metrics.txt", atomically: true, encoding: .utf8)
         view.renderFrame(at: now + 12)
         XCTAssertEqual(view.activeCommentCount, 0)
@@ -562,7 +573,7 @@ final class DanmakuSmoothRenderingTests: XCTestCase {
     }
     func testScrollingSpeedIsEqualAcrossViewportWidthsAndDuringResize() async throws {
         var speeds: [CGFloat] = []
-        for width in [800.0, 1600.0] {
+        for width in [640.0, 960.0, 1440.0, 1920.0, 2560.0, 3440.0, 3840.0] {
             let view = DanmakuOverlayNSView(frame: .init(x: 0, y: 0, width: width, height: 450))
             view.layoutSubtreeIfNeeded()
             let timeline = DanmakuTimeline(comments: [.init(id: "same", time: 1, mode: .scrolling,
@@ -571,18 +582,18 @@ final class DanmakuSmoothRenderingTests: XCTestCase {
             try await waitForComments(view, count: 1)
             let layer = try XCTUnwrap(view.layer?.sublayers?.first?.sublayers?.first)
             let now = ProcessInfo.processInfo.systemUptime
-            var playing = PlayerSnapshot(status: .playing, position: 1); playing.positionSampleUptime = now
+            var playing = PlayerSnapshot(status: .playing, position: 1); playing.positionSampleUptime = nil
             update(view, timeline: timeline, snapshot: playing)
-            view.renderFrame(at: now + 0.1); let first = layer.position.x
-            view.renderFrame(at: now + 0.6); let second = layer.position.x
+            view.renderFrame(at: now + 0.1); let first = try positionX(layer, in: view, at: now + 0.1)
+            view.renderFrame(at: now + 0.6); let second = try positionX(layer, in: view, at: now + 0.6)
             speeds.append((first - second) / 0.5)
             view.frame.size = .init(width: width + 500, height: 800); view.layoutSubtreeIfNeeded()
             view.renderFrame(at: now + 0.6)
-            XCTAssertEqual(layer.position.x, second, accuracy: 0.001, "Resize must not teleport the comment")
+            XCTAssertEqual(try positionX(layer, in: view, at: now + 0.6), second, accuracy: 0.001, "Resize must not teleport the comment")
             view.renderFrame(at: now + 1.1)
-            XCTAssertEqual(second - layer.position.x, 70, accuracy: 0.01)
+            XCTAssertEqual(second - (try positionX(layer, in: view, at: now + 1.1)), 70, accuracy: 0.01)
         }
-        XCTAssertEqual(speeds[0], speeds[1], accuracy: 0.001)
+        for speed in speeds { XCTAssertEqual(speed, 140, accuracy: 0.001) }
         XCTAssertEqual(speeds[0], 140, accuracy: 0.001)
     }
     func testRetinaRasterShowsLegibleTextAndColor() async throws {
@@ -1348,6 +1359,7 @@ final class DanmakuDisplayCadenceTests: XCTestCase {
         let view = DanmakuOverlayNSView(frame: .init(x: 0, y: 0, width: 1280, height: 720))
         let window = NSWindow(contentRect: view.frame, styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = view
+        window.level = .floating
         window.title = "弹幕流畅度验证"; window.center(); window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         defer { view.frameObserver = nil; window.close() }
@@ -1363,11 +1375,15 @@ final class DanmakuDisplayCadenceTests: XCTestCase {
             times.append(target)
             renderCosts.append(renderDuration * 1000)
             leadTimes.append((target - delivered) * 1000)
-            if let layer = view.layer?.sublayers?.first?.sublayers?.first {
+            if let layer = view.layer?.sublayers?.first?.sublayers?.first,
+               let movement = layer.animation(forKey: DanmakuOverlayNSView.scrollingAnimationKey) as? CABasicAnimation,
+               let from = movement.fromValue as? NSNumber, let to = movement.toValue as? NSNumber {
+                let progress = (view.animationMediaTime(at: target) - movement.beginTime) / movement.duration
+                let x = CGFloat(from.doubleValue + (to.doubleValue - from.doubleValue) * progress)
                 if let last = previous, last.0 === layer, target > last.1 {
-                    velocities.append(Double(last.2 - layer.position.x) / (target - last.1))
+                    velocities.append(Double(last.2 - x) / (target - last.1))
                 }
-                previous = (layer, target, layer.position.x)
+                previous = (layer, target, x)
             }
         }
         let start = ProcessInfo.processInfo.systemUptime
@@ -1380,7 +1396,8 @@ final class DanmakuDisplayCadenceTests: XCTestCase {
             try await Task.sleep(nanoseconds: 100_000_000)
         }
         XCTAssertTrue(view.isDisplayDriverRunning)
-        XCTAssertGreaterThan(times.count, 60)
+        let refreshHz = Double(window.screen?.maximumFramesPerSecond ?? 60)
+        XCTAssertGreaterThan(Double(times.count), refreshHz * (ProcessInfo.processInfo.systemUptime - start) * 0.90)
         XCTAssertGreaterThan(velocities.count, 60)
         guard times.count > 60, velocities.count > 60 else { return }
         let sorted = velocities.sorted(), median = sorted[sorted.count / 2]
@@ -1390,7 +1407,8 @@ final class DanmakuDisplayCadenceTests: XCTestCase {
         let medianInterval = intervals[intervals.count / 2]
         let costs = renderCosts.sorted()
         let p99Cost = costs[Int(Double(costs.count - 1) * 0.99)]
-        let missedRefreshes = intervals.filter { $0 > medianInterval * 1.8 }.count
+        let expectedInterval = 1000 / refreshHz
+        let missedRefreshes = intervals.filter { $0 > expectedInterval * 1.8 }.count
         XCTAssertLessThan(p99Cost, medianInterval * 0.5, "Presentation work must leave time for video and compositing")
         XCTAssertLessThan(Double(missedRefreshes) / Double(intervals.count), 0.02)
         let report: [String: Any] = ["callbacks": times.count, "seconds": ProcessInfo.processInfo.systemUptime - start,
@@ -1400,12 +1418,94 @@ final class DanmakuDisplayCadenceTests: XCTestCase {
             "deliveryLeadMinMs": leadTimes.min()!, "missedRefreshIntervals": missedRefreshes,
             "velocityMin": sorted.first!, "velocityMax": sorted.last!, "velocityMedian": median,
             "activeRasterBytes": view.rasterBytes, "preparedRasterBytes": view.preparedRasterBytes,
-            "note": "Display callback delivery and layer positions; not a measurement of physical scanout"]
+            "note": "Admission callback cadence and submitted animation trajectory; not a measurement of physical scanout"]
         try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             .write(to: URL(fileURLWithPath: "/private/tmp/ok-danmaku-display-cadence.json"))
         let canvas = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
         view.cacheDisplay(in: view.bounds, to: canvas)
         try XCTUnwrap(canvas.representation(using: .png, properties: [:]))
             .write(to: URL(fileURLWithPath: "/private/tmp/ok-danmaku-visible-overlay.png"))
+    }
+}
+
+@MainActor
+final class DanmakuCompositorRenderingTests: XCTestCase {
+    private final class ScaleWindow: NSWindow {
+        var testScale: CGFloat = 2
+        override var backingScaleFactor: CGFloat { testScale }
+    }
+    private func update(_ view: DanmakuOverlayNSView, position: Double, playing: Bool, rate: Double = 1,
+                        revision: UInt64 = 1, seeking: Bool = false) {
+        let timeline = DanmakuTimeline(comments: [.init(id: "one", time: 1, mode: .scrolling,
+            fontSize: 25, color: 0xFFFFFF, text: "连续系统动画 · 暂停和窗口缩放")])
+        var snapshot = PlayerSnapshot(status: playing ? .playing : .paused, position: position)
+        snapshot.positionSampleUptime = ProcessInfo.processInfo.systemUptime
+        snapshot.speed = rate; snapshot.isSeeking = seeking; snapshot.seekTarget = seeking ? position : nil
+        view.update(timeline: timeline, timelineRevision: revision, snapshot: snapshot,
+                    offset: 0, fontScale: 1, opacity: 1, displayArea: .full, density: .high)
+    }
+    private func waitForComment(_ view: DanmakuOverlayNSView) async throws -> CALayer {
+        for _ in 0..<100 where view.activeCommentCount == 0 { try await Task.sleep(nanoseconds: 10_000_000) }
+        return try XCTUnwrap(view.layer?.sublayers?.first?.sublayers?.first)
+    }
+    func testVisibleAnimationContinuesWithoutFrameMaintenanceAndObeysPauseRateAndSeek() async throws {
+        let view = DanmakuOverlayNSView(frame: NSRect(x: 0, y: 0, width: 960, height: 540))
+        let window = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = view; window.level = .floating
+        window.backgroundColor = .black; window.center(); window.makeKeyAndOrderFront(nil)
+        NSApp.unhide(nil); NSApp.activate(ignoringOtherApps: true)
+        defer { window.close() }
+        view.layoutSubtreeIfNeeded()
+        update(view, position: 1, playing: false)
+        let sprite = try await waitForComment(view)
+        update(view, position: 1, playing: true)
+        // Allow the first explicit animation transaction to reach the compositor.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        view.stopSchedulingForTesting()
+        let frames = view.renderedFrameCount
+        let first = try XCTUnwrap(sprite.presentation()).position.x
+        let started = ProcessInfo.processInfo.systemUptime
+        try await Task.sleep(nanoseconds: 300_000_000)
+        let elapsed = ProcessInfo.processInfo.systemUptime - started
+        let moved = first - (try XCTUnwrap(sprite.presentation()).position.x)
+        XCTAssertEqual(view.renderedFrameCount, frames, "Motion must not require per-frame callbacks")
+        XCTAssertEqual(Double(moved), elapsed * 140, accuracy: 6)
+        update(view, position: view.animationMediaTime(at: ProcessInfo.processInfo.systemUptime), playing: false)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        let frozen = try XCTUnwrap(sprite.presentation()).position.x
+        try await Task.sleep(nanoseconds: 150_000_000)
+        XCTAssertEqual(try XCTUnwrap(sprite.presentation()).position.x, frozen, accuracy: 0.01)
+        let paused = view.animationMediaTime(at: ProcessInfo.processInfo.systemUptime)
+        update(view, position: paused, playing: true, rate: 2)
+        try await Task.sleep(nanoseconds: 60_000_000)
+        view.stopSchedulingForTesting()
+        let fastStart = try XCTUnwrap(sprite.presentation()).position.x
+        let fastTime = ProcessInfo.processInfo.systemUptime
+        try await Task.sleep(nanoseconds: 250_000_000)
+        XCTAssertEqual(Double(fastStart - (try XCTUnwrap(sprite.presentation()).position.x)),
+                       (ProcessInfo.processInfo.systemUptime - fastTime) * 280, accuracy: 10)
+        update(view, position: 100, playing: false, seeking: true)
+        XCTAssertEqual(view.activeCommentCount, 0)
+        XCTAssertNil(sprite.superlayer)
+    }
+
+    func testBackingScaleReplacementRetainsTrajectoryAndAnimation() async throws {
+        let view = DanmakuOverlayNSView(frame: NSRect(x: 0, y: 0, width: 960, height: 540))
+        let window = ScaleWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = view; window.testScale = 1
+        defer { window.close() }
+        view.layoutSubtreeIfNeeded(); update(view, position: 1, playing: false)
+        let sprite = try await waitForComment(view)
+        let animation = try XCTUnwrap(sprite.animation(forKey: DanmakuOverlayNSView.scrollingAnimationKey) as? CABasicAnimation)
+        let dimensions = sprite.bounds
+        XCTAssertEqual(sprite.contentsScale, 1)
+        window.testScale = 2; view.viewDidChangeBackingProperties()
+        for _ in 0..<100 where sprite.contentsScale != 2 { try await Task.sleep(nanoseconds: 10_000_000) }
+        XCTAssertEqual(sprite.contentsScale, 2)
+        XCTAssertEqual(sprite.bounds, dimensions)
+        let replacement = try XCTUnwrap(sprite.animation(forKey: DanmakuOverlayNSView.scrollingAnimationKey) as? CABasicAnimation)
+        XCTAssertEqual(replacement.beginTime, animation.beginTime)
+        XCTAssertEqual(replacement.duration, animation.duration)
+        XCTAssertEqual(view.activeCommentCount, 1)
     }
 }

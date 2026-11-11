@@ -368,7 +368,18 @@ import OKVideoPersistence
                 XCTAssertGreaterThanOrEqual(rect.height, 36)
                 XCTAssertGreaterThanOrEqual(rect.minX, 0)
                 XCTAssertLessThan(rect.maxX, host.bounds.midX)
-                XCTAssertTrue(control.showsBorderOnlyWhileMouseInside)
+                // The shared circular hover treatment replaced AppKit's old bezel.
+                XCTAssertFalse(control.isBordered)
+                let native = try XCTUnwrap(control as? LivePlaybackNSButton)
+                for (type, hovered) in [(NSEvent.EventType.mouseEntered, true), (.mouseExited, false)] {
+                    let event = try XCTUnwrap(NSEvent.enterExitEvent(with: type,
+                        location: control.convert(.init(x: control.bounds.midX, y: control.bounds.midY), to: nil),
+                        modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime,
+                        windowNumber: window.windowNumber, context: nil, eventNumber: 1,
+                        trackingNumber: 0, userData: nil))
+                    if hovered { native.mouseEntered(with: event) } else { native.mouseExited(with: event) }
+                    XCTAssertEqual(native.hovering, hovered)
+                }
                 XCTAssertEqual(control.toolTip, L10n.string("common.pause", fallback: "Pause"))
                 if width == 900 {
                     let bitmap = try XCTUnwrap(host.bitmapImageRepForCachingDisplay(in: host.bounds))

@@ -18,10 +18,11 @@ final class ProviderMediaEpoch {
     static void requireCurrent(String scope, long expected) {
         if (current(scope) != expected) throw new IllegalStateException("Provider media context changed during playback resolution");
     }
+    static final class Changed extends IOException { Changed() { super("Provider media context changed"); } }
     static InputStream guard(InputStream input, String scope, long expected) {
         return new FilterInputStream(input) {
             private void check() throws IOException {
-                if (current(scope) != expected) throw new IOException("Provider media context changed");
+                if (current(scope) != expected) throw new Changed();
             }
             @Override public int read() throws IOException {
                 check(); int value = in.read(); check(); return value;

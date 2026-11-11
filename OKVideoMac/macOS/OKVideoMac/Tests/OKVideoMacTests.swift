@@ -14,6 +14,38 @@ import OKVideoPersistence
 @testable import OKVideoMac
 
 @MainActor
+final class PlaybackPreparationStateTests: XCTestCase {
+    func testNeedsParsingRetainsConfiguredParsersAcrossProviderValidationPolicies() {
+        let episode = PlayEpisode(name: "Episode", url: "opaque-reference")
+        let source = PlaySource(name: "Arbitrary route", episodes: [episode])
+        let detail = VideoDetail(summary: VideoSummary(siteKey: "arbitrary", siteName: "Renamed",
+            videoID: "42", title: "Fixture"), playSources: [source])
+        let parsers = [ParseConfiguration(name: "Configured", type: 1, url: "https://parser.example.invalid/?url=")]
+        for policy in [SitePlaybackResult.ValidationPolicy.preflight, .providerPreflight, .playerAuthoritative] {
+            for needsParsing in [true, false] {
+                let result = SitePlaybackResult(url: "https://example.invalid/movie.mp4", needsParsing: needsParsing,
+                    flag: source.name, validationPolicy: policy)
+                let context = PlaybackResolutionAttemptContext(detail: detail, source: source, episode: episode, result: result)
+                let request = context.resolutionRequest(configuredParsers: parsers, maximumAttempts: 8)
+                XCTAssertEqual(request.parsers, needsParsing || policy == .preflight ? parsers : [])
+                XCTAssertEqual(request.candidates.first?.result, result)
+            }
+        }
+    }
+
+    func testOriginalPageActionDoesNotExposeLocalProxyOrMediaAsWebsite() {
+        for value in ["https://page.example.invalid/watch/42", "http://page.example.invalid/view?id=42"] {
+            XCTAssertEqual(AppState.originalPlaybackPage(value)?.absoluteString, value)
+        }
+        for value in ["file:///private/fixture", "http://127.0.0.1:1234/proxy", "http://localhost/proxy",
+                      "http://[::1]/proxy", "javascript:alert(1)", "https://user:pass@example.invalid/watch",
+                      "https://example.invalid/movie.mp4", "https://example.invalid/stream.m3u8", "not a URL"] {
+            XCTAssertNil(AppState.originalPlaybackPage(value), value)
+        }
+    }
+}
+
+@MainActor
 final class CategoryCrashRegressionTests: XCTestCase {
     func testNativeControlToleratesDuplicateIDsAndRoutesFirstPayload() throws {
         _ = NSApplication.shared
@@ -84,6 +116,96 @@ final class CategoryCrashRegressionTests: XCTestCase {
 }
 
 final class BilibiliPlaybackFixTests: XCTestCase {
+    private struct JavaBiliFixture: SiteProvider {
+        let site = SiteConfiguration(key: "Bili", name: "Bili fixture", type: 3, api: "csp_BiliGuard")
+        let capability: SiteCapability = .javaDexSpider
+        func home() async throws -> SiteHome { SiteHome(categories: [], recommendations: []) }
+        func category(id: String, page: Int, filters: [String:String]) async throws -> VideoPage { VideoPage(items: [], pagination: Pagination(page: 1, pageCount: 1)) }
+        func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage { try await category(id: keyword, page: page, filters: [:]) }
+        func detail(id: String) async throws -> VideoDetail { throw AppError.site("unused") }
+        func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult { throw AppError.site("unused") }
+    }
+    @MainActor func testJavaFailureDispatchesOneRecoveryWithOriginalCheckpoint() async throws {
+        let state = AppState(environment: nil); var received: [NodePlaybackRecoveryCheckpoint] = []
+        state.dashRecoveryLoadForTesting = { received.append($0) }
+        state.seedBiliRecoveryForTesting(provider: JavaBiliFixture(), url: URL(string: "http://127.0.0.1:19978/proxy/media/session")!, position: 133.084, paused: true)
+        state.failBiliRecoveryForTesting(); state.failBiliRecoveryForTesting()
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertEqual(received.count, 1)
+        XCTAssertEqual(received.first?.position, 133.084)
+        XCTAssertEqual(received.first?.paused, true)
+        await state.closePlayer()
+    }
+    @MainActor func testClosingDuringRetryDelayPreventsReload() async throws {
+        let state = AppState(environment: nil); var calls = 0
+        state.dashRecoveryLoadForTesting = { _ in calls += 1 }
+        state.seedBiliRecoveryForTesting(provider: JavaBiliFixture(), url: URL(string: "http://127.0.0.1:19978/proxy/media/session")!, position: 133)
+        state.failBiliRecoveryForTesting(); await state.closePlayer()
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertEqual(calls, 0)
+    }
+    @MainActor func testReplacementPlaybackCannotBeReloadedByOldFailure() async throws {
+        let state = AppState(environment: nil); var calls = 0
+        state.dashRecoveryLoadForTesting = { _ in calls += 1 }
+        let url = URL(string: "http://127.0.0.1:19978/proxy/media/session")!
+        state.seedBiliRecoveryForTesting(provider: JavaBiliFixture(), url: url, position: 133)
+        state.failBiliRecoveryForTesting()
+        state.seedBiliRecoveryForTesting(provider: JavaBiliFixture(), url: url, position: 0)
+        try await Task.sleep(nanoseconds: 700_000_000)
+        XCTAssertEqual(calls, 0)
+        await state.closePlayer()
+    }
+
+    @MainActor func testRecoveryRetiresOldSeekWithoutFakingNativeProgress() async throws {
+        let state = AppState(environment: nil)
+        state.seedBiliRecoveryForTesting(provider: JavaBiliFixture(), url: URL(string: "http://127.0.0.1:19978/proxy/media/session")!, position: 567.92)
+        let oldSeek = UUID()
+        state.playerSnapshotState.beginSeek(id: oldSeek, target: 430)
+        var old = PlayerSnapshot(status: .playing, position: 567.92, duration: 1651)
+        old.mediaInfo = PlaybackMediaInfo(properties: ["file-format": "dash"], includeStatistics: false, isNetwork: true, includesFileSize: false)
+        old.seekTransaction = .init(id: oldSeek, target: 430, phase: .completed)
+        state.playerSnapshotState.update(old)
+        state.dashRecoveryLoadForTesting = { _ in }
+        state.failBiliRecoveryForTesting()
+        XCTAssertNil(state.playerSnapshotState.requestedSeek)
+        state.playerSnapshotState.update(PlayerSnapshot(status: .loading))
+        XCTAssertEqual(state.playerSnapshotState.displayedPosition, 567.92, accuracy: 0.001)
+        XCTAssertEqual(state.playerSnapshotState.displayedDuration, 1651)
+        XCTAssertEqual(state.playerSnapshotState.snapshot.position, 0, "A display fallback cannot count as confirmed native playback")
+        var resumed = PlayerSnapshot(status: .playing, position: 568.2, duration: 1651)
+        resumed.seekTransaction = .init(id: UUID(), target: 567.92, phase: .completed)
+        XCTAssertTrue(state.playerSnapshotState.accepts(resumed))
+        state.playerSnapshotState.update(resumed)
+        state.playerSnapshotState.endRecovery()
+        XCTAssertEqual(state.playerSnapshotState.displayedPosition, 568.2)
+        await state.closePlayer()
+    }
+
+    func testJavaBiliAndDirectCDNAreCoveredWithoutMatchingUnrelatedSources() throws {
+        for value in ["http://127.0.0.1:19978/proxy/media/session", "https://cdn.example.org/opaque"] {
+            let url = try XCTUnwrap(URL(string: value))
+            XCTAssertTrue(DASHPlaybackPolicy.supportsRecovery(mediaURL: url, container: "dash"))
+            XCTAssertFalse(DASHPlaybackPolicy.supportsRecovery(mediaURL: url, container: "hls"))
+            XCTAssertFalse(DASHPlaybackPolicy.supportsRecovery(mediaURL: url))
+        }
+        XCTAssertTrue(DASHPlaybackPolicy.supportsRecovery(mediaURL: URL(string: "http://127.0.0.1:1234/__okvideo/dash/token/manifest.mpd")!))
+        XCTAssertFalse(DASHPlaybackPolicy.supportsRecovery(mediaURL: URL(string: "file:///tmp/movie.mp4")!, container: "dash"))
+    }
+    func testRecoveryRequiresObservedProgressAtCheckpointAndNotOnlyFileLoaded() {
+        var value = PlayerSnapshot(status: .playing, position: 0, duration: 231)
+        XCTAssertFalse(DASHPlaybackPolicy.restored(snapshot: value, target: 133, paused: false))
+        value.position = 133
+        XCTAssertFalse(DASHPlaybackPolicy.restored(snapshot: value, target: 133, paused: false))
+        value.position = 134
+        XCTAssertTrue(DASHPlaybackPolicy.restored(snapshot: value, target: 133, paused: false))
+        value.isPausedForCache = true
+        XCTAssertFalse(DASHPlaybackPolicy.restored(snapshot: value, target: 133, paused: false))
+        value.isPausedForCache = false; value.status = .paused
+        XCTAssertTrue(DASHPlaybackPolicy.restored(snapshot: value, target: 133, paused: true))
+        value.position = 0
+        XCTAssertFalse(DASHPlaybackPolicy.restored(snapshot: value, target: 133, paused: true))
+    }
+
     func testDASHSeekAlignsBothStreamsWithoutChangingOtherDemuxers() {
         for format in ["dash", "DASH"] {
             XCTAssertEqual(MPVPlayerClient.seekCommand(to: 1887.429, duration: 6558, demuxerFormat: format),
@@ -99,27 +221,26 @@ final class BilibiliPlaybackFixTests: XCTestCase {
     func testQualityControlRequiresTwoDifferentPlayableChoices() {
         let first = PlaybackQuality(name: "清晰 480P", url: "http://127.0.0.1/480")
         let second = PlaybackQuality(name: "流畅 360P", url: "http://127.0.0.1/360")
-        XCTAssertEqual(BilibiliPlaybackPolicy.selectableQualities([]).count, 0)
-        XCTAssertEqual(BilibiliPlaybackPolicy.selectableQualities([first]).count, 1)
-        XCTAssertEqual(BilibiliPlaybackPolicy.selectableQualities([first, .init(name: "默认", url: first.url)]).count, 1)
-        XCTAssertEqual(BilibiliPlaybackPolicy.selectableQualities([first, .init(name: "空", url: " ")]).count, 1)
-        XCTAssertEqual(BilibiliPlaybackPolicy.selectableQualities([first, second]), [first, second])
+        XCTAssertEqual(DASHPlaybackPolicy.selectableQualities([]).count, 0)
+        XCTAssertEqual(DASHPlaybackPolicy.selectableQualities([first]).count, 1)
+        XCTAssertEqual(DASHPlaybackPolicy.selectableQualities([first, .init(name: "默认", url: first.url)]).count, 1)
+        XCTAssertEqual(DASHPlaybackPolicy.selectableQualities([first, .init(name: "空", url: " ")]).count, 1)
+        XCTAssertEqual(DASHPlaybackPolicy.selectableQualities([first, second]), [first, second])
     }
 
     func testRecoveryOnlyMatchesTheLocalBilibiliManifestRoute() throws {
         for host in ["127.0.0.1", "localhost"] {
-            XCTAssertTrue(BilibiliPlaybackPolicy.isMediaURL(try XCTUnwrap(URL(string:
+            XCTAssertTrue(DASHPlaybackPolicy.isMediaURL(try XCTUnwrap(URL(string:
                 "http://\(host):12345/spider/bilixiqu/3/proxy/mpd/117461785575857/42847766229/32/.bin"))))
         }
         for value in ["https://example.com/spider/bilixiqu/3/proxy/mpd/1/2/32/.bin",
-                      "http://127.0.0.1/spider/quark/3/proxy/file/token", "http://127.0.0.1/video.mp4",
-                      "http://127.0.0.1/spider/bilixiqu/3/proxy/mpd/not-a-video/2/32/.bin"] {
-            XCTAssertFalse(BilibiliPlaybackPolicy.isMediaURL(try XCTUnwrap(URL(string: value))))
+                      "http://127.0.0.1/spider/quark/3/proxy/file/token", "http://127.0.0.1/video.mp4"] {
+            XCTAssertFalse(DASHPlaybackPolicy.isMediaURL(try XCTUnwrap(URL(string: value))))
         }
     }
 
     func testRecoveryBudgetIsBoundedAcrossAttemptsAndResetsForNewPlayback() {
-        var budget = BilibiliPlaybackRecoveryBudget(); let session = UUID()
+        var budget = DASHPlaybackRecoveryBudget(); let session = UUID()
         XCTAssertEqual(budget.claim(session), 1)
         XCTAssertEqual(budget.claim(session), 2)
         XCTAssertNil(budget.claim(session))
@@ -146,8 +267,7 @@ final class BilibiliPlaybackFixTests: XCTestCase {
     }
 
     func testBilibiliAdapterResourcesMatchTheSealedRuntimePolicy() throws {
-        for (name, digest) in [("bilibili-streaming", BilibiliRuntimeCompatibility.moduleSHA256),
-                               ("bilibili-streaming.patch", BilibiliRuntimeCompatibility.patchSHA256)] {
+        for (name, digest) in [("bilibili-streaming", DASHRuntimeCompatibility.moduleSHA256)] {
             let url = try XCTUnwrap(Bundle.main.url(forResource: name, withExtension: "js", subdirectory: "NodePatches")
                 ?? Bundle.main.url(forResource: name, withExtension: "js"))
             let actual = SHA256.hash(data: try Data(contentsOf: url)).map { String(format: "%02x", $0) }.joined()

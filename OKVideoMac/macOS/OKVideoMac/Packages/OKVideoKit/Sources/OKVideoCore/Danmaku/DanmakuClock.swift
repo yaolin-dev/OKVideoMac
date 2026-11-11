@@ -1,5 +1,41 @@
 import Foundation
 
+/// Maps the player's smoothed media time onto a continuously running animation
+/// timebase. Ordinary observations only change its rate; they never jump an
+/// existing comment to a new position. Seeks and new timelines explicitly reset.
+public struct DanmakuAnimationTimebase: Equatable, Sendable {
+    public private(set) var mediaTime: TimeInterval = 0
+    public private(set) var hostTime: TimeInterval = 0
+    public private(set) var rate: Double = 0
+    private var initialized = false
+
+    public init() {}
+
+    public func currentTime(at uptime: TimeInterval) -> TimeInterval {
+        guard uptime.isFinite else { return mediaTime }
+        return mediaTime + max(0, uptime - hostTime) * rate
+    }
+
+    /// Returns whether the corresponding CALayer timing properties must change.
+    @discardableResult
+    public mutating func synchronize(mediaTime target: TimeInterval, at uptime: TimeInterval,
+                                     rate playbackRate: Double, advancing: Bool, reset: Bool) -> Bool {
+        guard target.isFinite, uptime.isFinite, playbackRate.isFinite, playbackRate > 0 else { return false }
+        let reanchor = reset || !initialized
+        let current = reanchor ? max(0, target) : currentTime(at: uptime)
+        // Small transport corrections are slewed, not applied as position jumps.
+        // This also lets an already submitted animation survive a busy main loop.
+        let correction = reanchor ? 0 : min(max((target - current) / 2, -playbackRate * 0.02), playbackRate * 0.02)
+        let nextRate = advancing ? playbackRate + correction : 0
+        guard reanchor || abs(nextRate - rate) > 0.000_01 else { return false }
+        mediaTime = current
+        hostTime = uptime
+        rate = nextRate
+        initialized = true
+        return true
+    }
+}
+
 /// Interpolates between authoritative player snapshots. The player owns media
 /// time; this clock only smooths drawing between snapshots.
 public struct DanmakuClock: Equatable, Sendable {

@@ -86,9 +86,7 @@ struct PlayerLiveProgrammeCard: View, Equatable {
             .padding(.horizontal, 18).padding(.vertical, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .background(Color(red: 0.13, green: 0.145, blue: 0.165).opacity(0.96), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(.white.opacity(0.055), lineWidth: 1).allowsHitTesting(false))
-        .shadow(color: .black.opacity(0.12), radius: 10, y: 4)
+        .background(PlayerGlassBackground())
         .onHover { interaction.hover($0) }
         .onDisappear { interaction.hover(false) }
         .accessibilityElement(children: .contain)

@@ -184,7 +184,6 @@ final class PlaybackResolverTests: XCTestCase {
         )
 
         let isValid = try await probe.validate(url: url, headers: [:])
-
         XCTAssertTrue(isValid)
     }
 
@@ -237,7 +236,7 @@ final class PlaybackResolverTests: XCTestCase {
         XCTAssertEqual(requests.last?.headers["Cookie"], "session=fixture")
     }
 
-    func testNodeRuntimeMediaProxyAcceptsLargeBodyWhenServerIgnoresRange()
+    func testNodeRuntimeMediaProxyDoesNotTreatOversizeAloneAsMedia()
         async throws {
         let url = try XCTUnwrap(
             URL(string: "http://127.0.0.1:18989/spider/fixture/4/proxy/media?id=large")
@@ -246,9 +245,12 @@ final class PlaybackResolverTests: XCTestCase {
             httpClient: ResponseTooLargeProbeHTTPClient()
         )
 
-        let isValid = try await probe.validate(url: url, headers: [:])
-
-        XCTAssertTrue(isValid)
+        do {
+            _ = try await probe.validate(url: url, headers: [:])
+            XCTFail("Size alone cannot prove media")
+        } catch {
+            XCTAssertEqual(error as? PlaybackPreparationIssue, .nonMedia)
+        }
     }
 
     func testAndroidBridgeMediaSessionIsNotMisclassifiedAsNodeProxy() throws {
@@ -302,11 +304,8 @@ final class PlaybackResolverTests: XCTestCase {
             _ = try await DefaultMediaProbe(httpClient: client)
                 .validate(url: url, headers: [:])
             XCTFail("JSON provider error must not pass the media probe")
-        } catch let error as AppError {
-            XCTAssertEqual(
-                error,
-                .playback("网盘播放地址没有返回真实媒体数据")
-            )
+        } catch {
+            XCTAssertEqual(error as? PlaybackPreparationIssue, .nonMedia)
         }
     }
 
@@ -416,7 +415,7 @@ final class PlaybackResolverTests: XCTestCase {
 
         XCTAssertTrue(events.contains { event in
             guard case .failed(let message) = event else { return false }
-            return message.contains("线路返回待解析地址")
+            return message.contains("该线路需要解析")
                 && message.contains("没有可用解析器")
         })
     }

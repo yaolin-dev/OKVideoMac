@@ -53,6 +53,83 @@ import OKVideoPersistence
         }
     }
 
+    func testColdStreamOutcomesKeepExistingGeometryAtTopAndBottom() async throws {
+        for width in [500.0, 900.0, 1200.0] {
+            for atBottom in [false, true] {
+                for outcome in [TMDBLayoutResponse.Outcome.streams, .empty, .failure] {
+                    try await verifyStableStreamLayout(width: width, atBottom: atBottom, outcome: outcome)
+                }
+            }
+        }
+    }
+
+    private func verifyStableStreamLayout(width: CGFloat, atBottom: Bool, outcome: TMDBLayoutResponse.Outcome) async throws {
+        let summary = VideoSummary(siteKey: "layout", siteName: "Fixture", videoID: UUID().uuidString,
+            title: "测试电影", year: "2023", categoryName: "电影")
+        let response = TMDBLayoutResponse(summary: summary)
+        let provider = TMDBLayoutProvider(response: response)
+        let state = AppState(environment: nil, initialProviders: ["layout": provider])
+        let model = TMDBDetailModel()
+        await model.load(repository: TMDBRepository(client: TMDBDetailService(includesCast: true)),
+            key: summary.id, input: .init(detail: .init(summary: summary)))
+        XCTAssertNotNil(model.selection)
+        let suite = "TMDB-stable-layout-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let runtime = TMDBNetworkRuntime(credentials: TMDBMemoryCredentialStore(nil), defaults: defaults,
+            transport: TMDBSettingsTransport())
+        runtime.setPreference(.automatic)
+        let host = NSHostingView(rootView: TMDBLayoutRoute(state: state, summary: summary, metadata: model, runtime: runtime)
+            .defaultAppStorage(defaults))
+        let window = NSWindow(contentRect: .init(x: -3000, y: -3000, width: width, height: 700),
+            styleMask: [.titled, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = host
+        defer { model.cancel(); state.dismissDetail(); window.close(); defaults.removePersistentDomain(forName: suite) }
+        let loading = Task { await state.loadDetail(summary) }
+        defer { loading.cancel() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        host.layoutSubtreeIfNeeded()
+        let hero = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? TMDBSynopsisPreviewControl }.first)
+        let cast = try XCTUnwrap(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? TMDBShelfScrollProbe }.first)
+        let outer = try XCTUnwrap(hero.enclosingScrollView)
+        let document = try XCTUnwrap(outer.documentView)
+        let offset = atBottom ? max(0, document.bounds.height - outer.contentView.bounds.height) : 0
+        outer.contentView.scroll(to: .init(x: 0, y: offset))
+        outer.reflectScrolledClipView(outer.contentView)
+        try await Task.sleep(nanoseconds: 50_000_000)
+        host.layoutSubtreeIfNeeded()
+        let heroFrame = hero.convert(hero.bounds, to: host)
+        let castFrame = cast.convert(cast.bounds, to: host)
+        let documentHeight = document.frame.height
+        let scrollOffset = outer.contentView.bounds.minY
+        func check(_ phase: String) {
+            host.layoutSubtreeIfNeeded()
+            let context = "width=\(width), bottom=\(atBottom), outcome=\(outcome), phase=\(phase)"
+            XCTAssertNotNil(cast.window, "Existing cast shelf unmounted: " + context)
+            XCTAssertEqual(hero.convert(hero.bounds, to: host).minY, heroFrame.minY, accuracy: 0.5, context)
+            XCTAssertEqual(cast.convert(cast.bounds, to: host).minY, castFrame.minY, accuracy: 0.5, context)
+            XCTAssertEqual(document.frame.height, documentHeight, accuracy: 0.5, context)
+            XCTAssertEqual(outer.contentView.bounds.minY, scrollOffset, accuracy: 0.5, context)
+        }
+        await response.release(outcome)
+        // Sample intermediate SwiftUI frames as well as the final result.
+        for _ in 0..<50 { try await Task.sleep(nanoseconds: 10_000_000); check("first response") }
+        await loading.value
+        if outcome == .failure { XCTAssertNotNil(state.detailLoadState.message) }
+        else { XCTAssertEqual(state.detailLoadState, .loaded) }
+        if outcome == .streams {
+            XCTAssertFalse(BrowserKeyboardView.descendants(of: host).compactMap { $0 as? TMDBEpisodeActivationControl }.isEmpty)
+        }
+        // Retry/reload can add a large range picker and a long filename, or
+        // remove all sources. Neither may change the mounted page's geometry.
+        for next in [TMDBLayoutResponse.Outcome.manyStreams, .empty, .failure] {
+            await response.release(next)
+            let refresh = Task { await state.refreshDetail() }
+            for _ in 0..<30 { try await Task.sleep(nanoseconds: 10_000_000); check("refresh \(next)") }
+            await refresh.value
+        }
+    }
+
     func testIdentityCacheAvoidsRepeatedWholeLineNormalization() {
         let cache = TMDBSourceIdentityCache()
         let episodes = (1...400).map { PlayEpisode(name: "第 \($0) 集", url: "https://example.invalid/video/\($0)?token=old") }
@@ -2533,4 +2610,45 @@ extension TMDBDetailTests {
             try XCTUnwrap(rendered.representation(using: .png, properties: [:])).write(to: output.appendingPathComponent("named-files-\(Int(width)).png"))
         }
     }
+}
+
+@MainActor private struct TMDBLayoutRoute: View {
+    @ObservedObject var state: AppState
+    let summary: VideoSummary
+    let metadata: TMDBDetailModel
+    let runtime: TMDBNetworkRuntime
+    var body: some View {
+        DetailView(detail: state.selectedDetail ?? .init(summary: summary), metadata: metadata, runtime: runtime)
+            .environmentObject(state)
+    }
+}
+
+private actor TMDBLayoutResponse {
+    enum Outcome { case streams, manyStreams, empty, failure }
+    let summary: VideoSummary
+    private var outcome: Outcome?
+    init(summary: VideoSummary) { self.summary = summary }
+    func release(_ value: Outcome) { outcome = value }
+    func detail() async throws -> VideoDetail {
+        while outcome == nil { try await Task.sleep(nanoseconds: 5_000_000) }
+        let result = outcome!
+        try await Task.sleep(nanoseconds: 60_000_000)
+        if result == .failure { throw AppError.site(String(repeating: "Source unavailable. ", count: 60)) }
+        let count = result == .manyStreams ? 240 : 5
+        let episodes = (1...count).map {
+            PlayEpisode(name: "第 \($0) 集 " + (result == .manyStreams ? String(repeating: "原始文件名", count: 80) : ""), url: "opaque:\($0)")
+        }
+        return VideoDetail(summary: summary, playSources: result == .empty ? [] : [.init(name: "Fixture", episodes: episodes)])
+    }
+}
+
+private struct TMDBLayoutProvider: SiteProvider {
+    let response: TMDBLayoutResponse
+    let site = SiteConfiguration(key: "layout", name: "Fixture", type: 1, api: "https://example.invalid")
+    let capability: SiteCapability = .standardJSON
+    func home() async throws -> SiteHome { .init(categories: [], recommendations: []) }
+    func category(id: String, page: Int, filters: [String: String]) async throws -> VideoPage { .init(items: [], pagination: .init(page: page, pageCount: 0)) }
+    func search(keyword: String, page: Int, quick: Bool) async throws -> VideoPage { try await category(id: keyword, page: page, filters: [:]) }
+    func detail(id: String) async throws -> VideoDetail { try await response.detail() }
+    func player(flag: String, episodeURL: String) async throws -> SitePlaybackResult { throw AppError.site("Unused") }
 }

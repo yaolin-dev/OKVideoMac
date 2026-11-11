@@ -118,10 +118,11 @@ public final class URLSessionHTTPClient: HTTPClient {
         let (data, response): (Data, URLResponse)
         let redirects: [HTTPRedirectHop]
         do {
-            if let earlyLimit = request.earlyResponseLimitBytes {
+            if let earlyLimit = request.responsePrefixBytes ?? request.earlyResponseLimitBytes {
                 let result = try await BoundedResponseLoader(
                     configuration: configuration,
                     maximumBytes: earlyLimit,
+                    returnsPrefix: request.responsePrefixBytes != nil,
                     maximumRedirects: request.maximumRedirects,
                     redirectedHeaders: redirectedHeaders,
                     redirectPolicy: request.redirectPolicy,
@@ -452,6 +453,7 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
     @unchecked Sendable {
     private let configuration: URLSessionConfiguration
     private let maximumBytes: Int
+    private let returnsPrefix: Bool
     private let maximumRedirects: Int
     private let redirectedHeaders: HTTPHeaders
     private let redirectPolicy: HTTPRedirectPolicy
@@ -473,6 +475,7 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
     init(
         configuration: URLSessionConfiguration,
         maximumBytes: Int,
+        returnsPrefix: Bool = false,
         maximumRedirects: Int,
         redirectedHeaders: HTTPHeaders,
         redirectPolicy: HTTPRedirectPolicy,
@@ -482,6 +485,7 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
     ) {
         self.configuration = configuration.copy() as! URLSessionConfiguration
         self.maximumBytes = max(1, maximumBytes)
+        self.returnsPrefix = returnsPrefix
         self.maximumRedirects = max(0, maximumRedirects)
         self.redirectedHeaders = redirectedHeaders
         self.redirectPolicy = redirectPolicy
@@ -529,7 +533,7 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
         completionHandler: @escaping (URLSession.ResponseDisposition) -> Void
     ) {
         let declaredLength = response.expectedContentLength
-        if declaredLength > Int64(maximumBytes) {
+        if !returnsPrefix && declaredLength > Int64(maximumBytes) {
             completionHandler(.cancel)
             finish(
                 .failure(
@@ -558,12 +562,19 @@ private final class BoundedResponseLoader: NSObject, URLSessionDataDelegate,
         lock.lock()
         let currentCount = data.count
         let exceedsLimit = newData.count > maximumBytes - currentCount
-        if !exceedsLimit {
+        if returnsPrefix {
+            data.append(newData.prefix(maximumBytes - currentCount))
+        } else if !exceedsLimit {
             data.append(newData)
         }
+        let prefixResult = returnsPrefix && data.count == maximumBytes
+            ? response.map { BoundedResponseResult(data: data, response: $0, redirects: redirects) }
+            : nil
         lock.unlock()
 
-        if exceedsLimit {
+        if let prefixResult {
+            finish(.success(prefixResult), cancelTask: true)
+        } else if exceedsLimit {
             finish(
                 .failure(
                     HTTPClientError.responseTooLarge(

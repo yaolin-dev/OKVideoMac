@@ -100,6 +100,9 @@ public struct HTTPRequest: Equatable, Sendable {
     /// bytes are exceeded. `nil` deliberately retains the established buffered
     /// request path used by existing providers.
     public var earlyResponseLimitBytes: Int?
+    /// Opt-in media sniffing: return only this prefix and cancel the download,
+    /// even when the server ignores Range. Never use for complete API bodies.
+    public var responsePrefixBytes: Int?
     public var maximumRedirects: Int
     public var redirectPolicy: HTTPRedirectPolicy
     /// Header fields that must be explicitly reapplied to redirected
@@ -120,6 +123,7 @@ public struct HTTPRequest: Equatable, Sendable {
         totalTimeout: TimeInterval? = nil,
         maximumResponseBytes: Int = 16 * 1_024 * 1_024,
         earlyResponseLimitBytes: Int? = nil,
+        responsePrefixBytes: Int? = nil,
         maximumRedirects: Int = 10,
         redirectPolicy: HTTPRedirectPolicy = .follow,
         redirectedHeaderFields: Set<String> = [],
@@ -136,6 +140,7 @@ public struct HTTPRequest: Equatable, Sendable {
         self.earlyResponseLimitBytes = earlyResponseLimitBytes.map {
             max(1, $0)
         }
+        self.responsePrefixBytes = responsePrefixBytes.map { max(1, min(maximumResponseBytes, $0)) }
         self.maximumRedirects = maximumRedirects
         self.redirectPolicy = redirectPolicy
         self.redirectedHeaderFields = redirectedHeaderFields

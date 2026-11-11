@@ -1,5 +1,7 @@
 # Immutable Corresponding-Source Release Process
 
+The 0.9.3 (Build 204) candidate uses `OKVideoMac-0.9.3-build204-SOURCE_RELEASE_INDEX.json` along with the public `OKVideoMac-0.9.3.dmg` and the internal `OKVideoMac-0.9.3-macOS-arm64.zip`. The exact-commit source, SBOM and signed feed follow the asset contract below.
+
 **2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
 ## Published 0.9.2 identity

@@ -141,3 +141,137 @@ test('only Bilibili CDN HTTPS URLs are eligible for the legacy path', () => {
   for (const url of ['http://127.0.0.1/private', 'https://example.com/file', 'https://bilivideo.com.evil.test/file', 'file:///tmp/x'])
     assert.equal(allowedMediaURL(url), false);
 });
+
+test('a mirror cannot omit the original strong ETag and splice bytes', () => {
+  const { validateResponse } = require('../Resources/NodePatches/bilibili-streaming.js');
+  const response = {status:206, headers:{'content-range':'bytes 10-99/100','content-length':'90'}};
+  assert.throws(() => validateResponse(response, 10, null, {total:100,etag:'"original"',url:'a'}, 'a'), /entity_changed/);
+  assert.throws(() => validateResponse(response, 10, null, {total:100,etag:null,url:'a'}, 'b'), /entity_changed/);
+});
+
+
+test('static DASH transport works across arbitrary Node site names without source code patches', async t => {
+  const {createDASHTransport}=require('../Resources/NodePatches/bilibili-streaming.js');
+  const data=Buffer.alloc(150000);for(let i=0;i<data.length;i++)data[i]=i%251;
+  const ranges=[];let cuts=0;let origin;
+  origin=await listen((req,res)=>{
+    if(req.url.includes('/mpd/')) {res.setHeader('Content-Type','application/dash+xml');res.end(`<MPD type="static"><Period><AdaptationSet><Representation id="32" codecs="avc1" mimeType="video/mp4"><BaseURL>${origin.url}/media</BaseURL><SegmentBase indexRange="0-5"/></Representation></AdaptationSet></Period></MPD>`);return;}
+    ranges.push(req.headers.range);const bytes=mediaResponse(req,res,data);
+    if(cuts++===0){res.write(bytes.subarray(0,8192));setTimeout(()=>res.destroy(),10);}else res.end(bytes);
+  });
+  const transport=createDASHTransport({request,isOwned:url=>url.startsWith(origin.url+'/'),headerTimeout:500,readTimeout:100});
+  const proxy=await listen((req,res)=>transport.handle(req,res));
+  t.after(()=>{for(const {server} of [origin,proxy]){server.closeAllConnections();server.close();}});
+  for(const site of ['brand-new-source','renamed-provider','any-script-version']) {
+    const path=transport.register(origin.url+`/spider/${site}/3/proxy/mpd/opaque`);
+    const manifest=await fetchBytes(proxy.url+path);
+    const child=/<BaseURL>([^<]+)<\/BaseURL>/.exec(manifest.data.toString())[1];
+    const result=await fetchBytes(proxy.url+child,{Range:'bytes=333-99999'});
+    assert.deepEqual(result.data,data.subarray(333,100000));
+  }
+  assert.deepEqual(ranges.slice(0,2),['bytes=333-99999','bytes=8525-99999']);
+  assert.throws(()=>transport.register('http://localhost/private'),/unowned_manifest/);
+});
+
+test('DASH expiration refreshes the manifest after its initial response has closed', async t=>{
+  const {createDASHTransport}=require('../Resources/NodePatches/bilibili-streaming.js');
+  const data=Buffer.alloc(4096,91);let manifests=0;let origin;
+  origin=await listen((req,res)=>{
+    if(req.url.includes('/mpd/')){manifests++;res.end(`<MPD><Representation id="7" codecs="avc1" mimeType="video/mp4"><BaseURL>${origin.url}/${manifests===1?'expired':'fresh'}</BaseURL><SegmentBase/></Representation></MPD>`);return;}
+    if(req.url==='/expired'){res.writeHead(403);res.end();return;}
+    res.end(mediaResponse(req,res,data));
+  });
+  const transport=createDASHTransport({request,isOwned:url=>url.startsWith(origin.url+'/'),headerTimeout:500,readTimeout:100});
+  const proxy=await listen((req,res)=>transport.handle(req,res));
+  t.after(()=>{for(const {server} of [origin,proxy]){server.closeAllConnections();server.close();}});
+  const path=transport.register(origin.url+'/spider/unknown/3/proxy/mpd/opaque');
+  const manifest=await fetchBytes(proxy.url+path);
+  const child=/<BaseURL>([^<]+)<\/BaseURL>/.exec(manifest.data.toString())[1];
+  assert.deepEqual((await fetchBytes(proxy.url+child)).data,data);
+  assert.equal(manifests,2);
+});
+
+test('DASH redirects remain bounded and strip private headers at the network boundary', async t=>{
+  const {Readable}=require('node:stream');
+  const {createDASHTransport}=require('../Resources/NodePatches/bilibili-streaming.js');
+  const seen=[];const data=Buffer.alloc(1000,74);
+  const transport=createDASHTransport({isOwned:u=>u.startsWith('http://127.0.0.1:12345/'),
+    request:async(url,options)=>{
+      seen.push({url,headers:options.headers});
+      if(url.includes('/proxy/mpd/'))return {status:302,headers:{location:'https://manifest.example/new/location.mpd'},data:Readable.from([])};
+      if(url.endsWith('.mpd'))return {status:200,headers:{},data:Readable.from([Buffer.from('<MPD><Representation id="v"><BaseURL>../clip.m4s</BaseURL><SegmentBase/></Representation></MPD>')])};
+      if(url.endsWith('/clip.m4s'))return {status:307,headers:{location:'https://cdn.example/final'},data:Readable.from([])};
+      return {status:206,headers:{'content-range':'bytes 0-999/1000','content-length':'1000',etag:'"stable"'},data:Readable.from([data])};
+    }});
+  const proxy=await listen((req,res)=>transport.handle(req,res));
+  t.after(()=>{proxy.server.closeAllConnections();proxy.server.close();});
+  const path=transport.register('http://127.0.0.1:12345/spider/arbitrary/3/proxy/mpd/opaque',
+    {Authorization:'private',Cookie:'private','X-Private':'private',Referer:'https://public.example/'});
+  const result=await fetchBytes(proxy.url+path);
+  const child=/<BaseURL>([^<]+)<\/BaseURL>/.exec(result.data.toString())[1];
+  assert.deepEqual((await fetchBytes(proxy.url+child)).data,data);
+  assert.equal(seen[0].headers.Authorization,'private');
+  assert.equal(seen[2].url,'https://manifest.example/clip.m4s');
+  for(const entry of seen.slice(1)){
+    for(const key of ['Authorization','Cookie','X-Private'])assert.equal(entry.headers[key],undefined);
+    assert.equal(entry.headers.Referer,'https://public.example/');
+  }
+  let loops=0;
+  const looping=createDASHTransport({isOwned:u=>u.startsWith('http://127.0.0.1:12345/'),request:async()=>{
+    loops++;return {status:302,headers:{location:'http://127.0.0.1:12345/proxy/loop'},data:Readable.from([])};
+  }});
+  const loopProxy=await listen((req,res)=>looping.handle(req,res));
+  t.after(()=>{loopProxy.server.closeAllConnections();loopProxy.server.close();});
+  assert.equal((await fetchBytes(loopProxy.url+looping.register('http://127.0.0.1:12345/proxy/loop'))).status,502);
+  assert.equal(loops,6);
+});
+
+test('inherited DASH addressing falls back without rewriting wrong byte resources', async t=>{
+  const {createDASHTransport}=require('../Resources/NodePatches/bilibili-streaming.js');
+  const xml='<MPD><BaseURL>https://cdn.example/show/</BaseURL><Representation id="v"><BaseURL>clip.m4s</BaseURL><SegmentBase/></Representation></MPD>';
+  let origin;origin=await listen((_req,res)=>res.end(xml));
+  const transport=createDASHTransport({request,isOwned:u=>u.startsWith(origin.url+'/')});
+  const proxy=await listen((req,res)=>transport.handle(req,res));
+  t.after(()=>{for(const {server} of [origin,proxy]){server.closeAllConnections();server.close();}});
+  const original=origin.url+'/spider/new/3/proxy/mpd/opaque';
+  const response=await fetchBytes(proxy.url+transport.register(original));
+  assert.equal(response.status,307);assert.equal(response.headers.location,original);
+  assert.equal(transport.parse('<MPD xml:base="https://cdn.example/"><Representation id="v"><BaseURL>clip.m4s</BaseURL><SegmentBase/></Representation></MPD>',original),null);
+});
+
+test('a redirected representation cannot change final entity without a strong validator', async t=>{
+  const {Readable}=require('node:stream');
+  const {createDASHTransport}=require('../Resources/NodePatches/bilibili-streaming.js');
+  let redirects=0;
+  const transport=createDASHTransport({isOwned:u=>u.startsWith('http://127.0.0.1:12345/'),
+    request:async(url)=>{
+      if(url.includes('/proxy/mpd/'))return {status:200,headers:{},data:Readable.from([Buffer.from('<MPD><Representation id="v"><BaseURL>https://cdn.example/route</BaseURL><SegmentBase/></Representation></MPD>')])};
+      if(url.endsWith('/route'))return {status:302,headers:{location:'https://cdn.example/entity'+(++redirects)},data:Readable.from([])};
+      const offset=redirects===1?0:100;
+      return {status:206,headers:{'content-range':`bytes ${offset}-999/1000`,'content-length':String(1000-offset)},data:Readable.from([Buffer.alloc(100,redirects)])};
+    }});
+  const proxy=await listen((req,res)=>transport.handle(req,res));
+  t.after(()=>{proxy.server.closeAllConnections();proxy.server.close();});
+  const manifest=await fetchBytes(proxy.url+transport.register('http://127.0.0.1:12345/proxy/mpd/a'));
+  const child=/<BaseURL>([^<]+)<\/BaseURL>/.exec(manifest.data.toString())[1];
+  await assert.rejects(fetchBytes(proxy.url+child));assert.equal(redirects,2);
+});
+
+test('DASH without HTTP Range stays a full stream and never splices a retry', async t=>{
+  const {createDASHTransport}=require('../Resources/NodePatches/bilibili-streaming.js');
+  const data=Buffer.alloc(10000,27);let mediaRequests=0,cut=false;let origin;
+  origin=await listen((req,res)=>{
+    if(req.url.includes('/proxy/mpd/')){res.end(`<MPD><Representation id="v"><BaseURL>${origin.url}/media</BaseURL><SegmentBase/></Representation></MPD>`);return;}
+    mediaRequests++;res.writeHead(200,{'Content-Type':'video/mp4','Content-Length':data.length});
+    if(cut){res.write(data.subarray(0,100));setTimeout(()=>res.destroy(),15);}else res.end(data);
+  });
+  const transport=createDASHTransport({request,isOwned:u=>u.startsWith(origin.url+'/'),readTimeout:100});
+  const proxy=await listen((req,res)=>transport.handle(req,res));
+  t.after(()=>{for(const {server} of [origin,proxy]){server.closeAllConnections();server.close();}});
+  const manifest=await fetchBytes(proxy.url+transport.register(origin.url+'/proxy/mpd/a'));
+  const child=/<BaseURL>([^<]+)<\/BaseURL>/.exec(manifest.data.toString())[1];
+  const response=await fetchBytes(proxy.url+child,{Range:'bytes=500-'});
+  assert.equal(response.status,200);assert.deepEqual(response.data,data);
+  assert.equal(response.headers['content-range'],undefined);assert.equal(mediaRequests,1);
+  cut=true;await assert.rejects(fetchBytes(proxy.url+child));assert.equal(mediaRequests,2);
+});

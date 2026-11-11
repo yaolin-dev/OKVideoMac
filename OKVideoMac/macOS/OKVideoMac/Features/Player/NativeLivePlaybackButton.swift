@@ -1,7 +1,8 @@
 import AppKit
 import SwiftUI
 
-/// AppKit owns the hover bezel, hit testing, accessibility and tooltip.
+/// AppKit retains activation, accessibility and the native tooltip; the bezel
+/// follows the same circular geometry as the other player toolbar controls.
 struct NativeLivePlaybackButton: NSViewRepresentable {
     let paused: Bool
     let action: () -> Void
@@ -9,9 +10,7 @@ struct NativeLivePlaybackButton: NSViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator(action: action) }
     func makeNSView(context: Context) -> NSButton {
         let button = LivePlaybackNSButton(image: NSImage(), target: context.coordinator, action: #selector(Coordinator.activate))
-        button.bezelStyle = .texturedRounded
-        button.isBordered = true
-        button.showsBorderOnlyWhileMouseInside = true
+        button.isBordered = false
         button.imagePosition = .imageOnly
         button.imageScaling = .scaleNone
         button.contentTintColor = .white
@@ -36,8 +35,37 @@ struct NativeLivePlaybackButton: NSViewRepresentable {
 
 /// Keep the actual AppKit hit area as large as the SwiftUI layout slot.
 /// Drawing, tracking and keyboard activation remain owned by NSButton.
-private final class LivePlaybackNSButton: NSButton {
+final class LivePlaybackNSButton: NSButton {
+    private var hoverArea: NSTrackingArea?
+    private(set) var hovering = false
     override var intrinsicContentSize: NSSize { NSSize(width: 36, height: 36) }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(rect: .zero,
+            options: [.inVisibleRect, .activeInKeyWindow, .mouseEnteredAndExited], owner: self)
+        addTrackingArea(area)
+        hoverArea = area
+        if let window {
+            hovering = window.isKeyWindow && bounds.contains(convert(window.mouseLocationOutsideOfEventStream, from: nil))
+        } else { hovering = false }
+        needsDisplay = true
+    }
+
+    override func mouseEntered(with event: NSEvent) { hovering = true; needsDisplay = true }
+    override func mouseExited(with event: NSEvent) { hovering = false; needsDisplay = true }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isEnabled && (isHighlighted || hovering && window?.isKeyWindow == true) {
+            let diameter = min(bounds.width, bounds.height)
+            let circle = NSRect(x: bounds.midX - diameter / 2, y: bounds.midY - diameter / 2,
+                                width: diameter, height: diameter)
+            NSColor.white.withAlphaComponent(isHighlighted ? 0.22 : 0.14).setFill()
+            NSBezierPath(ovalIn: circle).fill()
+        }
+        super.draw(dirtyRect)
+    }
 }
 
 /// Observe hover without intercepting the mute button's pointer events.

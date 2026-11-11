@@ -3,6 +3,8 @@
   "target": "OKVideoMacTests",
   "groups": {
     "logic": [
+      "PlaybackPreparationStateTests/testNeedsParsingRetainsConfiguredParsersAcrossProviderValidationPolicies",
+      "PlaybackPreparationStateTests/testOriginalPageActionDoesNotExposeLocalProxyOrMediaAsWebsite",
       "TMDBNamedFilenameTests/testNamedFilesShareMetadataAcrossVersionsWithoutChangingResourcesOrNavigation",
       "TMDBNamedFilenameTests/testVerifiedRangeSeasonKeepsExplicitOtherSeasonsSeparate",
       "PlayerEpisodeNavigationTests/testLaterDuplicateDoesNotBlockFourteenToFifteen",
@@ -153,7 +155,15 @@
       "SubtitleLiveInfoTests/testSubtitleDiagnosticsRetainFactsWithoutURLsPathsOrDialogue",
       "SubtitleLiveInfoTests/testBitmapAndEmbeddedSubtitlesDoNotOfferWrongRepairs",
       "SubtitleLiveInfoTests/testProgrammeSummaryFitsSmallWindowsWithoutActions",
-      "TMDBNamedFilenameTests/testLateSeasonAndArtworkKeepMountedShelfAndScrollPosition"
+      "TMDBNamedFilenameTests/testLateSeasonAndArtworkKeepMountedShelfAndScrollPosition",
+      "BilibiliPlaybackFixTests/testJavaFailureDispatchesOneRecoveryWithOriginalCheckpoint",
+      "BilibiliPlaybackFixTests/testClosingDuringRetryDelayPreventsReload",
+      "BilibiliPlaybackFixTests/testReplacementPlaybackCannotBeReloadedByOldFailure",
+      "BilibiliPlaybackFixTests/testJavaBiliAndDirectCDNAreCoveredWithoutMatchingUnrelatedSources",
+      "BilibiliPlaybackFixTests/testRecoveryRequiresObservedProgressAtCheckpointAndNotOnlyFileLoaded",
+      "BilibiliPlaybackFixTests/testRecoveryBudgetIsBoundedAcrossAttemptsAndResetsForNewPlayback",
+      "BilibiliPlaybackFixTests/testRecoveryCheckpointPreservesQualityAndPause",
+      "BilibiliPlaybackFixTests/testRecoveryRetiresOldSeekWithoutFakingNativeProgress"
     ],
     "desktop": [
       "TMDBNamedFilenameTests/testNamedFileDetailRendersMatchedArtSynopsisVersionsAndResourceCount",

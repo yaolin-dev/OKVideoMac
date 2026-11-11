@@ -1408,6 +1408,38 @@ enum NodeRuntimeContractFactory {
       response.once('close', () => finish(null));
     }
 
+    const dashTransport = process.env.OKVIDEO_DASH_TRANSPORT_MODULE
+      ? require(process.env.OKVIDEO_DASH_TRANSPORT_MODULE).createDASHTransport({
+        isOwned: value => Boolean(normalizeOwnedLoopbackURL(value)),
+        report: value => console.info(JSON.stringify(value)),
+        request: (value, options) => new Promise((resolve, reject) => {
+          const url = new URL(value);
+          const factory = url.protocol === 'https:' ? originalHTTPSRequest : originalHTTPRequest;
+          const request = factory(url, {method:'GET',headers:options.headers,signal:options.signal}, response => {
+            resolve({status:response.statusCode,headers:response.headers,data:response});
+          });
+          request.once('error',reject);request.end();
+        })
+      }) : null;
+
+    function registerDASHMediaSession(request, response) {
+      let body='', exceeded=false;
+      request.setEncoding('utf8');
+      request.on('data',chunk=>{if(!exceeded){body+=chunk;if(Buffer.byteLength(body)>32768){exceeded=true;body='';}}});
+      request.on('end',()=>{
+        try {
+          if(exceeded || !dashTransport)throw new Error('unavailable');
+          const value=JSON.parse(body);
+          if(typeof value.url!=='string' || !isPlainObject(value.headers || {}))throw new Error('invalid');
+          for(const [key,item] of Object.entries(value.headers || {}))
+            if(typeof item!=='string' || /[\r\n]/.test(key+item))throw new Error('invalid');
+          const path=dashTransport.register(value.url,value.headers || {});
+          response.statusCode=201;response.setHeader('Content-Type','application/json');
+          response.end(JSON.stringify({url:`http://127.0.0.1:${request.socket.localPort}${path}`}));
+        } catch {response.statusCode=400;response.end();}
+      });
+    }
+
     function correlatedRequest(originalRequest, defaultProtocol) {
       return function requestWithInvocation(...args) {
         const invocationID = invocationStorage.getStore();
@@ -1858,6 +1890,13 @@ enum NodeRuntimeContractFactory {
         if (request.method === 'POST' && request.url === '/msg') {
           receiveHostMessage(request, response);
           return;
+        }
+        if (request.method === 'POST' && requestURL.pathname === '/__okvideo/dash') {
+          registerDASHMediaSession(request,response);return;
+        }
+        if (dashTransport && (request.method === 'GET' || request.method === 'HEAD') &&
+            requestURL.pathname.startsWith('/__okvideo/dash/')) {
+          void dashTransport.handle(request,response);return;
         }
         if (request.method === 'POST' &&
             requestURL.pathname === '/__okvideo/baidu-media') {

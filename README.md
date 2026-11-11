@@ -1,5 +1,7 @@
 # OKVideoMac
 
+The current release candidate is **0.9.3 (Build 204)**. It improves playback preparation, DASH stream recovery, detail layout, live controls and danmaku motion. See [release notes](Docs/RELEASE_NOTES_0.9.3.md).
+
 The latest stable release is **0.9.2 (Build 198)** with original-resource history recovery, consistent episode navigation, compact controls, scoped Ali compatibility, subtitle encoding/CJK fallback and live programme summaries. Developer ID / Hardened Runtime, Apple Notarization **Accepted**, staple, Gatekeeper, installation, all seven exact-commit CI jobs and all 16 anonymous public downloads passed. See [release notes](Docs/RELEASE_NOTES_0.9.2.md), [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.2.md) and [readiness](Docs/RELEASE_READINESS_0.9.2.md).
 
 English | [简体中文](README_zh-CN.md)

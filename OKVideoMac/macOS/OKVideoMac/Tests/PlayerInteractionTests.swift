@@ -584,8 +584,8 @@ final class PlayerOverlayLayoutTests: XCTestCase {
     func testNativeEditingKeepsPanelSizeAndDoesNotStartPlayback() async throws {
         let channels = (1...30).map { channel("CCTV-\($0)") }
         var selections: [String] = [], closes = 0
-        let host = NSHostingView(rootView: PlayerChannelPicker(channels: channels, currentID: channels[15].id,
-            title: "频道", select: { selections.append($0) }, close: { closes += 1 })
+        let host = NSHostingView(rootView: PlayerChannelPicker(directory: PlayerChannelDirectory(channels: channels), currentID: channels[15].id,
+            title: "频道", memory: PlayerChannelPickerMemory(), select: { id, _ in selections.append(id) }, close: { closes += 1 })
             .padding(14).frame(width: 370, height: 490).background(Color.black).environment(\.colorScheme, .dark))
         let window = NSWindow(contentRect: .init(x: -2500, y: -2000, width: 370, height: 490), styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = host

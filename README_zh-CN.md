@@ -1,5 +1,7 @@
 # OKVideoMac
 
+当前发布候选为 **0.9.3（Build 204）**，包含播放解析、DASH 续传、详情页布局、直播交互和弹幕动画修复。见[发布说明](Docs/RELEASE_NOTES_0.9.3.md)。
+
 最新稳定版本为 **0.9.2（Build 198）**，包含原始资源历史恢复、分集导航、紧凑播放控制、阿狸原限定兼容、字幕编码与中文后备字体、直播节目摘要。Developer ID／Hardened Runtime、Apple Notarization **Accepted**、staple、Gatekeeper、安装、准确提交的七项 CI 及全部 16 项匿名公开下载均通过。见[发布说明](Docs/RELEASE_NOTES_0.9.2.md)、[正式验证及 SHA-256](Docs/RELEASE_VALIDATION_0.9.2.md)和[就绪记录](Docs/RELEASE_READINESS_0.9.2.md)。
 
 [English](README.md) | 简体中文

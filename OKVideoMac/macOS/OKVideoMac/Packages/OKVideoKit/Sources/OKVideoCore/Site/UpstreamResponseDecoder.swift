@@ -579,7 +579,7 @@ enum UpstreamResponseDecoder {
         }
     }
 
-    private static func firstNonEmptyString(_ values: JSONValue?...) -> String? {
+    fileprivate static func firstNonEmptyString(_ values: JSONValue?...) -> String? {
         values.lazy.compactMap { messageString($0) }.first
     }
 
@@ -895,7 +895,25 @@ public enum SpiderResponseMapper {
         // URL. Several legacy cloud spiders leave a stale/fallback URL beside
         // `msg`; handing that URL to the player hides the real authorization
         // or provider error behind a generic `loading failed`.
-        if let message = response.message {
+        let object = topLevelObject(value) ?? [:]
+        func acknowledgement(_ message: String) -> Bool {
+            let value = message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            return ["ok", "success", "successful", "成功", "请求成功", "操作成功", "播放成功", "解析成功", "获取成功", "登录成功", "no error"].contains(value)
+        }
+        let additionalMessage = UpstreamResponseDecoder.firstNonEmptyString(object["message"])
+        let legacyError = response.message.flatMap { acknowledgement($0) ? nil : $0 }
+        // Unlike FongMi's terminal msg, some generic APIs use message for
+        // informational success text. Explicit failure/status and an unusable
+        // result take precedence; harmless text beside valid media is retained
+        // as a successful result rather than disabling an unrelated provider.
+        let messageIsFailure = additionalMessage.map {
+            !acknowledgement($0) && $0.range(of: "HTTP[^0-9]*[45][0-9]{2}|失败|错误|封禁|拒绝|过期|未登录|需要登录|请.{0,6}登录|不可用|denied|forbidden|blocked|failed|error|expired|unauthorized|unavailable|log[ -]?in",
+                options: [.regularExpression, .caseInsensitive]) != nil
+        } ?? false
+        if response.businessFailure || legacyError != nil || messageIsFailure
+            || (response.player == nil && additionalMessage != nil) {
+            let message = legacyError ?? additionalMessage.flatMap { acknowledgement($0) ? nil : $0 }
+                ?? "上游服务拒绝了播放请求"
             throw ProviderPlaybackError(message)
         }
         guard var player = response.player else {

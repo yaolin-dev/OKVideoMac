@@ -1535,6 +1535,7 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
         // Site-level headers (for example Referer/User-Agent) are part of the
         // provider contract. Player-response headers override them, but must
         // not replace the whole request context.
+        if result.flag.isEmpty { result.flag = flag }
         result.headers = HTTPHeaders(site.header).merging(result.headers)
         result.resourceReference = playbackResourceReference(
             flag: flag,
@@ -1657,6 +1658,12 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             }
             pushedDanmakuLock.lock(); danmakuMonitor = task; pushedDanmakuLock.unlock()
         }
+        result.url = await registerDASHTransport(result.url, headers: result.headers, baseURL: invocation.baseURL)
+        for index in result.qualities.indices {
+            let quality = result.qualities[index]
+            result.qualities[index] = PlaybackQuality(name: quality.name,
+                url: await registerDASHTransport(quality.url, headers: result.headers, baseURL: invocation.baseURL))
+        }
         // Media-session identity is runtime-only. Generic Node playback still
         // needs transport/range metadata even when there is no safe durable
         // history reference. Its hashed reference is never exposed through
@@ -1670,6 +1677,22 @@ final class NodeHTTPSpiderSiteProvider: SiteProvider, AggregateSearchProviding {
             rangePolicy: transportSelection.rangePolicy
         )
         return result
+    }
+
+    private func registerDASHTransport(_ value: String, headers: HTTPHeaders, baseURL: URL) async -> String {
+        guard let url = URL(string: value), isOwnedByRuntime(value, baseURL: baseURL),
+              url.pathExtension.lowercased() == "mpd" || url.pathComponents.contains("mpd") else { return value }
+        let payload = BaiduRuntimeMediaRegistration(url: value, headers: headers.dictionary)
+        guard let body = try? JSONEncoder().encode(payload),
+              let response = try? await httpClient.send(HTTPRequest(
+                url: baseURL.appendingPathComponent("__okvideo/dash"), method: .post,
+                headers: ["Content-Type": "application/json"], body: body, timeout: 4,
+                maximumResponseBytes: 8192, maximumRedirects: 0, retryPolicy: .none)),
+              response.statusCode == 201,
+              let registration = try? JSONDecoder().decode(BaiduRuntimeMediaRegistrationResponse.self, from: response.body),
+              let relay = URL(string: registration.url), isOwnedByRuntime(registration.url, baseURL: baseURL),
+              relay.path.hasPrefix("/__okvideo/dash/") else { return value }
+        return registration.url
     }
 
     private func runtimeMediaReference(

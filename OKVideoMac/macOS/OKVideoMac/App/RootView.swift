@@ -1702,6 +1702,9 @@ final class AppKeyCommandMonitorView: NSView {
     func handleKeyEvent(_ event: NSEvent) -> NSEvent? {
         guard let window, window.isKeyWindow, event.window === window,
               !WindowModalRegistry.isPresented(in: window) else { return event }
+        // A mounted channel picker owns navigation before playback shortcuts,
+        // regardless of which native event monitor was registered first.
+        if PlayerChannelKeyboardBridge.KeyView.route(event, in: window) { return nil }
         // SwiftUI/AppKit can defer creating the native View menu command until
         // its first opening. Route the standard chord to this key window's
         // native action even before that menu exists, including in search fields.

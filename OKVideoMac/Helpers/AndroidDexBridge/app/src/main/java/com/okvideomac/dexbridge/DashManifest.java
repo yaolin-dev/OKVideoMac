@@ -45,6 +45,10 @@ final class DashManifest {
     }
 
     static byte[] rewrite(InputStream input, String base, Registrar registrar) throws IOException {
+        return rewrite(input, base, registrar, ignored -> {});
+    }
+
+    static byte[] rewrite(InputStream input, String base, Registrar registrar, java.util.function.Consumer<Boolean> type) throws IOException {
         ByteArrayOutputStream bytes = new ByteArrayOutputStream();
         byte[] buffer = new byte[8192];
         try (InputStream body = input) {
@@ -68,6 +72,7 @@ final class DashManifest {
             builder.setEntityResolver((publicID, systemID) -> { throw new SAXException("External entity rejected"); });
             Document document = builder.parse(new ByteArrayInputStream(bytes.toByteArray()));
             if (!"MPD".equals(document.getDocumentElement().getLocalName())) throw new IOException("Invalid MPD root");
+            type.accept(!"dynamic".equalsIgnoreCase(document.getDocumentElement().getAttribute("type")));
             expandInheritedSegments(document);
             rewriteElement(document.getDocumentElement(), Collections.singletonList(base), registrar);
             ByteArrayOutputStream output = new ByteArrayOutputStream();
