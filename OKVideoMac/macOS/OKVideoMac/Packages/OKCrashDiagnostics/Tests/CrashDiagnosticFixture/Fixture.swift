@@ -33,6 +33,9 @@ enum Fixture {
             case "throw": ok_fixture_original_throw()
             case "rethrow": ok_fixture_rethrow()
             case "signal": raise(SIGABRT)
+            case "signalWhileRecording":
+                DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(20)) { raise(SIGABRT) }
+                while true { manager.record(.playbackPreparing, window: .player) }
             default: exit(64)
             }
         }

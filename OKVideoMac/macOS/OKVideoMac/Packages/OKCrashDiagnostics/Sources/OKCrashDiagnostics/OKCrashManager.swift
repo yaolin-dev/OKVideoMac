@@ -51,7 +51,7 @@ public final class OKCrashManager {
                     // Archive failure must not be followed by purging the only remaining copy.
                     try store.archiveRaw(data)
                     do {
-                        try store.save(CrashMapper.parse(data))
+                        try store.save(CrashMapper.parse(data, loadOperations: store.operations))
                         recovered = true
                     } catch { recoveryFailed = true }
                 }
@@ -66,13 +66,18 @@ public final class OKCrashManager {
         let permissionResult = fchmod(descriptor, 0o600)
         Darwin.close(descriptor)
         guard permissionResult == 0 else { throw CrashDiagnosticError.unavailable }
-        reporter.customData = try JSONEncoder().encode(metadata)
+        // The native writer frees its previous custom-data buffer when replaced.
+        // Install immutable run metadata ONCE, before enabling fatal handlers.
+        let session = UUID().uuidString
+        var immutableMetadata = metadata
+        immutableMetadata.operationSession = session
+        reporter.customData = try JSONEncoder().encode(immutableMetadata)
         try reporter.enableAndReturnError()
-        let nativeReporter = reporter
+        let operationStore = store
         trail = CrashOperationTrail { operations in
-            var updated = metadata
-            updated.operations = operations
-            if let data = try? JSONEncoder().encode(updated) { nativeReporter.customData = data }
+            // Normal execution only. A crash during atomic replacement leaves
+            // the last complete snapshot; no mutable pointer is read by the handler.
+            try? operationStore.saveOperations(operations, session: session)
         }
         record(.launch)
     }

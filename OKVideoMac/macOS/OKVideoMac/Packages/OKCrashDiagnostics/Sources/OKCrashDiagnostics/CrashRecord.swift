@@ -46,6 +46,7 @@ public struct RunMetadata: Codable, Sendable {
     public let build: String
     public let imageVMAddresses: [String: UInt64]?
     public var operations: [CrashOperation]? = nil
+    var operationSession: String? = nil
     public init(version: String, build: String, imageVMAddresses: [String: UInt64]? = nil) {
         self.version = version; self.build = build; self.imageVMAddresses = imageVMAddresses
     }
@@ -55,6 +56,9 @@ public enum CrashMapper {
     public static let maxRawBytes = 1_048_576
     public static let maxRecordBytes = 4_194_304
     public static func parse(_ data: Data) throws -> CrashRecord {
+        try parse(data, loadOperations: { _ in nil })
+    }
+    static func parse(_ data: Data, loadOperations: (String) -> [CrashOperation]?) throws -> CrashRecord {
         guard data.count <= maxRawBytes else { throw CrashDiagnosticError.invalidReport }
         let report = try PLCrashReport(data: data)
         guard let rawMeta = report.customData,
@@ -100,7 +104,8 @@ public enum CrashMapper {
             result.exception = .init(name: ExceptionRedactor.name(exception.exceptionName),
                 reason: ExceptionRedactor.reason(exception.exceptionReason), frames: frames(originalFrames))
         }
-        result.operations = meta.operations.map { Array($0.suffix(CrashOperation.capacity)) }
+        result.operations = meta.operationSession.flatMap(loadOperations)
+            ?? meta.operations.map { Array($0.suffix(CrashOperation.capacity)) }
         result.imageCount = mappedImages.count
         result.omittedImageCount = mappedImages.count - images.count
         guard result.isValid else { throw CrashDiagnosticError.invalidReport }

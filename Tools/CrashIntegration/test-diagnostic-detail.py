@@ -111,6 +111,18 @@ def main():
                 assert len(list((root / 'pending').glob('*.json'))) == 1
                 result['transport'] = 'SDK -> isolated worker -> HTTP 503 -> same pending event'
             cases.append(result)
+        # Concurrent crash during snapshot updates must preserve a complete prior snapshot.
+        stress = []
+        for index in range(5):
+            root = args.output / f'concurrent-{index}'
+            invoke('signalWhileRecording', root, crash=True)
+            recovered = invoke('recover', root)
+            assert len(recovered) == 1
+            operations = recovered[0]['operations']
+            assert 1 <= len(operations) <= 32
+            assert operations[-1]['kind'] == 'playbackPreparing'
+            assert all(a['sequence'] < b['sequence'] for a, b in zip(operations, operations[1:]))
+            stress.append({'eventID': recovered[0]['id'], 'lastSequence': operations[-1]['sequence']})
         # Conversion failure must retain the unchanged native bytes instead of silently purging them.
         damaged_root = args.output / 'malformed-recovery'
         assert invoke('recover', damaged_root) == []
@@ -119,7 +131,7 @@ def main():
         slot.write_bytes(malformed)
         assert invoke('recover', damaged_root) == []
         assert any(p.read_bytes() == malformed for p in (damaged_root / 'native-archive').glob('*.plcrash'))
-        summary = {'status': 'passed', 'malformedNativePreserved': True, 'cases': cases, 'backendSentryRequests': 0, 'loopbackPackets': len(packets)}
+        summary = {'status': 'passed', 'malformedNativePreserved': True, 'concurrentCrashSnapshots': stress, 'cases': cases, 'backendSentryRequests': 0, 'loopbackPackets': len(packets)}
         (args.output / 'summary.json').write_text(json.dumps(summary, indent=2) + '\n')
         print(json.dumps(summary, indent=2))
     finally:

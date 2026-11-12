@@ -97,4 +97,24 @@ final class DiagnosticPayloadTests: XCTestCase {
         try store.discard()
         XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: store.rawArchive.path).isEmpty)
     }
+
+    func testOperationSnapshotsMatchOnlyTheirRunAndRemainBoundedPrivateAndAtomic() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let store = try ReportStore(root: root)
+        let session = UUID().uuidString
+        let operation = CrashOperation(sequence: 1, timestamp: Date(), uptime: 1, kind: .navigationLive, window: .browser)
+        try store.saveOperations([operation], session: session)
+        // An interrupted temporary write cannot replace the last complete snapshot.
+        try Data("partial".utf8).write(to: store.operationSnapshots.appendingPathComponent("unfinished.tmp"))
+        XCTAssertEqual(store.operations(session: session), [operation])
+        XCTAssertNil(store.operations(session: UUID().uuidString))
+        XCTAssertNil(store.operations(session: "../pending"))
+        let path = store.operationSnapshots.appendingPathComponent(session + ".json")
+        XCTAssertEqual(try FileManager.default.attributesOfItem(atPath: path.path)[.posixPermissions] as? Int, 0o600)
+        for _ in 0..<5 { try store.saveOperations([operation], session: UUID().uuidString) }
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: store.operationSnapshots.path).count, 3)
+        try store.discard()
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: store.operationSnapshots.path).isEmpty)
+    }
 }

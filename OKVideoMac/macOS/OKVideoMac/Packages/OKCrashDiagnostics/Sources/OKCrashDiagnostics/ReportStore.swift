@@ -7,6 +7,7 @@ public final class ReportStore {
     public let pending: URL
     public let cache: URL
     public let rawArchive: URL
+    let operationSnapshots: URL
     private let consentURL: URL
     private var lease: Int32 = -1
     private let lock = NSLock()
@@ -18,6 +19,7 @@ public final class ReportStore {
         self.root = root; pending = root.appendingPathComponent("pending", isDirectory: true)
         cache = root.appendingPathComponent("sentry-cache", isDirectory: true)
         rawArchive = root.appendingPathComponent("native-archive", isDirectory: true)
+        operationSnapshots = root.appendingPathComponent("operation-snapshots", isDirectory: true)
         consentURL = root.appendingPathComponent("consent.json")
         try Self.privateDirectory(root)
         lease = open(root.appendingPathComponent("instance.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -27,6 +29,7 @@ public final class ReportStore {
         }
         try Self.privateDirectory(pending)
         try Self.privateDirectory(rawArchive)
+        try Self.privateDirectory(operationSnapshots)
         let consentSize = (try? consentURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max
         consentValue = consentSize <= 4096 && (try? JSONDecoder().decode(Bool.self, from: Data(contentsOf: consentURL))) == true
         // The application owns retries through bounded, sanitized records. Never replay an SDK cache.
@@ -41,6 +44,42 @@ public final class ReportStore {
         if !value { consentValue = false }
         try Self.write(JSONEncoder().encode(value), to: consentURL)
         consentValue = value
+    }
+    func saveOperations(_ operations: [CrashOperation], session: String) throws {
+        guard UUID(uuidString: session)?.uuidString == session,
+              operations.count <= CrashOperation.capacity, operations.allSatisfy(\.isValid) else {
+            throw CrashDiagnosticError.invalidReport
+        }
+        let url = operationSnapshots.appendingPathComponent(session + ".json")
+        let first = !FileManager.default.fileExists(atPath: url.path)
+        let data = try JSONEncoder().encode(operations)
+        guard data.count <= 65_536 else { throw CrashDiagnosticError.invalidReport }
+        try Self.write(data, to: url)
+        if first { try pruneOperations(now: Date()) }
+    }
+    func operations(session: String) -> [CrashOperation]? {
+        guard UUID(uuidString: session)?.uuidString == session else { return nil }
+        let url = operationSnapshots.appendingPathComponent(session + ".json")
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              attributes[.type] as? FileAttributeType == .typeRegular,
+              let size = attributes[.size] as? NSNumber, size.intValue <= 65_536,
+              let data = try? Data(contentsOf: url),
+              let operations = try? JSONDecoder().decode([CrashOperation].self, from: data),
+              operations.count <= CrashOperation.capacity, operations.allSatisfy(\.isValid) else { return nil }
+        return operations
+    }
+    private func pruneOperations(now: Date) throws {
+        var valid: [(URL, Date)] = []
+        for url in try FileManager.default.contentsOfDirectory(at: operationSnapshots, includingPropertiesForKeys: nil) {
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+            if let date, date <= now.addingTimeInterval(86400), now.timeIntervalSince(date) <= Self.retention,
+               operations(session: url.deletingPathExtension().lastPathComponent) != nil {
+                valid.append((url, date))
+            } else { try FileManager.default.removeItem(at: url) }
+        }
+        for old in valid.sorted(by: { $0.1 > $1.1 }).dropFirst(Self.maxReports) {
+            try FileManager.default.removeItem(at: old.0)
+        }
     }
     /// Local recovery only; this directory is never passed to the upload worker.
     public func archiveRaw(_ data: Data, now: Date = Date()) throws {
@@ -91,8 +130,10 @@ public final class ReportStore {
     public func acknowledge(_ record: CrashRecord) throws { try FileManager.default.removeItem(at: file(record.id)) }
     public func discard() throws {
         for url in try files() { try FileManager.default.removeItem(at: url) }
-        for url in try FileManager.default.contentsOfDirectory(at: rawArchive, includingPropertiesForKeys: nil) {
-            try FileManager.default.removeItem(at: url)
+        for directory in [rawArchive, operationSnapshots] {
+            for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) {
+                try FileManager.default.removeItem(at: url)
+            }
         }
     }
     public func removeSDKCache() throws { if FileManager.default.fileExists(atPath: cache.path) { try FileManager.default.removeItem(at: cache) } }
@@ -100,6 +141,7 @@ public final class ReportStore {
     private func files() throws -> [URL] { try FileManager.default.contentsOfDirectory(at: pending, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" } }
     public func prune(now: Date = Date()) throws {
         try pruneRawArchive(now: now)
+        try pruneOperations(now: now)
         var valid: [(URL, Date)] = []
         for url in try files() {
             if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= CrashMapper.maxRecordBytes,

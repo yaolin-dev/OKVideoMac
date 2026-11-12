@@ -23,8 +23,8 @@ public struct CrashOperation: Codable, Equatable, Sendable {
     }
 }
 
-/// Updated during normal execution, never from a fatal-signal handler. PLCrashReporter
-/// copies this bounded snapshot into its report, so a restart cannot substitute new actions.
+/// Updated during normal execution, never from a fatal-signal handler. The bounded
+/// snapshot is atomically persisted and matched to immutable native run metadata on recovery.
 final class CrashOperationTrail {
     private var entries: [CrashOperation] = []
     private var sequence: UInt64 = 0
