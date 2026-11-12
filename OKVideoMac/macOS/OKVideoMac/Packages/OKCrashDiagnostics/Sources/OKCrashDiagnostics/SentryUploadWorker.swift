@@ -43,7 +43,7 @@ public enum SentryUploadWorker {
             while let chunk = try FileHandle.standardInput.read(upToCount: 1), !chunk.isEmpty {
                 if chunk[0] == 10 { break }
                 packet.append(chunk)
-                guard packet.count <= CrashMapper.maxRawBytes else { exit(2) }
+                guard packet.count <= CrashMapper.maxRecordBytes + 8192 else { exit(2) }
             }
             let input = try JSONDecoder().decode(Input.self, from: packet)
             guard input.record.isValid else { exit(2) }
@@ -119,7 +119,7 @@ public enum SentryUploadWorker {
         options.attachStacktrace = false
         options.attachAllThreads = false
         options.swiftAsyncStacktraces = false
-        options.maxBreadcrumbs = 0
+        options.maxBreadcrumbs = UInt(CrashOperation.capacity)
         options.maxFeatureFlags = 0
         options.maxAttachmentSize = 0
         options.maxCacheItems = 1
@@ -184,15 +184,49 @@ public enum SentryUploadWorker {
             }, registers: [:])
             return t
         }
-        let exception = Exception(value: record.signalCode, type: record.signal)
+        let original = record.exception
+        let exception = Exception(value: original?.reason ?? record.signalCode, type: original?.name ?? record.signal)
         let crashedThread = event.threads?.first(where: { $0.crashed?.boolValue == true })
         exception.threadId = crashedThread?.threadId
-        // Sentry groups exceptions by this stack; threadId alone only enables thread display.
-        // Reuse the same allowlisted frames, with no additional capture or context.
-        exception.stacktrace = crashedThread?.stacktrace
+        // Preserve both: exception.stacktrace is the first throw, threads retain the abort stack.
+        if let original, !original.frames.isEmpty {
+            exception.stacktrace = SentryStacktrace(frames: original.frames.map { frame in
+                let f = Frame(); f.instructionAddress = String(format: "0x%llx", frame.pc)
+                if let base = frame.imageBase { f.imageAddress = String(format: "0x%llx", base) }
+                f.inApp = NSNumber(value: frame.imageBase.map { ownImageBases.contains($0) } ?? false)
+                return f
+            }, registers: [:])
+        } else { exception.stacktrace = crashedThread?.stacktrace }
         let mechanism = Mechanism(type: "plcrashreporter"); mechanism.handled = false
         exception.mechanism = mechanism
         event.exceptions = [exception]
+        if record.imageCount != nil || original != nil || record.operations != nil {
+            event.context?["crash_diagnostics"] = [
+                "schema": 2, "signal": record.signal, "signal_code": record.signalCode,
+                "exception_info_available": original != nil,
+                "first_throw_stack_available": !(original?.frames.isEmpty ?? true),
+                "image_count": record.imageCount ?? record.images.count,
+                "omitted_image_count": record.omittedImageCount ?? 0
+            ]
+        }
+        if let operations = record.operations, !operations.isEmpty {
+            event.breadcrumbs = operations.map { operation in
+                let crumb = Breadcrumb()
+                crumb.level = .info
+                crumb.category = "app.operation"
+                crumb.type = [.pointerDown, .scroll, .keyboardCommand].contains(operation.kind) ? "user" : "default"
+                crumb.message = operation.kind.rawValue
+                crumb.timestamp = operation.timestamp
+                crumb.setData(value: operation.sequence, key: "sequence")
+                crumb.setData(value: operation.uptime, key: "uptime")
+                crumb.setData(value: operation.window.rawValue, key: "window")
+                return crumb
+            }
+            if let last = operations.last {
+                event.context?["last_operation"] = ["kind": last.kind.rawValue, "window": last.window.rawValue,
+                    "sequence": last.sequence, "uptime": last.uptime]
+            }
+        }
         event.debugMeta = record.images.map { image in
             let meta = DebugMeta(); meta.type = "macho"; meta.debugID = image.uuid
             meta.imageAddress = String(format: "0x%llx", image.base)

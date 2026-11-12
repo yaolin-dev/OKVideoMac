@@ -8,6 +8,11 @@ public final class OKCrashManager {
     private let reporter: PLCrashReporter
     public private(set) var recovered = false
     public private(set) var recoveryFailed = false
+    private var trail: CrashOperationTrail?
+
+    public func record(_ kind: CrashOperation.Kind, window: CrashOperation.Window = .none) {
+        trail?.record(kind, window: window)
+    }
 
     public init(root: URL, metadata: RunMetadata) throws {
         store = try ReportStore(root: root)
@@ -41,11 +46,19 @@ public final class OKCrashManager {
                 guard size <= CrashMapper.maxRawBytes else { throw CrashDiagnosticError.invalidReport }
                 // An empty prepared slot is a clean exit, not a malformed crash.
                 if size > 0 {
-                    let record = try CrashMapper.parse(reporter.loadPendingCrashReportDataAndReturnError())
-                    try store.save(record)
-                    recovered = true
+                    let data = try reporter.loadPendingCrashReportDataAndReturnError()
+                    // Preserve the original exception and native metadata before conversion.
+                    // Archive failure must not be followed by purging the only remaining copy.
+                    try store.archiveRaw(data)
+                    do {
+                        try store.save(CrashMapper.parse(data))
+                        recovered = true
+                    } catch { recoveryFailed = true }
                 }
-            } catch { recoveryFailed = true }
+            } catch {
+                recoveryFailed = true
+                throw error // Keep the pending native file intact; do not overwrite it on enable.
+            }
             try reporter.purgePendingCrashReportAndReturnError()
         }
         let descriptor = Darwin.open(slot.path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -55,5 +68,12 @@ public final class OKCrashManager {
         guard permissionResult == 0 else { throw CrashDiagnosticError.unavailable }
         reporter.customData = try JSONEncoder().encode(metadata)
         try reporter.enableAndReturnError()
+        let nativeReporter = reporter
+        trail = CrashOperationTrail { operations in
+            var updated = metadata
+            updated.operations = operations
+            if let data = try? JSONEncoder().encode(updated) { nativeReporter.customData = data }
+        }
+        record(.launch)
     }
 }

@@ -1,5 +1,7 @@
 # OKVideoMac
 
+The current release candidate is **0.9.3 (Build 205)**, prepared locally for crash diagnostics. It preserves exception details, first-throw stacks and bounded operation history; UI behavior is unchanged. This candidate has not been published.
+
 The latest stable release is **0.9.3 (Build 204)**, with playback preparation, DASH recovery, stable detail shelves, grouped live channels and danmaku fixes. See [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.3.md).
 
 English | [简体中文](README_zh-CN.md)

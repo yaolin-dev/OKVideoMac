@@ -81,7 +81,7 @@ try:
         assert event['environment'] == 'okvideomac-crash-integration-acceptance'
         assert event['release'] == 'com.okvideomac.OKVideoMac@0.8.4+1377001'
         assert set(event) == {'contexts', 'debug_meta', 'dist', 'environment', 'event_id',
-                              'exception', 'level', 'platform', 'release', 'threads', 'timestamp'}
+                              'exception', 'level', 'platform', 'release', 'threads', 'timestamp', 'breadcrumbs'}
         for forbidden in ['/Users/', 'DO_NOT_SEND', 'token=secret', 'example.invalid', 'Application Support']:
             assert forbidden not in json.dumps(event)
         results.append({'kind': kind, 'root': str(root), 'event_id': record['id'],

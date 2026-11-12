@@ -14,6 +14,10 @@ let package = Package(
         .target(name: "OKCrashDiagnostics", dependencies: ["CrashReporter", "Sentry", "DiagnosticHandlers"],
                 resources: [.copy("Resources/PrivacyInfo.xcprivacy"), .copy("Resources/PLCrashReporter-LICENSE.txt"), .copy("Resources/Sentry-LICENSE.txt"), .copy("Resources/Sentry-PrivacyInfo.xcprivacy")],
                 linkerSettings: [.linkedLibrary("c++")]),
+        .testTarget(name: "OKCrashDiagnosticsTests", dependencies: ["OKCrashDiagnostics"]),
+        .target(name: "CrashExceptionFixture", path: "Tests/CrashExceptionFixture", publicHeadersPath: "include"),
+        .executableTarget(name: "CrashDiagnosticFixture", dependencies: ["OKCrashDiagnostics", "CrashExceptionFixture"],
+                          path: "Tests/CrashDiagnosticFixture"),
     ],
     swiftLanguageVersions: [.v5]
 )

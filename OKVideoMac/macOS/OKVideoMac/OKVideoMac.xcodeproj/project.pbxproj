@@ -24,6 +24,7 @@
 		1D6071FF2EABE097F03A3E8B /* NativeLiveChannelPage.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF7C514F1DF97F4D957CDFAD /* NativeLiveChannelPage.swift */; };
 		217D27E1ABEB9E6F340600E0 /* PlayerChannelGroupsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 70FC6A47DBF2F1C0A37718F0 /* PlayerChannelGroupsTests.swift */; };
 		23F3274D09AD9ABB49C2870B /* PlayerInteractionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 303F9D189B3E37ACA85D261E /* PlayerInteractionTests.swift */; };
+		24731E4C28959E95EE8F0169 /* CrashOperationObserverTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9333CDF5609D1BC8B5F132C2 /* CrashOperationObserverTests.swift */; };
 		2626ECCA6E7B2154476D426C /* LiveSettingsPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = BF84766163A2D4D0B363B57B /* LiveSettingsPane.swift */; };
 		2685130620C85C8863F08882 /* AppStartupControllerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 579EA0116028BFAB72EEFC1F /* AppStartupControllerTests.swift */; };
 		285AF5B7AA73E51C0BE0F632 /* NodeHTTPSpiderSiteProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 617A00084B74B412C7C3ACB9 /* NodeHTTPSpiderSiteProvider.swift */; };
@@ -159,6 +160,7 @@
 		E922E544FF4255799732AD50 /* CrashSparkleProbe.swift in Sources */ = {isa = PBXBuildFile; fileRef = 353D91BDF12C89AA7B745FA6 /* CrashSparkleProbe.swift */; };
 		E9B240357B713DC4E27CAFDB /* SidebarSearchState.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0D75E77B3CF3727CBF3EDAC3 /* SidebarSearchState.swift */; };
 		E9BEB01DD25B5D4C51A88CDA /* StartupNewWindowGateTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6090A546B2B362215C6FFC65 /* StartupNewWindowGateTests.swift */; };
+		EABB929345C54BCA988849BF /* CrashOperationObserver.swift in Sources */ = {isa = PBXBuildFile; fileRef = 25BD5DE6C1B6B67DA9103978 /* CrashOperationObserver.swift */; };
 		EB38C679BF2A786E9E0B233D /* THIRD_PARTY_LICENSES.md in Resources */ = {isa = PBXBuildFile; fileRef = 8AB307256CE6590A5494384D /* THIRD_PARTY_LICENSES.md */; };
 		ECA6220482C929CEC45E60E4 /* BrowserPlaybackPerformanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3DA912A51A5386083E70F554 /* BrowserPlaybackPerformanceTests.swift */; };
 		F1A9FDB53D20B5C5272E6A7A /* LiveBackgroundActivityView.swift in Sources */ = {isa = PBXBuildFile; fileRef = DA77A8309686173F871CCF05 /* LiveBackgroundActivityView.swift */; };
@@ -242,6 +244,7 @@
 		234BEE7B0F12E1ADF62B0FC5 /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
 		234E1FED1E0517E2BFF32B96 /* PlayerEpisodeNavigation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerEpisodeNavigation.swift; sourceTree = "<group>"; };
 		258F4459CEDDE936A8229C2F /* PosterDiskCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PosterDiskCacheTests.swift; sourceTree = "<group>"; };
+		25BD5DE6C1B6B67DA9103978 /* CrashOperationObserver.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashOperationObserver.swift; sourceTree = "<group>"; };
 		26FCBADA60EED61610353636 /* RuntimeFailurePresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RuntimeFailurePresentation.swift; sourceTree = "<group>"; };
 		278FD435280B9177AEB21D87 /* PlaybackDiagnostics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackDiagnostics.swift; sourceTree = "<group>"; };
 		28348EC64725ED7F0C350E6A /* PlayerPanelDismissalTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerPanelDismissalTests.swift; sourceTree = "<group>"; };
@@ -316,6 +319,7 @@
 		8F2A830E1E0D0531E2BDAE32 /* PlaybackLoadRaceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackLoadRaceTests.swift; sourceTree = "<group>"; };
 		902AAD4429095C644D26404F /* DataSettingsPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DataSettingsPane.swift; sourceTree = "<group>"; };
 		90D592CC38DC876919144C07 /* PlaybackSessionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackSessionCoordinator.swift; sourceTree = "<group>"; };
+		9333CDF5609D1BC8B5F132C2 /* CrashOperationObserverTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashOperationObserverTests.swift; sourceTree = "<group>"; };
 		93E793C1BB91D17F7670A0B9 /* BrowserToolbar.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BrowserToolbar.swift; sourceTree = "<group>"; };
 		9576C27F87E5BD408C850091 /* DetailResponseCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailResponseCache.swift; sourceTree = "<group>"; };
 		97CBBB3FC79FC7628E5B20D9 /* TMDBDetailViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TMDBDetailViews.swift; sourceTree = "<group>"; };
@@ -481,6 +485,7 @@
 				77FCE067BF1919B51B018299 /* AppUpdateTests.swift */,
 				3DA912A51A5386083E70F554 /* BrowserPlaybackPerformanceTests.swift */,
 				B033DD4B8E657220411A6979 /* CrashDiagnosticsTests.swift */,
+				9333CDF5609D1BC8B5F132C2 /* CrashOperationObserverTests.swift */,
 				A58C091FE8CFD43402C7B9F0 /* CrashUploadControllerTests.swift */,
 				D4A1BE060D34B55A4B0FF02F /* DetailLoadingTests.swift */,
 				670FEFE746E5D3B95EE9D347 /* FavoritesNativeRepairTests.swift */,
@@ -691,6 +696,7 @@
 				36C13E551F5AC7B9570A3EBC /* BrowserPlaybackActivity.swift */,
 				B9188C791786442939BA4B1A /* CrashAcceptance.swift */,
 				35A6A775D7274DF9364E7772 /* CrashDiagnosticsControls.swift */,
+				25BD5DE6C1B6B67DA9103978 /* CrashOperationObserver.swift */,
 				589C3DDFE98C3D2DC30D5704 /* CrashSparkleDriver.swift */,
 				353D91BDF12C89AA7B745FA6 /* CrashSparkleProbe.swift */,
 				12113115D88C58163B704D7D /* CrashUploadController.swift */,
@@ -1145,6 +1151,7 @@
 				5B5490502FD8A13096009595 /* AppUpdateTests.swift in Sources */,
 				ECA6220482C929CEC45E60E4 /* BrowserPlaybackPerformanceTests.swift in Sources */,
 				97103FC9C17F689492C840CF /* CrashDiagnosticsTests.swift in Sources */,
+				24731E4C28959E95EE8F0169 /* CrashOperationObserverTests.swift in Sources */,
 				5DA7A563908808C148752D40 /* CrashUploadControllerTests.swift in Sources */,
 				C4EE2AD692DE73F0C079A62B /* DetailLoadingTests.swift in Sources */,
 				30B2634E951AC346F431C249 /* FavoritesNativeRepairTests.swift in Sources */,
@@ -1233,6 +1240,7 @@
 				547E70EE1CB6395E47E23C62 /* ConfigurationView.swift in Sources */,
 				AE0A65EF4E50F51FC4E75423 /* CrashAcceptance.swift in Sources */,
 				709C9F0B66C52AC58AA80AE7 /* CrashDiagnosticsControls.swift in Sources */,
+				EABB929345C54BCA988849BF /* CrashOperationObserver.swift in Sources */,
 				F2FF7DC4F68E713783B3D764 /* CrashSparkleDriver.swift in Sources */,
 				E922E544FF4255799732AD50 /* CrashSparkleProbe.swift in Sources */,
 				F9A62BFE4EEF88BE1259A1EB /* CrashUploadController.swift in Sources */,
@@ -1384,7 +1392,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 204;
+				CURRENT_PROJECT_VERSION = 205;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -1611,7 +1619,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 204;
+				CURRENT_PROJECT_VERSION = 205;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

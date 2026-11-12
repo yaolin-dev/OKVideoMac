@@ -1,10 +1,12 @@
 import Foundation
 import Darwin
+import CryptoKit
 
 public final class ReportStore {
     public let root: URL
     public let pending: URL
     public let cache: URL
+    public let rawArchive: URL
     private let consentURL: URL
     private var lease: Int32 = -1
     private let lock = NSLock()
@@ -15,6 +17,7 @@ public final class ReportStore {
     public init(root: URL) throws {
         self.root = root; pending = root.appendingPathComponent("pending", isDirectory: true)
         cache = root.appendingPathComponent("sentry-cache", isDirectory: true)
+        rawArchive = root.appendingPathComponent("native-archive", isDirectory: true)
         consentURL = root.appendingPathComponent("consent.json")
         try Self.privateDirectory(root)
         lease = open(root.appendingPathComponent("instance.lock").path, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
@@ -23,6 +26,7 @@ public final class ReportStore {
             throw CrashDiagnosticError.alreadyRunning
         }
         try Self.privateDirectory(pending)
+        try Self.privateDirectory(rawArchive)
         let consentSize = (try? consentURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? Int.max
         consentValue = consentSize <= 4096 && (try? JSONDecoder().decode(Bool.self, from: Data(contentsOf: consentURL))) == true
         // The application owns retries through bounded, sanitized records. Never replay an SDK cache.
@@ -38,9 +42,33 @@ public final class ReportStore {
         try Self.write(JSONEncoder().encode(value), to: consentURL)
         consentValue = value
     }
+    /// Local recovery only; this directory is never passed to the upload worker.
+    public func archiveRaw(_ data: Data, now: Date = Date()) throws {
+        guard !data.isEmpty, data.count <= CrashMapper.maxRawBytes else { throw CrashDiagnosticError.invalidReport }
+        let id = SHA256.hash(data: data).prefix(16).map { String(format: "%02x", $0) }.joined()
+        try Self.write(data, to: rawArchive.appendingPathComponent(id + ".plcrash"))
+        try pruneRawArchive(now: now)
+    }
+    private func pruneRawArchive(now: Date) throws {
+        var valid: [(URL, Date)] = []
+        for url in try FileManager.default.contentsOfDirectory(at: rawArchive, includingPropertiesForKeys: nil) {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            if attributes[.type] as? FileAttributeType == .typeRegular,
+               let size = attributes[.size] as? NSNumber, size.intValue <= CrashMapper.maxRawBytes,
+               let date = attributes[.modificationDate] as? Date,
+               now.timeIntervalSince(date) <= Self.retention, date <= now.addingTimeInterval(86400) {
+                valid.append((url, date))
+            } else { try FileManager.default.removeItem(at: url) }
+        }
+        for old in valid.sorted(by: { $0.1 > $1.1 }).dropFirst(Self.maxReports) {
+            try FileManager.default.removeItem(at: old.0)
+        }
+    }
     public func save(_ record: CrashRecord) throws {
         guard record.isValid else { throw CrashDiagnosticError.invalidReport }
-        try Self.write(JSONEncoder().encode(record), to: file(record.id))
+        let data = try JSONEncoder().encode(record)
+        guard data.count <= CrashMapper.maxRecordBytes else { throw CrashDiagnosticError.invalidReport }
+        try Self.write(data, to: file(record.id))
         try prune()
     }
     public func records() throws -> [CrashRecord] {
@@ -61,14 +89,20 @@ public final class ReportStore {
         try Self.write(JSONEncoder().encode(records().map(\.id)), to: root.appendingPathComponent("recovery-prompt.json"))
     }
     public func acknowledge(_ record: CrashRecord) throws { try FileManager.default.removeItem(at: file(record.id)) }
-    public func discard() throws { for url in try files() { try FileManager.default.removeItem(at: url) } }
+    public func discard() throws {
+        for url in try files() { try FileManager.default.removeItem(at: url) }
+        for url in try FileManager.default.contentsOfDirectory(at: rawArchive, includingPropertiesForKeys: nil) {
+            try FileManager.default.removeItem(at: url)
+        }
+    }
     public func removeSDKCache() throws { if FileManager.default.fileExists(atPath: cache.path) { try FileManager.default.removeItem(at: cache) } }
     private func file(_ id: String) -> URL { pending.appendingPathComponent(id + ".json") }
     private func files() throws -> [URL] { try FileManager.default.contentsOfDirectory(at: pending, includingPropertiesForKeys: nil).filter { $0.pathExtension == "json" } }
     public func prune(now: Date = Date()) throws {
+        try pruneRawArchive(now: now)
         var valid: [(URL, Date)] = []
         for url in try files() {
-            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= CrashMapper.maxRawBytes,
+            if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, size <= CrashMapper.maxRecordBytes,
                let data = try? Data(contentsOf: url), let r = try? JSONDecoder().decode(CrashRecord.self, from: data), r.isValid,
                r.timestamp <= now.addingTimeInterval(86400), now.timeIntervalSince(r.timestamp) <= Self.retention {
                 valid.append((url, r.timestamp))

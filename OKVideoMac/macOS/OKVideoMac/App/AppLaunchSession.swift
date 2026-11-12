@@ -7,6 +7,7 @@ final class AppLaunchSession {
     let startup: Result<AppStartupContext, Error>
     let crashManager: OKCrashManager?
     let diagnostics: CrashUploadController
+    private let operationObserver: CrashOperationObserver?
     weak var controller: AppStartupController?
 
     init(startup: Result<AppStartupContext, Error>, crashManager: OKCrashManager?,
@@ -14,6 +15,9 @@ final class AppLaunchSession {
         self.startup = startup
         self.crashManager = crashManager
         self.diagnostics = CrashUploadController(store: crashManager?.store, configuration: configuration)
+        self.operationObserver = crashManager.map { manager in
+            CrashOperationObserver { [weak manager] kind, window in manager?.record(kind, window: window) }
+        }
     }
 
     static func prepare() -> AppLaunchSession {
@@ -47,9 +51,13 @@ final class AppLaunchSession {
     }
 
     func bootstrapBusiness() -> AppState {
+        crashManager?.record(.bootstrap)
+        let state: AppState
         switch startup {
-        case .success(let context): return AppState.bootstrap(startupContext: context)
-        case .failure(let error): return AppState.initializationFailure(error)
+        case .success(let context): state = AppState.bootstrap(startupContext: context)
+        case .failure(let error): state = AppState.initializationFailure(error)
         }
+        operationObserver?.observe(state)
+        return state
     }
 }

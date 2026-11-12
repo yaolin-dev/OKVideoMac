@@ -34,7 +34,7 @@ import DiagnosticHandlers
         try Self.validateDSN(dsn, allowLoopback: allowLoopback)
         let packet = try JSONEncoder().encode(SentryUploadWorker.Input(record: record, dsn: dsn,
             cachePath: store.cache.path, allowLoopback: allowLoopback, contaminateScopeForTest: contaminateScopeForTest))
-        guard packet.count <= CrashMapper.maxRawBytes else { throw CrashDiagnosticError.invalidReport }
+        guard packet.count <= CrashMapper.maxRecordBytes + 8192 else { throw CrashDiagnosticError.invalidReport }
         try store.removeSDKCache(); try ReportStore.privateDirectory(store.cache)
         handlersBefore = ok_diagnostic_handlers_snapshot(); exceptionHandlerBefore = Self.exceptionHandlerAddress()
         let attempt = UploadProcess(); worker = attempt; self.completion = completion

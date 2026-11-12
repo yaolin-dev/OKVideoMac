@@ -91,9 +91,12 @@ try:
     event=s.events()[0]
     assert event['event_id']==record['id'] and event['release']=='com.okvideomac.OKVideoMac@0.8.4+137'
     assert event['environment']=='okvideomac-crash-integration-acceptance' and event['dist']=='137'
-    assert set(event)=={'contexts','debug_meta','dist','environment','event_id','exception','level','platform','release','threads','timestamp'}
-    assert set(event['contexts'])=={'os','device'}
-    for bad in [b'DO_NOT_SEND',b'/Users/',b'example.invalid',b'token=secret',b'"user"',b'"request"',b'"breadcrumbs"',b'"logentry"']:
+    assert set(event)=={'contexts','debug_meta','dist','environment','event_id','exception','level','platform','release','threads','timestamp','breadcrumbs'}
+    assert set(event['contexts'])=={'os','device','crash_diagnostics','last_operation'}
+    assert event['contexts']['crash_diagnostics']['first_throw_stack_available'] is False
+    assert all(b['category']=='app.operation' for b in event['breadcrumbs'])
+    assert not {'user','request','logentry'} & set(event)
+    for bad in [b'DO_NOT_SEND',b'/Users/',b'example.invalid',b'token=secret']:
         assert bad not in s.requests[0],bad
     exception=event['exception']['values'][0];crashed=next(t for t in event['threads']['values'] if t['crashed'])
     assert exception['stacktrace']==crashed['stacktrace'];assert any(f['in_app'] for f in exception['stacktrace']['frames'])
