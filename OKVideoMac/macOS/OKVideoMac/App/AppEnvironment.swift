@@ -60,9 +60,13 @@ struct AppEnvironment {
         } else {
             databaseResult = try SQLiteStore.openRecovering(databaseURL: databaseURL)
         }
+        // Keep frequent audio preferences out of the standard domain observed
+        // by browser/detail @AppStorage. Read Build 206's value once on migration.
+        let audioDefaults = UserDefaults(suiteName:
+            (Bundle.main.bundleIdentifier ?? "com.okvideomac.OKVideoMac") + ".playback-audio")
         let player = PlayerLifecycleController(
             mode: PlayerTeardownMode.configured(),
-            audioPreferences: PlaybackAudioPreferenceStore(defaults: .standard),
+            audioPreferences: PlaybackAudioPreferenceStore(defaults: audioDefaults ?? .standard, legacyDefaults: .standard),
             hardwareDefaults: .standard
         )
         let androidRuntimeManager = try AndroidManagedRuntimeManager.live(

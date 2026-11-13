@@ -5605,8 +5605,25 @@ final class AppState: ObservableObject {
     @Published private(set) var playerEpisodePresentations: [EpisodePresentation] = []
     @Published private(set) var isPlayerEpisodeListPreparing = false
     @Published private(set) var playerRenderClient: MPVPlayerClient?
-    @Published private(set) var playerSubtitlesEnabled = false
-    @Published private(set) var selectedPlayerSubtitleTrackID: Int?
+    let playerSubtitleState = PlayerSubtitleState()
+    private let playerTrackSelections = PlayerTrackSelectionCoordinator()
+    private(set) var playerSubtitlesEnabled: Bool {
+        get { playerSubtitleState.selection.enabled }
+        set { playerSubtitleState.update(enabled: newValue, trackID: selectedPlayerSubtitleTrackID) }
+    }
+    private(set) var selectedPlayerSubtitleTrackID: Int? {
+        get { playerSubtitleState.selection.trackID }
+        set { playerSubtitleState.update(enabled: playerSubtitlesEnabled, trackID: newValue) }
+    }
+    #if DEBUG || OKVIDEO_PERFORMANCE_TEST
+    var trackSelectionExecutorForTesting: ((PlaybackTrackSelectionToken) async throws -> Void)?
+    var trackPreferenceWriterForTesting: ((Bool, MediaTrack?, PlaybackTrackSelectionToken) async throws -> Void)?
+    func configureTrackSelectionForTesting(owner: UUID, tracks: [MediaTrack]) {
+        activePlayerRequestID = owner
+        playerSnapshot.tracks = tracks
+        updatePlayerSubtitleSnapshot(tracks)
+    }
+    #endif
     @Published private(set) var isChangingSubtitleCompatibility = false
     @Published private(set) var playerSubtitleDelay: TimeInterval = 0
     @Published private(set) var playerSubtitleScale: Double = 1
@@ -6254,6 +6271,8 @@ final class AppState: ObservableObject {
             let changed = playbackSessions.replaceRequest(with: newValue)
             playbackDisplaySleep.beginSession(newValue)
             if changed {
+                playerTrackSelections.reset(owner: newValue)
+                playerSubtitleState.update(enabled: false, trackID: nil)
                 playerSnapshotState.resetSeek()
                 runtimeEpisodeNavigation = nil
                 playerMediaInfoRequestID = nil
@@ -17486,6 +17505,8 @@ final class AppState: ObservableObject {
 #endif
         let finalHistoryWrite = playbackHistoryWrite(position: playerSnapshot.position, duration: playerSnapshot.duration)
         isShutdownRequested = true
+        environment?.player.endVolumeAdjustment()
+        playerTrackSelections.reset(owner: UUID())
         dashPlaybackRecoveryTask?.cancel()
         dashPlaybackRecoveryTask = nil
         dashPlaybackRecoveryID = nil
@@ -17989,6 +18010,9 @@ final class AppState: ObservableObject {
 
     func setPlayerVolume(_ volume: Double) async { await requestPlayerVolume(volume).value }
 
+    func beginPlayerVolumeAdjustment() { environment?.player.beginVolumeAdjustment() }
+    func endPlayerVolumeAdjustment() { environment?.player.endVolumeAdjustment() }
+
     func adjustPlayerVolume(by delta: Double) async {
         await setPlayerVolume(playerAudioPreference.volume + delta)
     }
@@ -18044,7 +18068,9 @@ final class AppState: ObservableObject {
     func cyclePlayerAudioTrack() async {
         let tracks = playerSnapshot.tracks.filter { $0.type == .audio }
         guard !tracks.isEmpty else { return }
-        let selectedIndex = tracks.firstIndex(where: \.isSelected)
+        let desired = playerTrackSelections.isPending(owner: activePlayerRequestID, type: .audio)
+            ? playerTrackSelections.desiredID(owner: activePlayerRequestID, type: .audio) : nil
+        let selectedIndex = tracks.firstIndex { desired == nil ? $0.isSelected : $0.id == desired }
         let nextIndex = selectedIndex.map { ($0 + 1) % tracks.count } ?? 0
         await selectPlayerTrack(tracks[nextIndex])
     }
@@ -18256,87 +18282,69 @@ final class AppState: ObservableObject {
         }
     }
 
+    @discardableResult
+    func requestPlayerTrack(_ track: MediaTrack) -> Task<Void, Never> {
+        guard playerSnapshot.tracks.contains(where: { $0.id == track.id && $0.type == track.type }) else { return Task {} }
+        return requestTrackSelection(type: track.type, id: track.id, track: track,
+                                     persist: true)
+    }
+
     func selectPlayerTrack(_ track: MediaTrack) async {
-        do {
-            try await environment?.player.selectTrack(
-                id: track.id,
-                type: track.type
-            )
-            if track.type == .subtitle {
-                selectedPlayerSubtitleTrackID = track.id
-                playerSubtitlesEnabled = true
-                prefersPlayerSubtitlesEnabled = true
-                preferredPlayerSubtitleTrack = PlayerSubtitleTrackPreference(
-                    track: track
-                )
-                await persistPlayerSubtitlePreference(
-                    enabled: true,
-                    track: track
-                )
-            }
-        } catch {
-            show(error, title: L10n.string("player.track.switch.failed", fallback: "Unable to Switch Track"), target: .player)
-        }
+        await requestPlayerTrack(track).value
+    }
+
+    @discardableResult
+    func requestPlayerSubtitlesEnabled(_ enabled: Bool) -> Task<Void, Never> {
+        let tracks = playerSnapshot.tracks.filter { $0.type == .subtitle }
+        guard !tracks.isEmpty else { return Task {} }
+        let track = selectedPlayerSubtitleTrackID.flatMap { id in tracks.first { $0.id == id } }
+            ?? preferredPlayerSubtitleTrack.flatMap { PlayerSubtitleTrackPreference.matchingTrack(in: tracks, preference: $0) }
+            ?? MPVPlayerClient.preferredSubtitleTrack(in: tracks)
+        guard let track else { return Task {} }
+        return requestTrackSelection(type: .subtitle, id: enabled ? track.id : -1,
+                                     track: track, persist: true)
     }
 
     func togglePlayerSubtitles() async {
-        let subtitleTracks = playerSnapshot.tracks.filter {
-            $0.type == .subtitle
+        await requestPlayerSubtitlesEnabled(!playerSubtitlesEnabled).value
+    }
+
+    private func requestTrackSelection(type: MediaTrackType, id: Int?, track: MediaTrack?,
+                                       persist: Bool, externalURL: URL? = nil) -> Task<Void, Never> {
+        guard !isShutdownRequested, !isClosingPlayer else { return Task {} }
+        let owner = activePlayerRequestID
+        let enabled = id.map { $0 > 0 } ?? true
+        let confirmed = playerSnapshot.tracks.first { $0.type == type && $0.isSelected }?.id ?? -1
+        if type == .subtitle {
+            playerSubtitleState.update(enabled: enabled, trackID: track?.id ?? selectedPlayerSubtitleTrackID)
         }
-        guard !subtitleTracks.isEmpty else {
-            show(
-                AppError.playback(L10n.string("player.subtitle.none", fallback: "No subtitles are available for this video.")),
-                title: L10n.string("player.subtitle.setting.failed", fallback: "Unable to Change Subtitle Setting"),
-                target: .player
-            )
-            return
-        }
-        do {
-            if playerSubtitlesEnabled {
-                if let selected = subtitleTracks.first(where: { $0.isSelected }) {
-                    selectedPlayerSubtitleTrackID = selected.id
-                    preferredPlayerSubtitleTrack = PlayerSubtitleTrackPreference(
-                        track: selected
-                    )
+        return playerTrackSelections.submit(owner: owner, type: type, trackID: id, confirmedID: confirmed,
+            execute: { [weak self] selection in
+                guard let self, self.activePlayerRequestID == owner,
+                      !self.isShutdownRequested, !self.isClosingPlayer else { throw CancellationError() }
+                try selection.checkValidity()
+                #if DEBUG || OKVIDEO_PERFORMANCE_TEST
+                if let execute = self.trackSelectionExecutorForTesting { try await execute(selection); return }
+                #endif
+                guard let player = self.environment?.player else { throw CancellationError() }
+                if let externalURL { try await player.addSubtitle(url: externalURL, selection: selection) }
+                else { try await player.selectTrack(selection) }
+            }, commit: { [weak self] selection in
+                guard let self, selection.isValid, self.activePlayerRequestID == owner,
+                      !self.isShutdownRequested, !self.isClosingPlayer else { return }
+                guard type == .subtitle else { return }
+                let selectedID = track?.id ?? self.playerSnapshot.tracks.first { $0.type == .subtitle && $0.isSelected }?.id
+                self.playerSubtitleState.update(enabled: enabled, trackID: selectedID)
+                self.prefersPlayerSubtitlesEnabled = enabled
+                if let track { self.preferredPlayerSubtitleTrack = PlayerSubtitleTrackPreference(track: track) }
+                if persist { await self.persistPlayerSubtitlePreference(enabled: enabled, track: track, selection: selection) }
+            }, failed: { [weak self] error in
+                guard let self, self.activePlayerRequestID == owner else { return }
+                if type == .subtitle { self.updatePlayerSubtitleSnapshot(self.playerSnapshot.tracks, force: true) }
+                if !(error is CancellationError) {
+                    self.show(error, title: L10n.string("player.track.switch.failed", fallback: "Unable to Switch Track"), target: .player)
                 }
-                try await environment?.player.selectTrack(
-                    id: -1,
-                    type: .subtitle
-                )
-                playerSubtitlesEnabled = false
-                prefersPlayerSubtitlesEnabled = false
-                await persistPlayerSubtitlePreference(
-                    enabled: false,
-                    track: subtitleTracks.first(where: { $0.isSelected })
-                )
-            } else {
-                let track = preferredPlayerSubtitleTrack.flatMap {
-                    PlayerSubtitleTrackPreference.matchingTrack(
-                        in: subtitleTracks,
-                        preference: $0
-                    )
-                } ?? selectedPlayerSubtitleTrackID.flatMap { identifier in
-                    subtitleTracks.first { $0.id == identifier }
-                } ?? MPVPlayerClient.preferredSubtitleTrack(in: subtitleTracks)
-                guard let track else { return }
-                try await environment?.player.selectTrack(
-                    id: track.id,
-                    type: .subtitle
-                )
-                selectedPlayerSubtitleTrackID = track.id
-                playerSubtitlesEnabled = true
-                prefersPlayerSubtitlesEnabled = true
-                preferredPlayerSubtitleTrack = PlayerSubtitleTrackPreference(
-                    track: track
-                )
-                await persistPlayerSubtitlePreference(
-                    enabled: true,
-                    track: track
-                )
-            }
-        } catch {
-            show(error, title: L10n.string("player.subtitle.setting.failed", fallback: "Unable to Change Subtitle Setting"), target: .player)
-        }
+            })
     }
 
     func adjustPlayerSubtitleDelay(by offset: TimeInterval) async {
@@ -18455,14 +18463,8 @@ final class AppState: ObservableObject {
     }
 
     func addPlayerSubtitle(_ url: URL) async {
-        do {
-            try await environment?.player.addSubtitle(url: url)
-            playerSubtitlesEnabled = true
-            prefersPlayerSubtitlesEnabled = true
-            await persistPlayerSubtitlePreference(enabled: true, track: nil)
-        } catch {
-            show(error, title: L10n.string("player.subtitle.load.failed", fallback: "Unable to Load Subtitles"), target: .player)
-        }
+        await requestTrackSelection(type: .subtitle, id: nil, track: nil,
+                                    persist: true, externalURL: url).value
     }
 
     func savePlayerScreenshot(to url: URL) async {
@@ -22764,37 +22766,7 @@ final class AppState: ObservableObject {
                         requestID: requestID
                     )
                     self.historyProgressCheckpoint.observe(snapshot, owner: requestID)
-                    let subtitleTracks = snapshot.tracks.filter {
-                        $0.type == .subtitle
-                    }
-                    if !subtitleTracks.isEmpty {
-                        let subtitlesEnabled = subtitleTracks.contains {
-                            $0.isSelected
-                        }
-                        if self.playerSubtitlesEnabled != subtitlesEnabled {
-                            self.playerSubtitlesEnabled = subtitlesEnabled
-                        }
-                        if let selected = subtitleTracks.first(where: { $0.isSelected }) {
-                            if self.selectedPlayerSubtitleTrackID != selected.id {
-                                self.selectedPlayerSubtitleTrackID = selected.id
-                            }
-                            let preference = PlayerSubtitleTrackPreference(
-                                track: selected
-                            )
-                            if self.preferredPlayerSubtitleTrack != preference {
-                                self.preferredPlayerSubtitleTrack = preference
-                            }
-                        } else if let preference = self.preferredPlayerSubtitleTrack,
-                                  let remembered =
-                                    PlayerSubtitleTrackPreference.matchingTrack(
-                                        in: subtitleTracks,
-                                        preference: preference
-                                    ) {
-                            if self.selectedPlayerSubtitleTrackID != remembered.id {
-                                self.selectedPlayerSubtitleTrackID = remembered.id
-                            }
-                        }
-                    }
+                    self.updatePlayerSubtitleSnapshot(snapshot.tracks)
                     self.updatePlaybackHistory(snapshot, previousStatus: previousHistoryStatus)
 
                 case .fileLoaded(let requestID):
@@ -23191,75 +23163,53 @@ final class AppState: ObservableObject {
         showEpisodeTransition(from: playback.episode, to: nextEpisode)
     }
 
-    private func applyPlayerSubtitlePreference(requestID: UUID?) async {
-        guard PlaybackRequestOwnershipPolicy.accepts(
-            requestID: requestID,
-            activeRequestID: activePlayerRequestID
-        ) else { return }
-        let tracks = playerSnapshot.tracks.filter { $0.type == .subtitle }
-        guard !tracks.isEmpty else {
-            playerSubtitlesEnabled = false
-            selectedPlayerSubtitleTrackID = nil
-            return
-        }
-        let track = preferredPlayerSubtitleTrack.flatMap {
-            PlayerSubtitleTrackPreference.matchingTrack(
-                in: tracks,
-                preference: $0
-            )
-        } ?? MPVPlayerClient.preferredSubtitleTrack(in: tracks)
-        selectedPlayerSubtitleTrackID = track?.id
-
-        guard prefersPlayerSubtitlesEnabled, let track else {
-            try? await environment?.player.selectTrack(id: -1, type: .subtitle)
-            guard PlaybackRequestOwnershipPolicy.accepts(
-                requestID: requestID,
-                activeRequestID: activePlayerRequestID
-            ) else { return }
-            playerSubtitlesEnabled = false
-            return
-        }
-        do {
-            try await environment?.player.selectTrack(
-                id: track.id,
-                type: .subtitle
-            )
-            guard PlaybackRequestOwnershipPolicy.accepts(
-                requestID: requestID,
-                activeRequestID: activePlayerRequestID
-            ) else { return }
-            playerSubtitlesEnabled = true
-            preferredPlayerSubtitleTrack = PlayerSubtitleTrackPreference(
-                track: track
-            )
-        } catch {
-            guard PlaybackRequestOwnershipPolicy.accepts(
-                requestID: requestID,
-                activeRequestID: activePlayerRequestID
-            ) else { return }
-            playerSubtitlesEnabled = false
-            show(error, title: L10n.string("player.subtitle.restore.failed", fallback: "Unable to Restore Subtitle Settings"), target: .player)
+    private func updatePlayerSubtitleSnapshot(_ allTracks: [MediaTrack], force: Bool = false) {
+        guard force || !playerTrackSelections.isPending(owner: activePlayerRequestID, type: .subtitle) else { return }
+        let tracks = allTracks.filter { $0.type == .subtitle }
+        if let selected = tracks.first(where: \.isSelected) {
+            playerSubtitleState.update(enabled: true, trackID: selected.id)
+            preferredPlayerSubtitleTrack = PlayerSubtitleTrackPreference(track: selected)
+        } else {
+            let remembered = preferredPlayerSubtitleTrack.flatMap {
+                PlayerSubtitleTrackPreference.matchingTrack(in: tracks, preference: $0)
+            }
+            playerSubtitleState.update(enabled: false, trackID: remembered?.id)
         }
     }
 
-    private func persistPlayerSubtitlePreference(
-        enabled: Bool,
-        track: MediaTrack?
-    ) async {
-        guard let environment else { return }
+    private func applyPlayerSubtitlePreference(requestID: UUID?) async {
+        guard PlaybackRequestOwnershipPolicy.accepts(requestID: requestID, activeRequestID: activePlayerRequestID),
+              !playerTrackSelections.hasIntent(owner: activePlayerRequestID, type: .subtitle) else { return }
+        let tracks = playerSnapshot.tracks.filter { $0.type == .subtitle }
+        guard !tracks.isEmpty else {
+            playerSubtitleState.update(enabled: false, trackID: nil)
+            return
+        }
+        let track = preferredPlayerSubtitleTrack.flatMap {
+            PlayerSubtitleTrackPreference.matchingTrack(in: tracks, preference: $0)
+        } ?? MPVPlayerClient.preferredSubtitleTrack(in: tracks)
+        await requestTrackSelection(type: .subtitle,
+            id: prefersPlayerSubtitlesEnabled ? (track?.id ?? -1) : -1,
+            track: track, persist: false).value
+    }
+
+    private func persistPlayerSubtitlePreference(enabled: Bool, track: MediaTrack?,
+                                                  selection: PlaybackTrackSelectionToken) async {
+        guard selection.isValid, activePlayerRequestID == selection.requestID,
+              !isShutdownRequested, !isClosingPlayer else { return }
         do {
-            try await environment.database.setSetting(
-                .bool(enabled),
-                forKey: "playback.subtitlesEnabled"
-            )
-            if let track {
-                try await environment.database.setSetting(
-                    PlayerSubtitleTrackPreference(track: track).settingValue,
-                    forKey: "playback.subtitleTrack"
-                )
-            }
+            #if DEBUG || OKVIDEO_PERFORMANCE_TEST
+            if let write = trackPreferenceWriterForTesting { try await write(enabled, track, selection); return }
+            #endif
+            try await environment?.database.setPlaybackSubtitlePreference(enabled: enabled,
+                track: track.map { PlayerSubtitleTrackPreference(track: $0).settingValue }, selection: selection)
         } catch {
+            guard selection.isValid, activePlayerRequestID == selection.requestID,
+                  !(error is CancellationError) else { return }
             show(error, title: L10n.string("player.subtitle.save.failed", fallback: "Unable to Save Subtitle Settings"), target: .player)
+            // The native selection succeeded but saving failed. A same-track
+            // retry should save again without unnecessarily rebuilding it.
+            selection.invalidate()
         }
     }
 

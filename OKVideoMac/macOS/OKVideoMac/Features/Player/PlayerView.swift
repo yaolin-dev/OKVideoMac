@@ -237,6 +237,7 @@ struct PlayerView: View {
             )
         }
         .onDisappear {
+            state.endPlayerVolumeAdjustment()
             dismissProgressPreview()
             controlTooltip.dismiss()
             hideControlsTask?.cancel()
@@ -969,6 +970,8 @@ struct PlayerView: View {
                     ),
                     in: 0...130,
                     onEditingChanged: { editing in
+                        if editing { state.beginPlayerVolumeAdjustment() }
+                        else { state.endPlayerVolumeAdjustment() }
                         isVolumeEditing = editing
                         if editing {
                             volumeHideTask?.cancel()
@@ -1401,7 +1404,7 @@ struct PlayerView: View {
                                     title: trackLabel(track),
                                     selected: track.isSelected
                                 ) {
-                                    Task { await state.selectPlayerTrack(track) }
+                                    state.requestPlayerTrack(track)
                                 }
                             }
                         }
@@ -1418,6 +1421,12 @@ struct PlayerView: View {
     }
 
     private func subtitlePanel(maximumSize: CGSize) -> some View {
+        PlayerSubtitleStateView(model: state.playerSubtitleState) { _ in
+            subtitlePanelContent(maximumSize: maximumSize)
+        }
+    }
+
+    private func subtitlePanelContent(maximumSize: CGSize) -> some View {
         let tracks = state.playerSnapshot.tracks.filter {
             $0.type == .subtitle
         }
@@ -1438,7 +1447,7 @@ struct PlayerView: View {
                                     guard enabled != state.playerSubtitlesEnabled else {
                                         return
                                     }
-                                    Task { await state.togglePlayerSubtitles() }
+                                    state.requestPlayerSubtitlesEnabled(enabled)
                                 }
                             )
                         )
@@ -1458,7 +1467,7 @@ struct PlayerView: View {
                                     selected: state.selectedPlayerSubtitleTrackID
                                         == track.id
                                 ) {
-                                    Task { await state.selectPlayerTrack(track) }
+                                    state.requestPlayerTrack(track)
                                 }
                             }
                         }
@@ -2369,7 +2378,7 @@ struct PlayerView: View {
             } else {
                 ForEach(tracks) { track in
                     Button {
-                        Task { await state.selectPlayerTrack(track) }
+                        state.requestPlayerTrack(track)
                     } label: {
                         if track.isSelected {
                             Label(trackLabel(track), systemImage: "checkmark")
@@ -2396,6 +2405,10 @@ struct PlayerView: View {
     }
 
     private var subtitleMenu: some View {
+        PlayerSubtitleStateView(model: state.playerSubtitleState) { _ in subtitleMenuContent }
+    }
+
+    private var subtitleMenuContent: some View {
         let tracks = state.playerSnapshot.tracks.filter {
             $0.type == .subtitle
         }
@@ -2406,7 +2419,7 @@ struct PlayerView: View {
                     get: { state.playerSubtitlesEnabled },
                     set: { enabled in
                         guard enabled != state.playerSubtitlesEnabled else { return }
-                        Task { await state.togglePlayerSubtitles() }
+                        state.requestPlayerSubtitlesEnabled(enabled)
                     }
                 )
             )
@@ -2425,10 +2438,10 @@ struct PlayerView: View {
                             },
                             set: { selected in
                                 if selected {
-                                    Task { await state.selectPlayerTrack(track) }
+                                    state.requestPlayerTrack(track)
                                 } else if state.playerSubtitlesEnabled,
                                           track.isSelected {
-                                    Task { await state.togglePlayerSubtitles() }
+                                    state.requestPlayerSubtitlesEnabled(false)
                                 }
                             }
                         )
@@ -4612,4 +4625,10 @@ private struct PlayerAudioPreferenceView<Content: View>: View {
     @ObservedObject var model: PlayerAudioState
     let content: (PlaybackAudioPreference) -> Content
     var body: some View { content(model.preference) }
+}
+
+private struct PlayerSubtitleStateView<Content: View>: View {
+    @ObservedObject var model: PlayerSubtitleState
+    let content: (PlayerSubtitleState.Selection) -> Content
+    var body: some View { content(model.selection) }
 }

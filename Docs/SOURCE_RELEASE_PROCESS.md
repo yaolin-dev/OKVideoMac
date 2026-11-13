@@ -1,6 +1,6 @@
 # Immutable Corresponding-Source Release Process
 
-本地音量更新隔离候选 0.9.3（Build 206）使用 `OKVideoMac-0.9.3-build206-SOURCE_RELEASE_INDEX.json`，不覆盖下方已发布的 Build 204 资产、tag 或更新清单。
+本地音量更新隔离候选 0.9.3（Build 207）使用 `OKVideoMac-0.9.3-build207-SOURCE_RELEASE_INDEX.json`，不覆盖下方已发布的 Build 204 资产、tag 或更新清单。
 
 0.9.3（Build 204）已正式发布，标签 `v0.9.3` 固定构建提交 `5b3c2206fd77af20a1a207b0219846928a27e1a7`。最终 DMG SHA-256 为 `3656ac54490df7cd6778022e3f7bd7b454b86b49fcbb4598abe5578588807181`。见[正式验证](RELEASE_VALIDATION_0.9.3.md)。
 

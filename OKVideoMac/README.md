@@ -11,8 +11,8 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 
 ## 当前版本
 
-- 当前发布候选：0.9.3（Build 206），本地音量更新隔离修复，尚未公开发布。
-- 候选 source release index：`OKVideoMac-0.9.3-build206-SOURCE_RELEASE_INDEX.json`。下方 Build 204 的发布记录保持原范围。
+- 当前发布候选：0.9.3（Build 207），本地音量偏好隔离与字幕、音轨切换修复，尚未公开发布。
+- 候选 source release index：`OKVideoMac-0.9.3-build207-SOURCE_RELEASE_INDEX.json`。下方 Build 204 的发布记录保持原范围。
 
 - 当前稳定版本：0.9.3（Build 204）
 - Tag：`v0.9.3`，固定 release commit `5b3c2206fd77af20a1a207b0219846928a27e1a7`。

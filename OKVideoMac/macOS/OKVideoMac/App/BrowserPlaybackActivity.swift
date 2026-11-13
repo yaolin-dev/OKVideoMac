@@ -33,6 +33,18 @@ enum BrowserPlaybackActivityPolicy {
     }
 }
 
+@MainActor final class PlayerSubtitleState: ObservableObject {
+    struct Selection: Equatable {
+        var enabled = false
+        var trackID: Int?
+    }
+    @Published private(set) var selection = Selection()
+    func update(enabled: Bool, trackID: Int?) {
+        let value = Selection(enabled: enabled, trackID: trackID)
+        if selection != value { selection = value }
+    }
+}
+
 /// The control overlay needs timeline ticks only while visible. Hidden controls
 /// still wake for buffering, seeks, failure/end and the first advancing position.
 /// Defer reads until after @Published's will-change notification has committed.

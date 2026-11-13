@@ -26,7 +26,11 @@ import OKVideoCore
     @MainActor private struct Controls: View {
         @ObservedObject var model: Model
         var body: some View {
-            Slider(value: Binding(get: { model.volume }, set: model.set), in: 0...130)
+            Slider(value: Binding(get: { model.volume }, set: model.set), in: 0...130,
+                   onEditingChanged: { editing in
+                       if editing { model.controller.beginVolumeAdjustment() }
+                       else { model.controller.endVolumeAdjustment() }
+                   })
                 .frame(width: 240).padding(20)
         }
     }
@@ -40,7 +44,11 @@ import OKVideoCore
             throw XCTSkip("Explicit local playback fixture and report required")
         }
         let manual = ProcessInfo.processInfo.environment["OKVIDEO_VOLUME_MANUAL"] == "1"
-        let controller = PlayerLifecycleController(mode: .fullDestroy)
+        let suite = "volume-native-persistence-" + UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let controller = PlayerLifecycleController(mode: .fullDestroy,
+            audioPreferences: PlaybackAudioPreferenceStore(defaults: defaults))
         let player = try XCTUnwrap(controller.renderPlayer)
         let model = Model(controller)
         let surface = MPVOpenGLView(player: player, onError: { XCTFail($0.localizedDescription) },
@@ -93,6 +101,7 @@ import OKVideoCore
                                 "updates": Double(surface.renderUpdatesForTesting), "changes": Double(model.changes),
                                 "tracking": RunLoop.current.currentMode == .eventTracking ? 1 : 0])
                 if !manual, elapsed >= 1.5, elapsed < 4.5 {
+                    controller.beginVolumeAdjustment()
                     model.set(65 + 45 * sin((elapsed - 1.5) * 6))
                 }
             }
@@ -119,6 +128,8 @@ import OKVideoCore
             RunLoop.main.add(tracking, forMode: .default)
             try await Task.sleep(nanoseconds: manual ? 20_000_000_000 : 5_200_000_000)
             timer.invalidate(); eventPump.invalidate(); tracking.invalidate()
+            controller.endVolumeAdjustment()
+            XCTAssertEqual(PlaybackAudioPreferenceStore(defaults: defaults).value, controller.audioPreference)
             let frames = surface.renderedFramesForTesting - initial
             let report: [String: Any] = ["input": manual ? "physical mouse" : "controlled AppKit tracking loop", "samples": samples, "audioSamples": audio.read(), "frames": frames, "changes": model.changes,
                 "timings": surface.renderTimingsForTesting,

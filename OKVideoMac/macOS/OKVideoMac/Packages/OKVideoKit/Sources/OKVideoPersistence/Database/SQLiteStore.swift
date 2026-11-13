@@ -1028,6 +1028,21 @@ public actor SQLiteStore:
         return connection.lastChangedRowCount()
     }
 
+    /// Save the pair atomically; a queued obsolete selection must not overwrite
+    /// the next video's preference. No suspension occurs inside this transaction.
+    public func setPlaybackSubtitlePreference(enabled: Bool, track: JSONValue?,
+                                             selection: PlaybackTrackSelectionToken) throws {
+        try selection.checkValidity()
+        try connection.transaction {
+            // BEGIN IMMEDIATE can wait for another writer. Revalidate after
+            // that wait, and roll back if the intent retires during the writes.
+            try selection.checkValidity()
+            try setSetting(.bool(enabled), forKey: "playback.subtitlesEnabled")
+            if let track { try setSetting(track, forKey: "playback.subtitleTrack") }
+            try selection.checkValidity()
+        }
+    }
+
     public func setSetting(_ value: JSONValue?, forKey key: String) throws {
         if importedIdentityAcceptanceEnabled && ["live.favoriteChannels", "live.deletedChannels"].contains(key) {
             throw ImportedExecutionError.blocked // owned keys use the admitted reference transaction only

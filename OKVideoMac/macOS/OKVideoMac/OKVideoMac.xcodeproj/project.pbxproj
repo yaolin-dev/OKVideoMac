@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0053D15A1801C63065D878A9 /* PlayerTrackSelectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9DAFA8B979D999694EBC307C /* PlayerTrackSelectionTests.swift */; };
 		0326FCFCD931C6EE0DFA3372 /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B27A648FE1992B56C1DBE85 /* main.swift */; };
 		05D5512B69A7C71CC3112A74 /* MPVLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D3A1A89473AFD33AAF47D01 /* MPVLibrary.swift */; };
 		06DD8B485E5427FD657907C9 /* PlaybackMediaJourneyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B7E0B9BADB3F5D30D3F44205 /* PlaybackMediaJourneyTests.swift */; };
@@ -82,6 +83,7 @@
 		743A880401BD7F0D45A31298 /* PlayerSeekStabilityTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79757F9220FDF932CCD34B2E /* PlayerSeekStabilityTests.swift */; };
 		759511EC9307B02EDBD21A5D /* PlayerChromeStyle.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5858CB68D7C287485AA36082 /* PlayerChromeStyle.swift */; };
 		76C7406EE21C7E2C68369E2D /* AboutSettingsPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = FDB5CCC10B454B60D80A387A /* AboutSettingsPane.swift */; };
+		7732C341A090CD8C10DDBD65 /* PlayerTrackSelectionCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = 64CE10726FAC3E0DAE3130F9 /* PlayerTrackSelectionCoordinator.swift */; };
 		77968CB64C9218E58540BB7D /* RelaunchParentExitMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0CE64294B74CF614CE6543 /* RelaunchParentExitMonitor.swift */; };
 		7830FC967FAF3053714C732B /* catpaw-range-stream.js in Resources */ = {isa = PBXBuildFile; fileRef = E05C1716F85D0CF2097B2FC6 /* catpaw-range-stream.js */; };
 		78C67251E4D7BC137B7B9166 /* PlayerSeekRecoveryObservation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 09B3A04B485AC0C40E01ED89 /* PlayerSeekRecoveryObservation.swift */; };
@@ -153,8 +155,10 @@
 		DC4A5F6740E30611013F079E /* PlayerEpisodeNavigationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8EAE534A1AE9A12B967D27EF /* PlayerEpisodeNavigationTests.swift */; };
 		DDC3654BD2AB1D9A828B4173 /* SettingsNavigation.swift in Sources */ = {isa = PBXBuildFile; fileRef = D10607081FB6C2AF318D6D6B /* SettingsNavigation.swift */; };
 		DDD189FABF44F72B9EE3886E /* PlayerGlassRenderingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C100ED7FF3D6E94DD79DAD0 /* PlayerGlassRenderingTests.swift */; };
+		DFC8298416C4795927DC0F7B /* PlayerTrackNativeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0C0474943B9299FA0D5057B4 /* PlayerTrackNativeTests.swift */; };
 		E2DEA74B241320B8961DD695 /* HistoryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4ACA134A51B5EAC0085C4BDA /* HistoryView.swift */; };
 		E388E75481C841C7C655C950 /* QuarkSeekRecoveryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6B89B96A1C16BEAA46613D8 /* QuarkSeekRecoveryTests.swift */; };
+		E45569B06AEE9A27C080D3D3 /* VolumePersistenceIsolationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B6EB0CBE2416050987504916 /* VolumePersistenceIsolationTests.swift */; };
 		E52889A73B1E20D6D311931C /* SeekAcceptanceHarness.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3673D60112EC33FB72415BC4 /* SeekAcceptanceHarness.swift */; };
 		E6AEDBC1939EDBA0BEBFCDF3 /* GeneralSettingsPane.swift in Sources */ = {isa = PBXBuildFile; fileRef = CBAC10E3DA1FB4746C8C6E6F /* GeneralSettingsPane.swift */; };
 		E8815F567D75BDF08390E0FF /* LiveCatchupPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E9B6D499A2009B85077D990 /* LiveCatchupPresentation.swift */; };
@@ -230,6 +234,7 @@
 		09C1F786F0D9BA2EB9105485 /* AppEnvironment.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppEnvironment.swift; sourceTree = "<group>"; };
 		0A4AF9215A4C1C3373750519 /* OKVideoMacEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OKVideoMacEntry.swift; sourceTree = "<group>"; };
 		0B2234B67DAD4521E4623DC2 /* MediaProxyPreference.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MediaProxyPreference.swift; sourceTree = "<group>"; };
+		0C0474943B9299FA0D5057B4 /* PlayerTrackNativeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerTrackNativeTests.swift; sourceTree = "<group>"; };
 		0C1223E497AFF06CEDC5350F /* FavoriteSourceContext.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoriteSourceContext.swift; sourceTree = "<group>"; };
 		0D75E77B3CF3727CBF3EDAC3 /* SidebarSearchState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SidebarSearchState.swift; sourceTree = "<group>"; };
 		0E2D4DEFA401D0A415A0DDE8 /* TMDB-Attribution.txt */ = {isa = PBXFileReference; lastKnownFileType = text; path = "TMDB-Attribution.txt"; sourceTree = "<group>"; };
@@ -288,6 +293,7 @@
 		623B9A99BBAB6E6B88B0F01B /* DetailSettingsPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailSettingsPane.swift; sourceTree = "<group>"; };
 		63284B4134B72C9ECD12EE1B /* ImageRepository.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImageRepository.swift; sourceTree = "<group>"; };
 		633B2386F119633FF803C7DC /* TMDBDetailTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TMDBDetailTests.swift; sourceTree = "<group>"; };
+		64CE10726FAC3E0DAE3130F9 /* PlayerTrackSelectionCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerTrackSelectionCoordinator.swift; sourceTree = "<group>"; };
 		670FEFE746E5D3B95EE9D347 /* FavoritesNativeRepairTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FavoritesNativeRepairTests.swift; sourceTree = "<group>"; };
 		689F4F5C0C244BA810946A34 /* PlayerView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerView.swift; sourceTree = "<group>"; };
 		68AF30A9A12004545631A8EF /* PlayerStatusInteractionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerStatusInteractionTests.swift; sourceTree = "<group>"; };
@@ -326,6 +332,7 @@
 		9576C27F87E5BD408C850091 /* DetailResponseCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DetailResponseCache.swift; sourceTree = "<group>"; };
 		97CBBB3FC79FC7628E5B20D9 /* TMDBDetailViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TMDBDetailViews.swift; sourceTree = "<group>"; };
 		9804C48C039A4BF44C3FE048 /* SubtitleLiveInfoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleLiveInfoTests.swift; sourceTree = "<group>"; };
+		9DAFA8B979D999694EBC307C /* PlayerTrackSelectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerTrackSelectionTests.swift; sourceTree = "<group>"; };
 		9E49D86C26BE1BB599E9FAA5 /* PortableBackup.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortableBackup.swift; sourceTree = "<group>"; };
 		9E5C1707C5EC710FA6A9BD66 /* SourceSettingsPane.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SourceSettingsPane.swift; sourceTree = "<group>"; };
 		9F461586BA983A7C1654B274 /* OKNativePiPBridge.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = OKNativePiPBridge.m; sourceTree = "<group>"; };
@@ -347,6 +354,7 @@
 		B033DD4B8E657220411A6979 /* CrashDiagnosticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashDiagnosticsTests.swift; sourceTree = "<group>"; };
 		B515DA6049DE7499240C50B9 /* HistoryBridgeReliabilityTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HistoryBridgeReliabilityTests.swift; sourceTree = "<group>"; };
 		B6B89B96A1C16BEAA46613D8 /* QuarkSeekRecoveryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QuarkSeekRecoveryTests.swift; sourceTree = "<group>"; };
+		B6EB0CBE2416050987504916 /* VolumePersistenceIsolationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VolumePersistenceIsolationTests.swift; sourceTree = "<group>"; };
 		B7E0B9BADB3F5D30D3F44205 /* PlaybackMediaJourneyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackMediaJourneyTests.swift; sourceTree = "<group>"; };
 		B9188C791786442939BA4B1A /* CrashAcceptance.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CrashAcceptance.swift; sourceTree = "<group>"; };
 		B97E48417E87DDB106278705 /* PlayerStatusPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlayerStatusPresentationTests.swift; sourceTree = "<group>"; };
@@ -518,7 +526,9 @@
 				79757F9220FDF932CCD34B2E /* PlayerSeekStabilityTests.swift */,
 				68AF30A9A12004545631A8EF /* PlayerStatusInteractionTests.swift */,
 				B97E48417E87DDB106278705 /* PlayerStatusPresentationTests.swift */,
+				0C0474943B9299FA0D5057B4 /* PlayerTrackNativeTests.swift */,
 				722C3E335092A8EB2A0A682B /* PlayerTrackPresentationTests.swift */,
+				9DAFA8B979D999694EBC307C /* PlayerTrackSelectionTests.swift */,
 				258F4459CEDDE936A8229C2F /* PosterDiskCacheTests.swift */,
 				B6B89B96A1C16BEAA46613D8 /* QuarkSeekRecoveryTests.swift */,
 				1FEE61335C613C9E0064D774 /* SearchBrowseMigrationTests.swift */,
@@ -526,6 +536,7 @@
 				6090A546B2B362215C6FFC65 /* StartupNewWindowGateTests.swift */,
 				9804C48C039A4BF44C3FE048 /* SubtitleLiveInfoTests.swift */,
 				633B2386F119633FF803C7DC /* TMDBDetailTests.swift */,
+				B6EB0CBE2416050987504916 /* VolumePersistenceIsolationTests.swift */,
 				2746F98A401F11CA20917248 /* VolumePlaybackTests.swift */,
 			);
 			path = Tests;
@@ -770,6 +781,7 @@
 				74E4C0C02476DCF9A568D763 /* PlayerPictureInPicture.swift */,
 				09B3A04B485AC0C40E01ED89 /* PlayerSeekRecoveryObservation.swift */,
 				5D1F0D067D24D12F1C1B3FA8 /* PlayerSubtitleSupport.swift */,
+				64CE10726FAC3E0DAE3130F9 /* PlayerTrackSelectionCoordinator.swift */,
 				A3FF98807A0D56E338F4B907 /* PlayerWindowPreferenceStore.swift */,
 				D70C6CE807C3203AE860D23C /* SystemMediaProxyResolver.swift */,
 			);
@@ -1185,7 +1197,9 @@
 				743A880401BD7F0D45A31298 /* PlayerSeekStabilityTests.swift in Sources */,
 				14DEED1B69423B1F40F5E921 /* PlayerStatusInteractionTests.swift in Sources */,
 				C5D52067C2653D4CDCBFFD62 /* PlayerStatusPresentationTests.swift in Sources */,
+				DFC8298416C4795927DC0F7B /* PlayerTrackNativeTests.swift in Sources */,
 				476D5B5C64CFF29D2C5CF4D9 /* PlayerTrackPresentationTests.swift in Sources */,
+				0053D15A1801C63065D878A9 /* PlayerTrackSelectionTests.swift in Sources */,
 				FED151F4940D14387B6EE072 /* PosterDiskCacheTests.swift in Sources */,
 				E388E75481C841C7C655C950 /* QuarkSeekRecoveryTests.swift in Sources */,
 				5A7D0C55AA0CB6B952D533A1 /* SearchBrowseMigrationTests.swift in Sources */,
@@ -1193,6 +1207,7 @@
 				E9BEB01DD25B5D4C51A88CDA /* StartupNewWindowGateTests.swift in Sources */,
 				4A9D234CAA22BA3EDE41A7AF /* SubtitleLiveInfoTests.swift in Sources */,
 				F1D2F20C3F1351F40689421B /* TMDBDetailTests.swift in Sources */,
+				E45569B06AEE9A27C080D3D3 /* VolumePersistenceIsolationTests.swift in Sources */,
 				B0E1B8D1FF938EA0478E47D1 /* VolumePlaybackTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -1298,6 +1313,7 @@
 				78C67251E4D7BC137B7B9166 /* PlayerSeekRecoveryObservation.swift in Sources */,
 				6EBEED1671C0BBF284ED1684 /* PlayerSubtitleSupport.swift in Sources */,
 				7087263947F13FB8FC1FC208 /* PlayerTrackPresentation.swift in Sources */,
+				7732C341A090CD8C10DDBD65 /* PlayerTrackSelectionCoordinator.swift in Sources */,
 				34E5D648D9127134BBCC6933 /* PlayerView.swift in Sources */,
 				1413D999363890C932CC3650 /* PlayerWindowPreferenceStore.swift in Sources */,
 				7133DE14D3CE9A20F56BADFF /* PortableBackup.swift in Sources */,
@@ -1396,7 +1412,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 206;
+				CURRENT_PROJECT_VERSION = 207;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -1623,7 +1639,7 @@
 				CLANG_WARN_UNREACHABLE_CODE = YES;
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 206;
+				CURRENT_PROJECT_VERSION = 207;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

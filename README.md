@@ -1,6 +1,6 @@
 # OKVideoMac
 
-The current release candidate is **0.9.3 (Build 206)**, prepared locally to isolate volume-slider updates from browser and player-overlay redraws. It retains Build 205 crash diagnostics and has not been published.
+The current release candidate is **0.9.3 (Build 207)**, prepared locally to isolate audio preference persistence and coalesce session-bound audio/subtitle selection. It retains Build 205 crash diagnostics and has not been published.
 
 The latest stable release is **0.9.3 (Build 204)**, with playback preparation, DASH recovery, stable detail shelves, grouped live channels and danmaku fixes. See [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.3.md).
 

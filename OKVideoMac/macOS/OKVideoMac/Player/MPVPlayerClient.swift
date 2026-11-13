@@ -1632,13 +1632,31 @@ final class MPVPlayerClient: PlayerClient {
         )
     }
 
+    func selectTrack(_ selection: PlaybackTrackSelectionToken) async throws {
+        guard let id = selection.trackID else { throw CancellationError() }
+        let property = selection.type == .audio ? "aid" : selection.type == .subtitle ? "sid" : "vid"
+        try await setStringProperty(property, value: id > 0 ? String(id) : "no",
+            operation: L10n.string("player.operation.select-track", fallback: "Select media track"), selection: selection)
+    }
+
+    private func checkTrackSelection(_ selection: PlaybackTrackSelectionToken) throws {
+        try selection.checkValidity()
+        guard currentRequestID == selection.requestID,
+              activeMediaRequestID == selection.requestID else { throw CancellationError() }
+    }
+
     func addSubtitle(url: URL) async throws {
+        try await addSubtitle(url: url, selection: nil)
+    }
+
+    func addSubtitle(url: URL, selection: PlaybackTrackSelectionToken?) async throws {
         guard url.isFileURL || ["http", "https"].contains(
             url.scheme?.lowercased() ?? ""
         ) else {
             throw AppError.playback(L10n.string("player.subtitle.url.invalid", fallback: "Subtitles must be a user-selected file or an HTTP/HTTPS URL."))
         }
         try await perform { client in
+            if let selection { try self.checkTrackSelection(selection) }
             try self.command(
                 ["sub-add", url.absoluteString, "select"],
                 client: client
@@ -2287,12 +2305,14 @@ final class MPVPlayerClient: PlayerClient {
     private func setStringProperty(
         _ name: String,
         value: String,
-        operation: String
+        operation: String,
+        selection: PlaybackTrackSelectionToken? = nil
     ) async throws {
         guard !value.contains("\0") else {
             throw AppError.playback(L10n.string("player.property.invalid-character", fallback: "The player property contains an invalid character."))
         }
         try await perform { client in
+            if let selection { try self.checkTrackSelection(selection) }
             try name.withCString { namePointer in
                 try value.withCString { valuePointer in
                     try self.library.checked(
@@ -3437,6 +3457,9 @@ final class PlayerLifecycleController {
     private var audioApplication: Task<Void, Error>?
     private var audioApplicationID: UUID?
     var audioCommandSuspensionForTesting: (() async throws -> Void)?
+    #if DEBUG || OKVIDEO_PERFORMANCE_TEST
+    var trackCommandSuspensionForTesting: (() async throws -> Void)?
+    #endif
     var audioPreference: PlaybackAudioPreference { audioPreferences.value }
     var audioPreferenceRevision: UInt64 { audioPreferences.revision }
     private var rememberedSpeed: Double = 1
@@ -3595,6 +3618,7 @@ final class PlayerLifecycleController {
     ) async {
         let ownership = ownershipForRelease(requestID: requestID)
         guard let ownership else { return }
+        endVolumeAdjustment()
         renderPlayer?.cancelPendingMediaLoad(requestID: ownership.requestID)
         let retention = max(0, warmRetentionSeconds)
         do {
@@ -3646,6 +3670,7 @@ final class PlayerLifecycleController {
         guard let ownership = ownershipForRelease(requestID: requestID) else {
             return
         }
+        audioPreferences.flush()
         renderPlayer?.cancelPendingMediaLoad(requestID: ownership.requestID)
         _ = try? await serializeLifecycleTransition { [weak self] in
             guard let self,
@@ -3753,6 +3778,8 @@ final class PlayerLifecycleController {
 
     func rememberVolume(_ volume: Double) { audioPreferences.setVolume(volume) }
     func rememberMuted(_ muted: Bool) { audioPreferences.setMuted(muted) }
+    func beginVolumeAdjustment() { audioPreferences.beginVolumeAdjustment() }
+    func endVolumeAdjustment() { audioPreferences.endVolumeAdjustment() }
 
     func setVolume(_ volume: Double) async throws {
         rememberVolume(volume)
@@ -3823,6 +3850,23 @@ final class PlayerLifecycleController {
 
     func selectTrack(id: Int, type: MediaTrackType) async throws {
         try await requireClient().selectTrack(id: id, type: type)
+    }
+
+    func selectTrack(_ selection: PlaybackTrackSelectionToken) async throws {
+        #if DEBUG || OKVIDEO_PERFORMANCE_TEST
+        try await trackCommandSuspensionForTesting?()
+        #endif
+        try selection.checkValidity()
+        guard !isShuttingDown, playbackIntentRequestID == selection.requestID,
+              let player = currentClient as? MPVPlayerClient else { throw CancellationError() }
+        try await player.selectTrack(selection)
+    }
+
+    func addSubtitle(url: URL, selection: PlaybackTrackSelectionToken) async throws {
+        try selection.checkValidity()
+        guard !isShuttingDown, playbackIntentRequestID == selection.requestID,
+              let player = currentClient as? MPVPlayerClient else { throw CancellationError() }
+        try await player.addSubtitle(url: url, selection: selection)
     }
 
     func addSubtitle(url: URL) async throws {
@@ -3905,6 +3949,7 @@ final class PlayerLifecycleController {
 
     func shutdown() async {
         guard !isShuttingDown else { await lifecycleBarrier?.value; return }
+        endVolumeAdjustment()
         renderPlayer?.cancelPendingMediaLoad(requestID: playbackIntentRequestID)
         isShuttingDown = true
         playbackIntentGeneration &+= 1

@@ -2208,7 +2208,7 @@ private struct PlaybackCommandItems: View {
             Divider()
 
             Button(L10n.string("menu.playback.toggle-subtitles", fallback: "Toggle Subtitles")) {
-                Task { await state.togglePlayerSubtitles() }
+                state.requestPlayerSubtitlesEnabled(!state.playerSubtitlesEnabled)
             }
                 .keyboardShortcut("c", modifiers: [])
                 .disabled(

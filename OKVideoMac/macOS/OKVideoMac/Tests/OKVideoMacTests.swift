@@ -33236,6 +33236,7 @@ final class PlayerAudioMemoryTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = PlaybackAudioPreferenceStore(defaults: defaults)
         let controller = PlayerLifecycleController(mode: .fullDestroy, audioPreferences: store)
+        controller.beginVolumeAdjustment()
         for value in 0...120 { controller.rememberVolume(Double(value)) }
         let apply = Task { try await controller.applyAudioPreference() }
         await controller.closeAfterPlayback(requestID: UUID())
