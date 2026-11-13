@@ -1,6 +1,6 @@
 # Compatibility
 
-0.9.4（Build 208）支持 Apple Silicon / arm64，最低 macOS 12.0。内置字幕及音轨切换覆盖 AAC、SRT、ASS 和 DVD 位图字幕夹具。 见[发布说明](../../../../Docs/RELEASE_NOTES_0.9.4.md)。
+0.9.4（Build 208）支持 Apple Silicon / arm64，最低 macOS 12.0。内置字幕及音轨切换覆盖 AAC、SRT、ASS 和 DVD 位图字幕夹具。见[发布说明](../../../../Docs/RELEASE_NOTES_0.9.4.md)。
 
 2026-11-11 的 0.9.3包含有界播放解析探测、静态 DASH 断流恢复，以及详情页、直播界面和弹幕渲染改进。见[发布说明](../../../../Docs/RELEASE_NOTES_0.9.3.md)。
 
@@ -11,11 +11,9 @@
 0.9.2（198）已正式发布，tag `v0.9.2` 固定 `2bee29fa0f33fb2bec2ccfc30c7c2191323140cc`，汇总公开 0.9.1（182）之后至桌面 Build 195 的修复，以及 SBOM 和媒体测试夹具修正。本轮本地环境 macOS 14.8.9，CI macOS 15.8.2；旧测试／性能数据保持原范围，不宣称本轮覆盖旧系统或完整硬件矩阵。
 
 - 对照版本：0.9.4（Build 208）
-- 目标 tag `v0.9.4`。
-- 目标 tag `v0.9.3`。
 - 最近更新：2026-11-06
-- 当前正式版本：0.9.3（Build 204），Apple Silicon / arm64 / macOS 12.0+
-- 正式 tag `v0.9.3`。本轮结果见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.9.3.md)。
+- 当前正式版本：0.9.4（Build 208），Apple Silicon / arm64 / macOS 12.0+
+- 正式 tag `v0.9.4`。见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.9.4.md)。
 
 历史 0.9.0（155）已正式发布，汇总设置、TMDB、DASH、直播预览、弹幕和稳定性修复。用户曾确认该 0.9.0 候选在 macOS 27.0.1 正常，本机自动化、正式签名产物与安装验证使用 macOS 14.8.9。macOS 12.5.1 历史 SwiftUI 弹窗崩溃未据此宣称解决；以下历史性能测量保持原范围。
 

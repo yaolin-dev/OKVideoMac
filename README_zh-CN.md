@@ -1,8 +1,6 @@
 # OKVideoMac
 
-当前发布候选为 **0.9.4（Build 208）**，修复播放控件卡顿并补充可选崩溃诊断。
-
-最新稳定版本为 **0.9.3（Build 204）**。本版改进播放解析、DASH 续传、详情布局、直播选台和弹幕运动。见[正式验证及 SHA-256](Docs/RELEASE_VALIDATION_0.9.3.md)。
+最新稳定版本为 **0.9.4（Build 208）**。本版修复音量拖动、字幕和音轨切换卡顿，并完善可选崩溃诊断。见[正式验证及 SHA-256](Docs/RELEASE_VALIDATION_0.9.4.md)。
 
 [English](README.md) | 简体中文
 
@@ -18,7 +16,7 @@
 使用 Swift 和 SwiftUI/AppKit 构建。Android 是部分 Java/Dex Provider 按需使用的
 可选兼容层。
 
-最新稳定版本为 **0.9.3（Build 204）**，已完成 Developer ID 签名和 Apple 公证。
+最新稳定版本为 **0.9.4（Build 208）**，已完成 Developer ID 签名和 Apple 公证。
 
 **原生 macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · 多站搜索 · QuickJS/Node Spider**
 
@@ -26,9 +24,9 @@
 
 ### [下载最新稳定版本 →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.9.3（Build 204）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
+**0.9.4（Build 208）** · macOS 12.0+ · 仅支持 Apple Silicon（arm64）。
 
-下载已签名、公证的 [v0.9.3 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.3/OKVideoMac-0.9.3.dmg)，Staple、Gatekeeper、最终 DMG、安装与启动 smoke 均通过。
+下载已签名、公证的 [v0.9.4 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.4/OKVideoMac-0.9.4.dmg)，Staple、Gatekeeper、最终 DMG、安装与启动 smoke 均通过。
 
 打开 DMG，将 `OKVideoMac.app` 拖入 Applications，无需关闭 Gatekeeper 或 SIP。校验和、发布说明、源码、许可证、SBOM 随发布提供。
 
@@ -367,6 +365,8 @@ Managed Runtime 安装与 Android Emulator Session 分开；安装和 Session �
 
 ## 文档
 
+- [0.9.4 发布说明](Docs/RELEASE_NOTES_0.9.4.md)
+- [0.9.4 正式验证及校验和](Docs/RELEASE_VALIDATION_0.9.4.md)
 - [0.9.3 发布说明](Docs/RELEASE_NOTES_0.9.3.md)
 - [0.9.3 正式验证及校验和](Docs/RELEASE_VALIDATION_0.9.3.md)
 - [0.9.2 发布说明](Docs/RELEASE_NOTES_0.9.2.md)

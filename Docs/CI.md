@@ -1,5 +1,7 @@
 # CI: coverage and local verification
 
+Build 208 的[准确构建提交 CI](https://github.com/yaolin-dev/OKVideoMac/actions/runs/43438529734)七项通过。覆盖范围见[正式验证](RELEASE_VALIDATION_0.9.4.md)。
+
 **2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
 [Workflow](../.github/workflows/ci.yml) · [Runs](https://github.com/yaolin-dev/OKVideoMac/actions/workflows/ci.yml) · [Contributing](../CONTRIBUTING.md)

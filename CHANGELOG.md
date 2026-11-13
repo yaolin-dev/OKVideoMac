@@ -8,7 +8,7 @@
 - Coalesce rapid subtitle and audio track changes, skip duplicate selections, and discard callbacks for retired playback sessions.
 - With crash reporting enabled, include available original Objective-C exception details, the first throw stack, and a bounded sequence of sanitized operation types.
 
-See [release notes](Docs/RELEASE_NOTES_0.9.4.md).
+See [release notes](Docs/RELEASE_NOTES_0.9.4.md) and [release verification and checksums](Docs/RELEASE_VALIDATION_0.9.4.md).
 
 ## [0.9.3] - 2026-11-11
 

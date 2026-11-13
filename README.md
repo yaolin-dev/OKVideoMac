@@ -1,8 +1,6 @@
 # OKVideoMac
 
-The current release candidate is **0.9.4 (Build 208)**, with playback control fixes and expanded opt-in crash diagnostics.
-
-The latest stable release is **0.9.3 (Build 204)**, with playback preparation, DASH recovery, stable detail shelves, grouped live channels and danmaku fixes. See [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.3.md).
+The latest stable release is **0.9.4 (Build 208)**. It improves volume dragging and track switching and expands opt-in crash diagnostics. See [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.4.md).
 
 English | [简体中文](README_zh-CN.md)
 
@@ -18,7 +16,7 @@ selected TVBox/CatVod/CatPaw-style providers, and libmpv playback.**
 Built with Swift and SwiftUI/AppKit. Android is an optional compatibility layer
 for selected Java/Dex providers.
 
-The latest stable release is **0.9.3 (Build 204)**, Developer ID signed and Apple-notarized.
+The latest stable release is **0.9.4 (Build 208)**, Developer ID signed and Apple-notarized.
 
 **Native macOS · Xtream · IPTV/VOD · M3U/XMLTV · libmpv · Multi-provider Search · QuickJS/Node Spiders**
 
@@ -26,9 +24,9 @@ The latest stable release is **0.9.3 (Build 204)**, Developer ID signed and Appl
 
 ### [Download the latest stable release →](https://github.com/yaolin-dev/OKVideoMac/releases/latest)
 
-**0.9.3 (Build 204)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
+**0.9.4 (Build 208)** · macOS 12.0+ · Apple Silicon (`arm64`) only.
 
-Download the Developer ID signed and Apple-notarized [v0.9.3 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.3/OKVideoMac-0.9.3.dmg). Stapling, Gatekeeper, final DMG, installation and startup smoke checks passed.
+Download the Developer ID signed and Apple-notarized [v0.9.4 DMG](https://github.com/yaolin-dev/OKVideoMac/releases/download/v0.9.4/OKVideoMac-0.9.4.dmg). Stapling, Gatekeeper, final DMG, installation and startup smoke checks passed.
 
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs and notices accompany the release.
 
@@ -405,6 +403,8 @@ The 0.9.2 / Build 198 DMG passed Release packaging, Developer ID / Hardened Runt
 
 ## Documentation
 
+- [0.9.4 release notes](Docs/RELEASE_NOTES_0.9.4.md)
+- [0.9.4 release verification and checksums](Docs/RELEASE_VALIDATION_0.9.4.md)
 - [0.9.3 release notes](Docs/RELEASE_NOTES_0.9.3.md)
 - [0.9.3 release verification and checksums](Docs/RELEASE_VALIDATION_0.9.3.md)
 - [0.9.2 release notes](Docs/RELEASE_NOTES_0.9.2.md)

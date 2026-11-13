@@ -1,12 +1,14 @@
 # Release SBOM Process
 
-0.9.4（Build 208）的 SBOM 使用 Android Bridge 0.3.59（71）和现有原生依赖锁。 见[发布说明](RELEASE_NOTES_0.9.4.md)。
+0.9.4（Build 208）已正式发布，标签 `v0.9.4` 固定构建提交 `89455caa1e59fe8f798798b84374420fe0c65112`。最终 DMG SHA-256 为 `2d2ffd84375495c3ce9af815dae2f768b0ea50ece7247ea99b48af9cf4c80813`。见[正式验证](RELEASE_VALIDATION_0.9.4.md)。
+
+0.9.4（Build 208）的 SBOM 使用 Android Bridge 0.3.59（71）和现有原生依赖锁。见[发布说明](RELEASE_NOTES_0.9.4.md)。
 
 **2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
 Date: 2026-11-11
 
-Current published release: OKVideoMac 0.9.3 (Build 204), Android Bridge 0.3.59 (71). The Android SBOMs derive their aggregate versions and package URLs from the Bridge source and verify the packaged APK hash. Build 204 passed macOS and Android SBOM verification. See [release validation](RELEASE_VALIDATION_0.9.3.md) for the four public SBOM checksums.
+Previous published release: OKVideoMac 0.9.3 (Build 204), Android Bridge 0.3.59 (71). The Android SBOMs derive their aggregate versions and package URLs from the Bridge source and verify the packaged APK hash. Build 204 passed macOS and Android SBOM verification. See [release validation](RELEASE_VALIDATION_0.9.3.md) for the four public SBOM checksums.
 
 Every packaged release contains four machine-readable documents under
 `Contents/Resources/Legal/Compliance/SBOM/`:
