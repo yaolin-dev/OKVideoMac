@@ -1,6 +1,6 @@
-# OKVideoMac 0.9.3（Build 205）发布就绪记录
+# OKVideoMac 0.9.3（Build 206）发布就绪记录
 
-Build 205 是基于已发布 Build 204 的本地崩溃诊断候选，尚未公开发布。真实异常、重抛及 SIGABRT 的本机恢复与隔离上传验收通过；最终 Release 验证和后台符号就绪分别以该构建的产物及 receipt 为准。以下为历史 Build 204 的正式发布记录，不代表 Build 205 已通过公开发布门禁。
+Build 206 基于本地诊断候选 Build 205，修复音量变化的全局刷新传播，尚未公开发布。测试、Release 包签名及安装结果以 output/volume-playback-206/Verification 的记录为准。真实鼠标自动化不可用，受控 tracking 模式测试与真实用户播放验收分开记录。以下为历史 Build 204 的正式发布记录，不代表 Build 206 已通过公开发布门禁。
 
 ## 已发布 Build 204
 

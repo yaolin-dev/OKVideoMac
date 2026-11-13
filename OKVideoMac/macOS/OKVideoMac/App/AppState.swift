@@ -5258,6 +5258,11 @@ final class WatchHistoryState: ObservableObject {
 @MainActor
 final class PlayerSnapshotState: ObservableObject {
     @Published private(set) var snapshot: PlayerSnapshot
+    private(set) var presentationRevision: UInt64 = 0
+    private func invalidatePresentation() {
+        presentationRevision &+= 1
+        objectWillChange.send()
+    }
     private(set) var requestedSeek: PlayerSeekTransaction?
 
     var pendingSeekTarget: TimeInterval? {
@@ -5270,16 +5275,16 @@ final class PlayerSnapshotState: ObservableObject {
     var displayedDuration: TimeInterval { recoveryDisplay?.1 ?? snapshot.duration }
     func beginRecovery(_ checkpoint: NodePlaybackRecoveryCheckpoint, duration: TimeInterval) {
         resetSeek()
-        objectWillChange.send()
+        invalidatePresentation()
         recoveryDisplay = (checkpoint, duration)
     }
     func endRecovery() {
         guard recoveryDisplay != nil else { return }
-        objectWillChange.send(); recoveryDisplay = nil
+        invalidatePresentation(); recoveryDisplay = nil
     }
 
     func beginSeek(id: UUID, target: TimeInterval) {
-        objectWillChange.send()
+        invalidatePresentation()
         requestedSeek = .init(id: id, target: target)
     }
 
@@ -5293,7 +5298,7 @@ final class PlayerSnapshotState: ObservableObject {
 
     func resetSeek() {
         guard requestedSeek != nil || recoveryDisplay != nil else { return }
-        objectWillChange.send(); requestedSeek = nil; recoveryDisplay = nil
+        invalidatePresentation(); requestedSeek = nil; recoveryDisplay = nil
     }
 
     init(snapshot: PlayerSnapshot = PlayerSnapshot()) {
@@ -5768,7 +5773,11 @@ final class AppState: ObservableObject {
         return presentation
     }
 
-    @Published private(set) var playerAudioPreference = PlaybackAudioPreference()
+    let playerAudioState = PlayerAudioState()
+    private(set) var playerAudioPreference: PlaybackAudioPreference {
+        get { playerAudioState.preference }
+        set { playerAudioState.update(newValue) }
+    }
     private var audioErrorRevision: UInt64?
     private let environment: AppEnvironment?
     private let liveReferenceStore: SQLiteStore?
@@ -6517,7 +6526,6 @@ final class AppState: ObservableObject {
         self.settingsXtreamHTTPClient = xtreamHTTPClient ?? environment?.xtreamHTTPClient
         self.settingsConfigurationLoader = configurationLoader
         self.settingsLiveSourceLoader = liveSourceLoader ?? environment?.liveSourceLoader
-        self.playerAudioPreference = environment?.player.audioPreference ?? .init()
         self.playerHardwareDecoding = environment?.player.rememberedHardwareDecoding ?? true
         self.configurationRefreshTimeout = configurationRefreshTimeout.isFinite ? min(120, max(0.001, configurationRefreshTimeout)) : 30
         self.configurationActionTimeout = configurationActionTimeout.isFinite ? min(600, max(0.001, configurationActionTimeout)) : 90
@@ -6530,6 +6538,7 @@ final class AppState: ObservableObject {
         providers = initialProviders
         playerRenderClient = environment?.player.renderPlayer
         presentedError = startupError
+        self.playerAudioPreference = environment?.player.audioPreference ?? .init()
         self.playerSnapshot.volume = environment?.player.audioPreference.volume ?? 100
         self.playerSnapshot.isMuted = environment?.player.audioPreference.muted ?? false
         tmdbSessionObservation = NotificationCenter.default.publisher(for: .tmdbSessionWillChange, object: self.tmdbRuntime)
@@ -17973,8 +17982,8 @@ final class AppState: ObservableObject {
         value.volume = min(130, max(0, volume))
         if value.volume > 0 { value.muted = false }
         playerAudioPreference = environment?.player.audioPreference ?? value
-        playerSnapshot.volume = playerAudioPreference.volume
-        playerSnapshot.isMuted = playerAudioPreference.muted
+        // Audio controls display the synchronous user intent. The playback
+        // snapshot continues to represent acknowledgements from the engine.
         return applyPlayerAudioPreference()
     }
 
@@ -17988,7 +17997,6 @@ final class AppState: ObservableObject {
         let muted = !playerAudioPreference.muted
         environment?.player.rememberMuted(muted)
         playerAudioPreference.muted = muted
-        playerSnapshot.isMuted = muted
         await applyPlayerAudioPreference().value
     }
 

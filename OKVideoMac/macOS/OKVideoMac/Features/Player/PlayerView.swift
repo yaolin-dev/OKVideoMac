@@ -223,9 +223,9 @@ struct PlayerView: View {
             }
             updateTooltipAvailability()
         }
-        .onChange(of: state.playerAudioPreference.volume) { _ in
+        .onReceive(state.playerAudioState.$preference.map(\.volume).removeDuplicates().dropFirst()) { _ in
             guard !isFullScreenTransitioning, state.isPlayerWindowKey || isCompactVolumePresented else { return }
-            isCompactVolumePresented = true
+            if !isCompactVolumePresented { isCompactVolumePresented = true }
             keepControlsVisible()
             if !volumeHovering && !isVolumeEditing { scheduleVolumeHide(delay: 900_000_000) }
         }
@@ -767,25 +767,27 @@ struct PlayerView: View {
     }
 
     private var compactVolumeButton: some View {
-        Button {
-            keepControlsVisible()
-            Task { await state.togglePlayerMute() }
-        } label: {
-            utilityMenuIcon(state.playerAudioPreference.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(state.playerAudioPreference.muted
-            ? L10n.string("player.unmute", fallback: "Unmute")
-            : L10n.string("player.mute", fallback: "Mute"))
-        .accessibilityIdentifier("player.volume")
-        .playerPresentationProbe("volume-button")
-        .background(PlayerVolumeHoverTracking(onHover: { volumeHoverChanged($0) }))
-        .anchorPreference(key: PlayerVolumeOverlayAnchorKey.self, value: .bounds) { $0 }
-        .contextMenu {
-            Button(L10n.string("player.volume", fallback: "Volume")) {
-                volumeHideTask?.cancel()
-                isCompactVolumePresented = true
+        PlayerAudioPreferenceView(model: state.playerAudioState) { preference in
+            Button {
                 keepControlsVisible()
+                Task { await state.togglePlayerMute() }
+            } label: {
+                utilityMenuIcon(preference.muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(preference.muted
+                ? L10n.string("player.unmute", fallback: "Unmute")
+                : L10n.string("player.mute", fallback: "Mute"))
+            .accessibilityIdentifier("player.volume")
+            .playerPresentationProbe("volume-button")
+            .background(PlayerVolumeHoverTracking(onHover: { volumeHoverChanged($0) }))
+            .anchorPreference(key: PlayerVolumeOverlayAnchorKey.self, value: .bounds) { $0 }
+            .contextMenu {
+                Button(L10n.string("player.volume", fallback: "Volume")) {
+                    volumeHideTask?.cancel()
+                    isCompactVolumePresented = true
+                    keepControlsVisible()
+                }
             }
         }
     }
@@ -947,42 +949,44 @@ struct PlayerView: View {
     }
 
     private var volumeControls: some View {
-        HStack(spacing: 7) {
-            playerIconButton(
-                systemImage: state.playerAudioPreference.muted
-                    ? "speaker.slash.fill"
-                    : "speaker.wave.2.fill",
-                help: state.playerAudioPreference.muted
-                    ? L10n.string("player.unmute", fallback: "Unmute")
-                    : L10n.string("player.mute", fallback: "Mute")
-            ) {
-                Task { await state.togglePlayerMute() }
-            }
-
-            Slider(
-                value: Binding(
-                    get: { state.playerAudioPreference.volume },
-                    set: enqueuePlayerVolume
-                ),
-                in: 0...130,
-                onEditingChanged: { editing in
-                    isVolumeEditing = editing
-                    if editing {
-                        volumeHideTask?.cancel()
-                        keepControlsVisible()
-                    } else {
-                        enqueuePlayerVolume(
-                            state.playerAudioPreference.volume
-                        )
-                        if !volumeHovering { scheduleVolumeHide() }
-                        scheduleControlsHide()
-                    }
+        PlayerAudioPreferenceView(model: state.playerAudioState) { preference in
+            HStack(spacing: 7) {
+                playerIconButton(
+                    systemImage: preference.muted
+                        ? "speaker.slash.fill"
+                        : "speaker.wave.2.fill",
+                    help: preference.muted
+                        ? L10n.string("player.unmute", fallback: "Unmute")
+                        : L10n.string("player.mute", fallback: "Mute")
+                ) {
+                    Task { await state.togglePlayerMute() }
                 }
-            )
-            .tint(.white)
-            .controlSize(.mini)
-            .frame(width: 76)
-            .accessibilityLabel(L10n.string("player.volume", fallback: "Volume"))
+
+                Slider(
+                    value: Binding(
+                        get: { state.playerAudioPreference.volume },
+                        set: enqueuePlayerVolume
+                    ),
+                    in: 0...130,
+                    onEditingChanged: { editing in
+                        isVolumeEditing = editing
+                        if editing {
+                            volumeHideTask?.cancel()
+                            keepControlsVisible()
+                        } else {
+                            enqueuePlayerVolume(
+                                state.playerAudioPreference.volume
+                            )
+                            if !volumeHovering { scheduleVolumeHide() }
+                            scheduleControlsHide()
+                        }
+                    }
+                )
+                .tint(.white)
+                .controlSize(.mini)
+                .frame(width: 76)
+                .accessibilityLabel(L10n.string("player.volume", fallback: "Volume"))
+            }
         }
     }
 
@@ -4600,4 +4604,12 @@ struct PlayerChannelSearchField: NSViewRepresentable {
             return true
         }
     }
+}
+
+/// Only these small subtrees observe high-frequency audio changes. Keeping
+/// the publisher out of AppState also leaves browser windows untouched.
+private struct PlayerAudioPreferenceView<Content: View>: View {
+    @ObservedObject var model: PlayerAudioState
+    let content: (PlaybackAudioPreference) -> Content
+    var body: some View { content(model.preference) }
 }
