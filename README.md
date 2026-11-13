@@ -1,6 +1,6 @@
 # OKVideoMac
 
-The current release candidate is **0.9.3 (Build 207)**, prepared locally to isolate audio preference persistence and coalesce session-bound audio/subtitle selection. It retains Build 205 crash diagnostics and has not been published.
+The current release candidate is **0.9.4 (Build 208)**, with playback control fixes and expanded opt-in crash diagnostics.
 
 The latest stable release is **0.9.3 (Build 204)**, with playback preparation, DASH recovery, stable detail shelves, grouped live channels and danmaku fixes. See [verification and SHA-256](Docs/RELEASE_VALIDATION_0.9.3.md).
 
@@ -33,6 +33,14 @@ Download the Developer ID signed and Apple-notarized [v0.9.3 DMG](https://github
 Open the DMG and drag `OKVideoMac.app` to Applications. You do not need to disable Gatekeeper or SIP. Checksums, release notes, source archives, SBOMs and notices accompany the release.
 
 > OKVideoMac is a player and provider client. It does not include third-party video sources, accounts, cookies, parsing services or DRM keys.
+
+## New in 0.9.4
+
+- Keep playback responsive when dragging volume by isolating audio preferences and saving the final value after the gesture.
+- Coalesce rapid subtitle and audio track changes, skip duplicate selections, and discard callbacks for retired playback sessions.
+- With crash reporting enabled, include available original Objective-C exception details, the first throw stack, and a bounded sequence of sanitized operation types.
+
+[Read the 0.9.4 release notes](Docs/RELEASE_NOTES_0.9.4.md).
 
 ## New in 0.9.3
 

@@ -72,6 +72,19 @@ final class DiagnosticPayloadTests: XCTestCase {
         XCTAssertFalse(value.isValid)
     }
 
+    func testExceptionTextRedactsAuthenticationHeadersAndQuotedCredentials() {
+        let raw = """
+        Request failed
+        Authorization: Bearer bearer-value
+        Proxy-Authorization: Basic basic-value
+        Cookie: session=cookie-value; other=second-value
+        password="pass phrase with spaces"
+        """
+        let safe = ExceptionRedactor.reason(raw)
+        XCTAssertEqual(safe, "Request failed [CREDENTIAL] [CREDENTIAL] [CREDENTIAL] [CREDENTIAL]")
+        XCTAssertEqual(ExceptionRedactor.reason(safe), safe)
+    }
+
     func testTrailIsBoundedOrderedAndCoalescesOnlyNoisyInput() {
         var snapshots: [[CrashOperation]] = []
         let trail = CrashOperationTrail { snapshots.append($0) }

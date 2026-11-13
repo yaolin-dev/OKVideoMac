@@ -1,8 +1,4 @@
-# OKVideoMac 0.9.3（Build 207）发布就绪记录
-
-Build 207 基于本地 Build 206，修复音量共享偏好通知路径，并增加字幕与音轨切换的合并及会话校验。测试、签名、公证和安装以 output/track-switch-207/Verification 记录为准。以下为历史 Build 204 的正式发布记录，不代表本候选已公开发布。
-
-## 已发布 Build 204
+# OKVideoMac 0.9.3（Build 204）发布就绪记录
 
 以已发布的 0.9.2（Build 198）为对照，汇总本地 Build 199 至 203 验证过的开源改动。范围见[发布说明](RELEASE_NOTES_0.9.3.md)。
 

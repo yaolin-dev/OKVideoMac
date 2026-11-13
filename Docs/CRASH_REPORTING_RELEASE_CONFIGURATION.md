@@ -24,9 +24,9 @@ DSN 会随官方 App 分发，因此可以从安装包读取。它只用于提�
 
 正式打包后使用 `Scripts/upload-crash-symbols.py --app APP --archive ARCHIVE --config PRIVATE_SYMBOLS_ENV --cli SENTRY_CLI --receipt RECEIPT.json` 执行已授权的符号上传。脚本先重新验证最终 App 和归档 UUID/hash，只上传匹配的 DWARF，禁止 source bundle，并等待服务端处理完成。私有配置仅包含 SENTRY_ORG、SENTRY_PROJECT、SENTRY_AUTH_TOKEN，须位于仓库外且仅属主可读。未取得成功 receipt 不声明后台符号已就绪。本地归档、CLI 接收与实际事件符号化分别记录，第三方缺失符号和旧事件回填不视为已解决。
 
-## Build 205 诊断字段
+## 0.9.4 诊断字段
 
-诊断记录在原有信号、线程、模块与版本信息之外，保留 PLCrashReporter 提供的 Objective-C 异常名称、脱敏后的原因和首次抛出栈。Sentry 的 exception 栈使用首次抛出栈，threads 仍保存最终终止现场；没有原始异常或原始栈时明确标记不可用，不用终止栈冒充首次抛出。原因字符串限长 2048 字符，移除 URL、路径、邮箱、凭据、引号内值和对象地址；完整原文仅留在本机原生报告。
+诊断记录在原有信号、线程、模块与版本信息之外，保留 PLCrashReporter 提供的 Objective-C 异常名称、脱敏后的原因和首次抛出栈。Sentry 的 exception 栈使用首次抛出栈，threads 仍保存最终终止现场；没有原始异常或原始栈时明确标记不可用，不用终止栈冒充首次抛出。原因字符串限长 2048 字符，移除 URL、路径、邮箱、凭据（含 Bearer、Basic 及 Cookie 请求头）、引号内值和对象地址；完整原文仅留在本机原生报告。
 
 原生报告 customData 在启用崩溃处理器前一次性写入版本和随机会话标识，运行期间保持不变。最近 32 条诊断操作以本机原子快照保存，恢复时只读取原报告对应的会话，重启后不会混入新会话。PLCrashReporter 1.12.2 的 customData setter 会释放旧缓冲区，因此不用于运行期间的动态操作记录；快照写入途中崩溃仍可读取上一次完整记录。快照仅属主可读，最多 3 份、7 天，关闭上报执行清理时一并清除。仅允许固定枚举的页面、详情、搜索、播放状态、输入类别和窗口事件；不读输入文字、片名、地址、控件文本或稳定用户标识。操作序列是排查线索，不把最后一条状态变化自动判定为根因。观察器不发布业务状态、不触发布局、不拦截或修改输入。
 

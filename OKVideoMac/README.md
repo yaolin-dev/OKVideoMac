@@ -9,10 +9,20 @@ Staple 和 Gatekeeper 验证后再通过 GitHub Release 分发。
 项目不内置内容源、账号、Cookie、DRM key 或私人服务配置。请只导入你有权使用
 且信任的配置、脚本和媒体。
 
+## 0.9.4
+
+- 隔离音量偏好，拖动时即时调节，手势结束后保存最终值，避免详情页频繁刷新造成播放卡顿。
+- 合并快速的字幕和音轨切换，跳过重复选择，过滤已结束播放会话的回调。
+- 用户启用崩溃上报后，提供可用的 Objective-C 原始异常信息、首次抛出栈和有限的脱敏操作类型。
+
+[发布说明](../Docs/RELEASE_NOTES_0.9.4.md)
+
 ## 当前版本
 
-- 当前发布候选：0.9.3（Build 207），本地音量偏好隔离与字幕、音轨切换修复，尚未公开发布。
-- 候选 source release index：`OKVideoMac-0.9.3-build207-SOURCE_RELEASE_INDEX.json`。下方 Build 204 的发布记录保持原范围。
+- 当前发布候选：0.9.4（Build 208）。
+- 目标 tag：`v0.9.4`。
+- 候选源码索引：`OKVideoMac-0.9.4-build208-SOURCE_RELEASE_INDEX.json`。
+- 见[发布就绪记录](../Docs/RELEASE_READINESS_0.9.4.md)。
 
 - 当前稳定版本：0.9.3（Build 204）
 - Tag：`v0.9.3`，固定 release commit `5b3c2206fd77af20a1a207b0219846928a27e1a7`。

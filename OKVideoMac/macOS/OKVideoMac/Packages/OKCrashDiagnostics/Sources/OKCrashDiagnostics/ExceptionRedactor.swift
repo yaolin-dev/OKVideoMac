@@ -14,10 +14,12 @@ enum ExceptionRedactor {
     static func reason(_ value: String) -> String {
         var result = String(value.prefix(8192))
         let rules: [(String, String)] = [
+            (#"(?i)\b(?:set-cookie|cookie)[ \t]*:[ \t]*[^\r\n]+"#, "[CREDENTIAL]"),
+            (#"(?i)\b(?:authorization|proxy-authorization)[ \t]*[:=][ \t]*(?:bearer|basic)[ \t]+[^\s,;<>\"']+"#, "[CREDENTIAL]"),
+            (#"(?i)\b(?:authorization|bearer|password|passwd|token|secret|api[_-]?key|cookie)[ \t]*(?:[:=][ \t]*|[ \t]+)(?:\"[^\"]*\"|'[^']*'|[^\s,;<>]+)"#, "[CREDENTIAL]"),
             (#"[\x00-\x1F\x7F]"#, " "),
             (#"(?i)\b(?:https?|file|ftp|smb|rtsp|rtmp)://[^\s<>\"']+"#, "[URL]"),
             (#"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"#, "[EMAIL]"),
-            (#"(?i)\b(?:authorization|bearer|password|passwd|token|secret|api[_-]?key|cookie)\s*[:= ]\s*[^\s,;<>]+"#, "[CREDENTIAL]"),
             (#"(?<![A-Za-z0-9])/(?:Users|Volumes|private|var|tmp|Applications|Library|System|home|mnt)/[^\s<>\"']*"#, "[PATH]"),
             (#"(?i)\b[A-Z]:\\[^\s<>\"']+"#, "[PATH]"),
             (#"\"[^\"]*\"|'[^']*'"#, "[QUOTED]"),

@@ -1,5 +1,7 @@
 # Release SBOM Process
 
+0.9.4（Build 208）的 SBOM 使用 Android Bridge 0.3.59（71）和现有原生依赖锁。 见[发布说明](RELEASE_NOTES_0.9.4.md)。
+
 **2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
 Date: 2026-11-11

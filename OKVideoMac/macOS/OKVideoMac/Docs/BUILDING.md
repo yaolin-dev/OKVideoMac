@@ -1,5 +1,7 @@
 # Building OKVideoMac
 
+0.9.4（Build 208）使用既有 arm64 Release 构建和 distribution 流程，Android Bridge 为 0.3.59（71）。 见[发布说明](../../../../Docs/RELEASE_NOTES_0.9.4.md)。
+
 **2026-11-05：0.9.2 / Build 198 已正式发布。** 签名、公证 Accepted、staple、Gatekeeper、安装、准确提交 CI 及 16 项匿名公开下载均通过。完整结果与 SHA-256 见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.9.2.md)；下方历史记录保留各自范围。
 
 当前正式版本为 0.9.3（Build 204），Bridge 0.3.59（71），tag `v0.9.3` 固定 `5b3c2206fd77af20a1a207b0219846928a27e1a7`。从干净提交执行 `package-app.sh --mode distribution --notarize --crash-config FILE`，通过签名、公证、staple、Gatekeeper、安装、CI 和公开资产检查。见[正式验证](../../../../Docs/RELEASE_VALIDATION_0.9.3.md)。
